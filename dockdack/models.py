@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -59,6 +60,26 @@ class StockInfo:
     english_name: str | None = None
     previous_close: Decimal | None = None
     is_etf: bool | None = None
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class DailyBar:
+    market: Market
+    symbol: str
+    exchange: str
+    trade_date: date
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    volume: Decimal | None
+    currency: str
+    trade_value: Decimal | None = None
+    change: Decimal | None = None
+    change_rate: Decimal | None = None
+    adjustment_type: str | None = None
+    adjustment_rate: Decimal | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 

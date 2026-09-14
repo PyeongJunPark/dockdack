@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from dockdack.conditions import ConnectFactory, KiwoomConditionClient
 from dockdack.config import KiwoomConfig
@@ -13,6 +14,7 @@ from dockdack.models import (
     AccountSnapshot,
     CancelResult,
     ConditionMatch,
+    DailyBar,
     DomesticExchange,
     Market,
     OpenOrder,
@@ -223,6 +225,113 @@ class KiwoomBroker:
                     if limit is not None and len(stocks) >= limit:
                         return tuple(stocks)
         return tuple(stocks)
+
+    def iter_daily_bars_domestic(
+        self,
+        symbol: str,
+        *,
+        exchange: DomesticExchange | str = DomesticExchange.KRX,
+        base_date: date | str | None = None,
+        adjusted: bool = True,
+        max_pages: int = 1_000,
+    ) -> Iterator[tuple[DailyBar, ...]]:
+        """Yield every Kiwoom daily-chart page available for a Korean symbol."""
+        selected_exchange = _domestic_exchange(exchange)
+        api_symbol = _domestic_api_symbol(symbol, selected_exchange)
+        body = {
+            "stk_cd": api_symbol,
+            "base_dt": _api_date(base_date),
+            "upd_stkpc_tp": "1" if adjusted else "0",
+        }
+        for page in self._domestic_http.iter_pages(
+            api_id="ka10081",
+            path="/api/dostk/chart",
+            body=body,
+            max_pages=max_pages,
+        ):
+            yield tuple(
+                _domestic_daily_bar(row, symbol, selected_exchange)
+                for row in _records(page.body.get("stk_dt_pole_chart_qry", []))
+                if row.get("dt")
+            )
+
+    def daily_bars_domestic(
+        self,
+        symbol: str,
+        *,
+        exchange: DomesticExchange | str = DomesticExchange.KRX,
+        base_date: date | str | None = None,
+        adjusted: bool = True,
+        max_pages: int = 1_000,
+    ) -> tuple[DailyBar, ...]:
+        """Return Korean daily OHLCV bars, newest page first from Kiwoom."""
+        return tuple(
+            bar
+            for page in self.iter_daily_bars_domestic(
+                symbol,
+                exchange=exchange,
+                base_date=base_date,
+                adjusted=adjusted,
+                max_pages=max_pages,
+            )
+            for bar in page
+        )
+
+    def iter_daily_bars_us(
+        self,
+        symbol: str,
+        *,
+        exchange: USExchange | str,
+        start_date: date | str | None = None,
+        adjusted: bool = True,
+        apply_exchange_rate: bool = False,
+        max_pages: int = 1_000,
+    ) -> Iterator[tuple[DailyBar, ...]]:
+        """Yield every Kiwoom daily-chart page available for a US symbol."""
+        selected_exchange = _us_exchange(exchange, allow_all=False)
+        body = {
+            "stex_tp": selected_exchange.value,
+            "stk_cd": _symbol(symbol),
+            "upd_stkpc_tp": "1" if adjusted else "0",
+            "exrt_appl_tp": "1" if apply_exchange_rate else "0",
+        }
+        if start_date is not None:
+            body["strt_dt"] = _api_date(start_date)
+        for page in self._us_http.iter_pages(
+            api_id="usa06012",
+            path="/api/us/chart",
+            body=body,
+            max_pages=max_pages,
+        ):
+            yield tuple(
+                _us_daily_bar(row, symbol, selected_exchange, apply_exchange_rate)
+                for row in _records(page.body.get("result_list", []))
+                if row.get("dt")
+            )
+
+    def daily_bars_us(
+        self,
+        symbol: str,
+        *,
+        exchange: USExchange | str,
+        start_date: date | str | None = None,
+        adjusted: bool = True,
+        apply_exchange_rate: bool = False,
+        max_pages: int = 1_000,
+    ) -> tuple[DailyBar, ...]:
+        """Return US daily OHLCV bars, newest page first from Kiwoom."""
+        return tuple(
+            bar
+            for page in self.iter_daily_bars_us(
+                symbol,
+                exchange=exchange,
+                start_date=start_date,
+                adjusted=adjusted,
+                apply_exchange_rate=apply_exchange_rate,
+                max_pages=max_pages,
+            )
+            for bar in page
+        )
 
     def search_stocks(
         self,
@@ -938,6 +1047,75 @@ def _stock_matches(stock: StockInfo, query: str) -> bool:
 def _validate_limit(limit: int | None) -> None:
     if limit is not None and limit <= 0:
         raise ValueError("limit은 1 이상이어야 합니다.")
+
+
+def _api_date(value: date | str | None) -> str:
+    if value is None:
+        return date.today().strftime("%Y%m%d")
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    text = str(value).strip()
+    try:
+        datetime.strptime(text, "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError("날짜는 YYYYMMDD 형식이어야 합니다.") from exc
+    return text
+
+
+def _trade_date(value: Any) -> date:
+    try:
+        return datetime.strptime(str(value).strip(), "%Y%m%d").date()
+    except ValueError as exc:
+        raise ValueError(f"키움 일봉 응답의 날짜 형식이 잘못되었습니다: {value!r}") from exc
+
+
+def _domestic_daily_bar(
+    row: dict[str, Any],
+    fallback_symbol: str,
+    exchange: DomesticExchange,
+) -> DailyBar:
+    return DailyBar(
+        market=Market.DOMESTIC,
+        symbol=_clean_domestic_symbol(fallback_symbol),
+        exchange=exchange.value,
+        trade_date=_trade_date(row.get("dt")),
+        open=_decimal(row.get("open_pric"), absolute=True),
+        high=_decimal(row.get("high_pric"), absolute=True),
+        low=_decimal(row.get("low_pric"), absolute=True),
+        close=_decimal(row.get("cur_prc"), absolute=True),
+        volume=_decimal(row.get("trde_qty"), absolute=True),
+        currency="KRW",
+        trade_value=_decimal(row.get("trde_prica"), absolute=True),
+        change=_decimal(row.get("pred_pre")),
+        change_rate=_decimal(row.get("trde_tern_rt")),
+        raw=row,
+    )
+
+
+def _us_daily_bar(
+    row: dict[str, Any],
+    fallback_symbol: str,
+    exchange: USExchange,
+    apply_exchange_rate: bool,
+) -> DailyBar:
+    return DailyBar(
+        market=Market.US,
+        symbol=_symbol(fallback_symbol),
+        exchange=exchange.value,
+        trade_date=_trade_date(row.get("dt")),
+        open=_decimal(row.get("open_pric"), absolute=True),
+        high=_decimal(row.get("high_pric"), absolute=True),
+        low=_decimal(row.get("low_pric"), absolute=True),
+        close=_decimal(row.get("cur_prc"), absolute=True),
+        volume=_decimal(row.get("acc_trde_qty"), absolute=True),
+        currency="KRW" if apply_exchange_rate else "USD",
+        trade_value=_decimal(row.get("acc_trde_prica"), absolute=True),
+        change=_decimal(row.get("pred_pre")),
+        change_rate=_decimal(row.get("flu_rt")),
+        adjustment_type=str(row.get("upd_stkpc_tp") or "") or None,
+        adjustment_rate=_decimal(row.get("upd_rt")),
+        raw=row,
+    )
 
 
 def _domestic_order_type(value: str | None, price: Decimal | None) -> str:
