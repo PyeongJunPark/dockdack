@@ -17,6 +17,7 @@ from dockdack.models import (
     Market,
     OpenOrder,
     OrderRequest,
+    OrderExecution,
     OrderResult,
     OrderSide,
     Position,
@@ -122,6 +123,26 @@ class KiwoomBroker:
             volume=_decimal(body.get("acc_trde_qty"), absolute=True),
             raw=body,
         )
+
+    def resolve_us_exchange(self, symbol: str) -> USExchange:
+        """Resolve an exact ticker using Kiwoom's exchange lookup (usa10098)."""
+        ticker = _symbol(symbol)
+        body = self._us_http.request(
+            api_id="usa10098",
+            path="/api/us/stkinfo",
+            body={"stk_cd": ticker},
+        ).body
+        exchanges = {
+            _us_exchange(str(row.get("stex_tp", "")), allow_all=False)
+            for row in _records(body.get("list", []), _US_STOCK_KEYS)
+            if str(row.get("stk_cd", "")).strip().upper() == ticker
+        }
+        if len(exchanges) != 1:
+            raise ValueError(
+                f"{ticker}의 거래소를 하나로 확인할 수 없습니다. "
+                "티커를 확인하거나 --exchange NASDAQ/NYSE/AMEX를 지정하세요."
+            )
+        return exchanges.pop()
 
     def get_quote(
         self,
@@ -421,6 +442,48 @@ class KiwoomBroker:
             rows.extend(_records(page.body.get("result_list", []), _US_OPEN_ORDER_KEYS))
         return tuple(_us_open_order(row) for row in rows)
 
+    def list_order_executions(
+        self,
+        market: Market | str,
+        *,
+        symbol: str,
+        exchange: DomesticExchange | USExchange | str,
+        max_pages: int = 10,
+    ) -> tuple[OrderExecution, ...]:
+        """Read today's order/fill records, including actual fill quantity and price."""
+        selected_market = _market(market)
+        if selected_market is Market.DOMESTIC:
+            selected_exchange = _domestic_exchange(exchange)
+            api_id, path = "ka10076", "/api/dostk/acnt"
+            body = {"stk_cd": _clean_domestic_symbol(_symbol(symbol)), "qry_tp": "1",
+                    "sell_tp": "0", "ord_no": "",
+                    "stex_tp": {DomesticExchange.KRX: "1", DomesticExchange.NXT: "2", DomesticExchange.SOR: "0"}[selected_exchange]}
+        else:
+            api_id, path = "ust21510", "/api/us/acnt"
+            body = {"stk_cd": _symbol(symbol), "slby_tp": "0",
+                    "stex_tp": _us_exchange(exchange, allow_all=False).value}
+        orders: list[OrderExecution] = []
+        for page in self._http_for(selected_market).iter_pages(
+            api_id=api_id, path=path, body=body, max_pages=max_pages,
+        ):
+            rows = page.body.get("cntr", []) if selected_market is Market.DOMESTIC else (
+                page.body.get("result_list", page.body.get("result_lsit", []))
+            )
+            for row in _records(rows):
+                orders.append(OrderExecution(
+                    order_number=str(row.get("ord_no", "")),
+                    symbol=_clean_domestic_symbol(str(row.get("stk_cd", ""))) if selected_market is Market.DOMESTIC else str(row.get("stk_cd", "")),
+                    side=str(row.get("io_tp_nm") or row.get("slby_tp_nm") or row.get("slby_tp", "")),
+                    status=str(row.get("ord_stt") or row.get("ord_stat", "")),
+                    order_quantity=_decimal(row.get("ord_qty")) or Decimal(0),
+                    filled_quantity=_decimal(row.get("cntr_qty")) or Decimal(0),
+                    remaining_quantity=_decimal(row.get("oso_qty", row.get("ord_remnq"))) or Decimal(0),
+                    order_price=_decimal(row.get("ord_pric", row.get("ord_uv")), absolute=True) or Decimal(0),
+                    fill_price=_decimal(row.get("cntr_pric", row.get("cntr_uv")), absolute=True) or Decimal(0),
+                    order_time=str(row.get("ord_tm") or row.get("ord_time", "")),
+                ))
+        return tuple(orders)
+
     def build_order(
         self,
         *,
@@ -435,14 +498,9 @@ class KiwoomBroker:
     ) -> OrderRequest:
         selected_market = _market(market)
         selected_side = _side(side)
-        if quantity <= 0:
-            raise ValueError("주문 수량은 1 이상이어야 합니다.")
-        selected_price = _decimal(price)
-        selected_stop_price = _decimal(stop_price)
-        if selected_price is not None and selected_price <= 0:
-            raise ValueError("주문 가격은 0보다 커야 합니다.")
-        if selected_stop_price is not None and selected_stop_price <= 0:
-            raise ValueError("스톱 가격은 0보다 커야 합니다.")
+        _validate_order_quantity(quantity)
+        selected_price = _order_decimal(price, "주문 가격")
+        selected_stop_price = _order_decimal(stop_price, "스톱 가격")
 
         if selected_market is Market.DOMESTIC:
             selected_exchange = _domestic_exchange(exchange).value
@@ -457,6 +515,9 @@ class KiwoomBroker:
             if api_order_type in {"34", "35"} and selected_stop_price is None:
                 raise ValueError("STOP/STOP LIMIT 주문에는 stop_price가 필요합니다.")
 
+        if api_order_type in {"3", "03"} and selected_price is not None:
+            raise ValueError("시장가 주문에는 price를 지정할 수 없습니다.")
+
         return OrderRequest(
             market=selected_market,
             side=selected_side,
@@ -468,12 +529,94 @@ class KiwoomBroker:
             stop_price=selected_stop_price,
         )
 
+    def build_order_at_current_price(
+        self,
+        *,
+        market: Market | str,
+        side: OrderSide | str,
+        symbol: str,
+        quantity: int,
+        exchange: DomesticExchange | USExchange | str | None = None,
+    ) -> OrderRequest:
+        """Fetch a quote and build a limit order at that price, without submitting."""
+        selected_market = _market(market)
+        selected_side = _side(side)
+        _validate_order_quantity(quantity)
+        selected_symbol = _symbol(symbol)
+        if selected_market is Market.DOMESTIC:
+            selected_symbol = _clean_domestic_symbol(selected_symbol)
+            selected_exchange = _domestic_exchange(exchange if exchange is not None else DomesticExchange.KRX)
+        else:
+            selected_exchange = (
+                self.resolve_us_exchange(selected_symbol)
+                if exchange is None else _us_exchange(exchange, allow_all=False)
+            )
+        quote = self.get_quote(selected_market, selected_symbol, exchange=selected_exchange)
+        if _symbol(quote.symbol) != selected_symbol:
+            raise ValueError("조회한 현재가의 종목코드가 요청 종목과 다릅니다. 주문을 중단합니다.")
+        return self.build_order(
+            market=selected_market, side=selected_side, symbol=selected_symbol,
+            quantity=quantity, exchange=selected_exchange, price=quote.price, order_type="limit",
+        )
+
+    def buy_at_current_price(
+        self,
+        *,
+        market: Market | str,
+        symbol: str,
+        quantity: int,
+        exchange: DomesticExchange | USExchange | str | None = None,
+        confirm_live_order: str | None = None,
+    ) -> OrderResult:
+        """Buy once with a limit equal to the latest queried price; a fill is not guaranteed."""
+        return self._trade_at_current_price(
+            market=market, side=OrderSide.BUY, symbol=symbol, quantity=quantity,
+            exchange=exchange, confirm_live_order=confirm_live_order,
+        )
+
+    def sell_at_current_price(
+        self,
+        *,
+        market: Market | str,
+        symbol: str,
+        quantity: int,
+        exchange: DomesticExchange | USExchange | str | None = None,
+        confirm_live_order: str | None = None,
+    ) -> OrderResult:
+        """Sell once with a limit equal to the latest queried price; a fill is not guaranteed."""
+        return self._trade_at_current_price(
+            market=market, side=OrderSide.SELL, symbol=symbol, quantity=quantity,
+            exchange=exchange, confirm_live_order=confirm_live_order,
+        )
+
+    def _trade_at_current_price(
+        self,
+        *,
+        market: Market | str,
+        side: OrderSide,
+        symbol: str,
+        quantity: int,
+        exchange: DomesticExchange | USExchange | str | None,
+        confirm_live_order: str | None,
+    ) -> OrderResult:
+        self._check_live_order(_market(market), confirm_live_order)
+        request = self.build_order_at_current_price(
+            market=market, side=side, symbol=symbol, quantity=quantity, exchange=exchange,
+        )
+        return self.place_order(request, confirm_live_order=confirm_live_order)
+
     def place_order(
         self,
         request: OrderRequest,
         *,
         confirm_live_order: str | None = None,
     ) -> OrderResult:
+        # Also validate directly constructed OrderRequest values before any HTTP call.
+        request = self.build_order(
+            market=request.market, side=request.side, symbol=request.symbol,
+            quantity=request.quantity, exchange=request.exchange, price=request.price,
+            order_type=request.order_type, stop_price=request.stop_price,
+        )
         self._check_live_order(request.market, confirm_live_order)
         if request.market is Market.DOMESTIC:
             api_id = "kt10000" if request.side is OrderSide.BUY else "kt10001"
@@ -502,6 +645,7 @@ class KiwoomBroker:
             api_id=api_id,
             path=path,
             body=body,
+            retry_auth=False,
         ).body
         return OrderResult(
             accepted=True,
@@ -737,9 +881,29 @@ def _decimal(value: Any, *, absolute: bool = False) -> Decimal | None:
 
 def _required_decimal(value: Any, label: str, *, absolute: bool = False) -> Decimal:
     result = _decimal(value, absolute=absolute)
-    if result is None:
+    if result is None or not result.is_finite():
         raise ValueError(f"키움 응답에서 {label} 값을 숫자로 해석할 수 없습니다: {value!r}")
     return result
+
+
+def _validate_order_quantity(quantity: int) -> None:
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise ValueError("주문 수량은 1 이상의 정수여야 합니다.")
+    if quantity > 999_999_999_999:
+        raise ValueError("주문 수량은 12자리 이하여야 합니다.")
+
+
+def _order_decimal(value: Any, label: str) -> Decimal | None:
+    if value is None:
+        return None
+    number = _decimal(value)
+    if number is None or not number.is_finite() or number <= 0:
+        raise ValueError(f"{label}은 0보다 큰 유한한 숫자여야 합니다.")
+    if number.adjusted() > 11 or number.as_tuple().exponent < -12:
+        raise ValueError(f"{label}이 API 입력 범위를 벗어났습니다.")
+    if len(format(number, "f")) > 12:
+        raise ValueError(f"{label}은 소수점을 포함해 12자리 이하여야 합니다.")
+    return number
 
 
 def _api_decimal(value: Decimal | None) -> str:

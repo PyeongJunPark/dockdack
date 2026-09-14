@@ -1,5 +1,7 @@
 # 키움증권 브로커 모듈
 
+종목코드/티커를 입력해 바로 조회·주문하려면 [터미널 사용법](terminal.md)을 참고한다.
+
 `dockdack.KiwoomBroker`는 키움증권 REST API를 이용해 다음 기능을 제공한다.
 
 - 국내주식과 미국주식 현재가 및 종목정보 조회
@@ -67,6 +69,28 @@ DOCKDACK_KIWOOM_DEMO_DOMESTIC_APP_KEY=실제_App_Key
 키, Secret, 접근 토큰을 채팅, 캡처, README, `.env.example`, Python 소스에 입력하지 않는다.
 
 ## 기본 사용법
+
+가격을 직접 입력하지 않고 조회한 현재가로 지정가 매수·매도하려면 다음 함수를 사용한다.
+아래 호출은 모의 주문을 실제로 전송한다. 조회 가격과 체결 가격은 다를 수 있으며 체결은 보장되지 않는다.
+
+```python
+from dockdack import KiwoomBroker, KiwoomConfig
+
+# 사용할 시장의 키만 로드. 미국 거래소는 생략하면 자동 조회한다.
+broker = KiwoomBroker(KiwoomConfig.from_env("demo", market="us"))
+buy_result = broker.buy_at_current_price(market="us", symbol="AAPL", quantity=1)
+sell_result = broker.sell_at_current_price(market="us", symbol="AAPL", quantity=1)
+```
+
+국내는 `market="domestic"`, `symbol="005930"`으로 사용하며 기본 거래소는 KRX다.
+`exchange="NASDAQ"` 등을 지정하면 미국 거래소 자동 조회를 생략한다.
+실전 주문에는 기존과 동일하게 `allow_live_orders=True` 설정 및
+`confirm_live_order="LIVE_ORDER"`가 필요하다.
+
+화면에서 주문을 먼저 확인하려면
+`build_order_at_current_price(market="us", side="buy", symbol="AAPL", quantity=1)`로
+`OrderRequest`를 만들고, 확인 후 `place_order(request)`에 넘긴다. 이때 조회한 가격이 고정된다.
+장 종료·시세 오류·주문 실패를 자동 재시도하지 않는다.
 
 ```python
 from dockdack import DomesticExchange, KiwoomBroker, Market, USExchange

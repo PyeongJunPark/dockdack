@@ -150,6 +150,20 @@ class OpenOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class OrderExecution:
+    order_number: str
+    symbol: str
+    side: str
+    status: str
+    order_quantity: Decimal
+    filled_quantity: Decimal
+    remaining_quantity: Decimal
+    order_price: Decimal
+    fill_price: Decimal
+    order_time: str
+
+
+@dataclass(frozen=True, slots=True)
 class SavedCondition:
     sequence: str
     name: str
