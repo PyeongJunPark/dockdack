@@ -24,6 +24,10 @@ class BrokerAPIError(BrokerError):
         self.status_code = status_code
 
 
+class OrderOutcomeUnknown(BrokerAPIError):
+    """An order acknowledgement is incomplete; reconcile before resubmitting."""
+
+
 class LiveOrderConfirmationRequired(BrokerError):
     """Raised when the live-order safety gates have not been satisfied."""
 

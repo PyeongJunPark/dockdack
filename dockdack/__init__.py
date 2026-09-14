@@ -7,6 +7,7 @@ from dockdack.exceptions import (
     ConfigurationError,
     LiveOrderConfirmationRequired,
     OptionalDependencyError,
+    OrderOutcomeUnknown,
 )
 from dockdack.kiwoom import KiwoomBroker
 from dockdack.models import (
@@ -41,6 +42,7 @@ __all__ = [
     "LiveOrderConfirmationRequired",
     "Market",
     "OptionalDependencyError",
+    "OrderOutcomeUnknown",
     "OpenOrder",
     "OrderRequest",
     "OrderExecution",

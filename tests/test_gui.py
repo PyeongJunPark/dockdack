@@ -14,7 +14,7 @@ if HAS_QT:
     from PySide6.QtWidgets import QApplication, QDialogButtonBox
     from dockdack.gui import OrderDialog, TradingWindow
 
-from dockdack import AccountSnapshot, Market, OrderRequest, OrderResult, OrderSide, Quote, TradingMode
+from dockdack import AccountSnapshot, Market, OrderOutcomeUnknown, OrderRequest, OrderResult, OrderSide, Quote, TradingMode
 from dockdack.gui_service import Instrument
 
 
@@ -23,6 +23,7 @@ class FakeService:
         self.submitted = []
         self.fail_quote = False
         self.fail_submit = False
+        self.unknown_submit = False
         self.fail_account = False
 
     def resolve(self, symbol, exchange=""):
@@ -39,6 +40,8 @@ class FakeService:
 
     def submit(self, request):
         self.submitted.append(request)
+        if self.unknown_submit:
+            raise OrderOutcomeUnknown("응답의 주문번호를 확인할 수 없습니다.")
         if self.fail_submit:
             raise ValueError("모의투자 장종료")
         return OrderResult(True, TradingMode.DEMO, request, "TEST-123", "모의주문 접수")
@@ -125,6 +128,18 @@ class GuiTests(unittest.TestCase):
         self.wait_idle()
         self.assertEqual(len(self.service.submitted), 1)
         self.assertIn("장종료", self.window.message.text())
+
+    def test_unknown_order_does_not_show_acceptance_or_retry(self):
+        self.select()
+        self.service.unknown_submit = True
+        self.window.confirm_order = lambda request: True
+        self.window.buy_button.click()
+        self.wait_idle()
+        self.assertEqual(len(self.service.submitted), 1)
+        self.assertIn("접수 여부 확인 필요", self.window.message.text())
+        self.assertIn("주문·체결 내역", self.window.message.text())
+        messages = [self.window.activity.item(row, 1).text() for row in range(self.window.activity.rowCount())]
+        self.assertFalse(any("모의 매수 접수" in message for message in messages))
 
     def test_account_errors_are_visible(self):
         self.select()

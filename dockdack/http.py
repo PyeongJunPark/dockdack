@@ -54,6 +54,7 @@ class RequestsTransport:
             headers=dict(headers),
             json=dict(json),
             timeout=timeout,
+            allow_redirects=False,
         )
 
 
@@ -247,7 +248,7 @@ class KiwoomHTTPClient:
     def _raise_for_error(status_code: int, data: Mapping[str, Any]) -> None:
         return_code = data.get("return_code")
         normalized = _normalize_return_code(return_code)
-        if status_code < 400 and normalized in (None, 0):
+        if 200 <= status_code < 300 and normalized in (None, 0):
             return
         message = str(data.get("return_msg") or f"HTTP {status_code} 요청 실패")
         raise BrokerAPIError(

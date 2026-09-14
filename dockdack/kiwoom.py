@@ -7,7 +7,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from dockdack.conditions import ConnectFactory, KiwoomConditionClient
 from dockdack.config import KiwoomConfig
-from dockdack.exceptions import LiveOrderConfirmationRequired
+from dockdack.exceptions import LiveOrderConfirmationRequired, OrderOutcomeUnknown
 from dockdack.http import HttpTransport, KiwoomHTTPClient
 from dockdack.models import (
     AccountSnapshot,
@@ -647,11 +647,12 @@ class KiwoomBroker:
             body=body,
             retry_auth=False,
         ).body
+        order_number = _confirmed_order_number(response, "주문")
         return OrderResult(
             accepted=True,
             mode=self.mode,
             request=request,
-            order_number=str(response.get("ord_no", "")),
+            order_number=order_number,
             message=str(response.get("return_msg", "")),
             raw=response,
         )
@@ -715,11 +716,13 @@ class KiwoomBroker:
         """Cancel an open order. Domestic quantity 0 means cancel all remaining shares."""
         selected_market = _market(market)
         self._check_live_order(selected_market, confirm_live_order)
-        original_order_number = str(original_order_number).strip()
-        if not original_order_number:
+        if not isinstance(original_order_number, str) or not original_order_number.strip():
             raise ValueError("원주문번호가 필요합니다.")
-        if quantity < 0:
-            raise ValueError("취소 수량은 0 이상이어야 합니다.")
+        original_order_number = original_order_number.strip()
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0:
+            raise ValueError("취소 수량은 0 이상의 정수여야 합니다.")
+        if quantity > 999_999_999_999:
+            raise ValueError("취소 수량은 12자리 이하여야 합니다.")
 
         if selected_market is Market.DOMESTIC:
             body = {
@@ -742,14 +745,16 @@ class KiwoomBroker:
             api_id=api_id,
             path=path,
             body=body,
+            retry_auth=False,
         ).body
+        order_number = _confirmed_order_number(response, "취소 주문")
         cancelled_quantity = _decimal(response.get("cncl_qty") or response.get("cncl_ord_qty"))
         return CancelResult(
             accepted=True,
             mode=self.mode,
             market=selected_market,
             original_order_number=original_order_number,
-            cancel_order_number=str(response.get("ord_no", "")),
+            cancel_order_number=order_number,
             cancelled_quantity=cancelled_quantity,
             message=str(response.get("return_msg", "")),
             raw=response,
@@ -867,6 +872,21 @@ def _clean_domestic_symbol(symbol: str) -> str:
         if result.endswith(suffix):
             result = result[: -len(suffix)]
     return result
+
+
+def _confirmed_order_number(response: Mapping[str, Any], operation: str) -> str:
+    # Do not infer acceptance from HTTP 200 or coerce null/container values to strings.
+    code = response.get("return_code")
+    success = (type(code) is int and code == 0) or (
+        isinstance(code, str) and code.strip() == "0"
+    )
+    number = response.get("ord_no")
+    if not success or not isinstance(number, str) or not number.strip():
+        raise OrderOutcomeUnknown(
+            f"{operation} 응답의 성공 코드 또는 주문번호를 확인할 수 없습니다. "
+            "접수 여부가 불명확하므로 재전송하지 말고 주문·체결 내역을 먼저 확인하세요."
+        )
+    return number.strip()
 
 
 def _decimal(value: Any, *, absolute: bool = False) -> Decimal | None:

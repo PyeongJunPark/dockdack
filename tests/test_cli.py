@@ -10,7 +10,7 @@ from contextlib import redirect_stderr
 from decimal import Decimal
 from unittest.mock import patch
 
-from dockdack import BrokerAPIError, KiwoomBroker, Market, TradingMode
+from dockdack import BrokerAPIError, KiwoomBroker, Market, OrderOutcomeUnknown, TradingMode
 from dockdack.cli import Terminal, create_broker, identify_symbol, main, parser
 from test_kiwoom import FakeResponse, QueueTransport, config, token_response
 
@@ -170,6 +170,14 @@ class TerminalTests(unittest.TestCase):
         )
         terminal.execute(argv)
         self.assertEqual(transport.calls[-1]["url"], "https://api.kiwoom.com/api/dostk/ordr")
+
+    def test_incomplete_acknowledgement_does_not_print_acceptance_or_retry(self):
+        terminal, transport, output = self.terminal(token_response(), FakeResponse({}), inputs=["y"])
+        with self.assertRaises(OrderOutcomeUnknown):
+            terminal.execute(parser().parse_args(["buy", "005930", "1", "--type", "market"]))
+        self.assertEqual(len(transport.calls), 2)
+        self.assertFalse(any("주문 접수:" in line for line in output))
+        self.assertIn("재주문 전에", output[-1])
 
     def test_order_auth_error_is_not_retried(self):
         terminal, transport, output = self.terminal(

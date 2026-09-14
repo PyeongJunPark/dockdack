@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from dockdack import Market, OrderRequest, OrderSide
+from dockdack import Market, OrderOutcomeUnknown, OrderRequest, OrderSide
 from dockdack.gui_service import Instrument, TradingService
 
 
@@ -373,6 +373,8 @@ class TradingWindow(QMainWindow):
                 self.stock_name.setText("종목 조회 실패")
                 self.change_label.setText("입력한 종목과 API 키를 확인하세요.")
             text = f"{name} 실패: {error}"
+            if isinstance(error, OrderOutcomeUnknown):
+                text = f"주문 접수 여부 확인 필요: {error}"
             if name == "주문 전송":
                 text += " / 자동 재주문하지 않습니다. 재시도 전 주문·체결 내역을 확인하세요."
             self.message.setText(text)
