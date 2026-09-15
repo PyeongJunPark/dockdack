@@ -41,6 +41,12 @@ def top_turnover(http: KiwoomHTTPClient, market: Market, limit: int = 100) -> tu
                 raise BrokerAPIError("잘못된 순위 응답입니다.")
             symbol = normalize_symbol(str(row.get("stk_cd", "")))
             exchange = "KRX" if domestic else str(row.get("stex_tp", "")).strip().upper()
+            if symbol and not domestic and exchange == "NP":
+                # The all-market US ranking includes NP listings (observed for
+                # TCEHY), outside our ND/NY/NA execution and equity-classification
+                # scope. Exclude them without remapping their exchange or
+                # counting them toward the required common-share total.
+                continue
             if not symbol or exchange not in ({"KRX"} if domestic else {"ND", "NY", "NA"}):
                 raise BrokerAPIError("순위 종목 또는 거래소를 확인할 수 없습니다.")
             try:
