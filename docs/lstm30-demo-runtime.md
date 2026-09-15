@@ -9,7 +9,7 @@
 명시적으로 승인된 GUI 모의 세션을 시작하려면 저장소 루트에서 다음을 실행한다.
 
 ```powershell
-.venv/Scripts/python.exe -m examples.run_lstm30_gui --top-us100 --arm DEMO_AUTOTRADE --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
+.venv/Scripts/python.exe -m examples.run_lstm30_gui --top-us100 --buy-threshold 0.4 --close-all-before-minutes 5 --confirm-close-all DEMO_CLOSE_ALL_SELLABLE --arm DEMO_AUTOTRADE --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
 ```
 
 GUI에는 **실제로 주문하는 엔진의 ON/OFF·감시 상태·신호 연결·주문 기록**이 표시된다. 내장 랜덤 신호가 아닌 `lstm30-mark0` 모델 신호이며, 실전 전환과 임의 전략 변경은 이 전용 실행기에서 막는다. 위 명령과 VBS는 미국 일반기업 보통주 거래대금 상위 100종목을 감시하고 국내는 기존 삼성전자 1종목을 유지한다. 국내도 TOP100으로 확장하려면 별도로 `--top-domestic100`을 명시한다. 순위 옵션 없는 직접 실행은 기존 삼성전자/AAPL 연결 점검용이다.
@@ -22,6 +22,21 @@ GUI와 백그라운드 실행기는 같은 `.dockdack/lstm30-demo/watchlist.sqli
 
 GUI 상태는 `.dockdack/lstm30-demo/demo-session-status.json`에 기록되며, 기존 `status.json`에도 현재 GUI 세션 ID와 실제 주문 권한을 함께 기록한다. 따라서 아래의 `--stop` 명령도 GUI로 전환한 현재 세션을 중지한다. 명령으로 중지한 세션은 다시 창을 열어야 재개할 수 있고, GUI의 일반 OFF/ON 버튼은 같은 창에서 사용할 수 있다. 창을 닫으면 이 GUI 세션의 감시·자동주문도 중지된다. 컴퓨터가 꺼지거나 절전되면 계속 실행할 수 없다.
 
+## 장 마감 5분 전 계좌 전체 청산
+
+위 GUI 명령과 VBS는 사용자 승인된 마감 청산 정책을 포함한다. 각 시장 정규장 종료 **5분 전부터**, 기존 보유분을 포함한 **모의계좌의 모든 국내·미국 보유종목**에서 매도가능 수량을 확인해 전량 지정가 매도를 시도한다. 거래소 캘린더의 휴장·서머타임·조기 폐장 시간을 사용하며, 마감 후에는 새 주문을 보내지 않는다.
+
+- 마감 청산에만 일반 1주·국내 50만 원/미국 1,000달러 한도 예외를 적용한다. 일반 매수·익절·손절 주문의 기존 한도는 유지하며, 확인된 보유·매도가능 수량을 넘겨 팔지 않는다.
+- 이 구간에는 해당 시장의 신규 매수를 주문 직전에도 차단한다. 청산은 모델 점수나 익절·손절 도달 여부와 무관하다.
+- 감시 목록 밖 기존 보유분도 대상이지만 일반 모델 감시 종목으로 편입하지 않는다. 지원하지 않는 거래소·확인할 수 없는 수량은 임의 해석하지 않고 남은 종목으로 보고한다.
+- 정상 주문과 같은 단일 작업 흐름에서 청산을 우선 확인한다. 전체 100종목 조회가 끝나기를 기다리지 않지만 진행 중인 API 요청·속도 제한 때문에 시작이나 체결이 지연될 수 있다.
+- 주문 의도를 기존 장부에 먼저 기록하며 같은 시장·날짜·종목의 청산 주문은 재시작해도 중복 전송하지 않는다. 미체결/접수 불명확 주문을 자동 취소·재주문하지 않는다.
+- 잔고·시세·중지·모의 환경·마감 시간을 다시 확인한다. 주문 OFF 또는 감시 중지 상태에서는 청산도 실행하지 않는다. **접수는 체결이 아니며 5분 내 전량 체결을 보장하지 않는다.** 매도 제한·미체결·오류로 남은 수량은 상태 및 주문 기록에서 확인한다.
+
+GUI 직접 실행에서 이 기능은 `--close-all-before-minutes 5 --confirm-close-all DEMO_CLOSE_ALL_SELLABLE`을 함께 지정해야 활성화된다. 두 옵션을 생략하면 마감 청산은 꺼진다. 이 옵션 자체는 자동주문 ON 승인이 아니다. VBS도 여전히 주문 OFF로 열리고, 화면에서 전체 계좌 청산·한도 예외를 포함한 확인을 받아야 주문이 켜진다. 백그라운드 실행기와 단발 신호 발행 CLI는 이 GUI 마감 청산 기능을 수행하지 않는다.
+
+상태 파일의 `close_liquidation`에서 시장별 `starts_at`/`close_at`, 실제 주문 권한, 청산 시도와 확인 시각이 붙은 잔여 보유분(`unsold`), 오류를 확인한다. 잔여 목록이 비어 있어도 최초 잔고 조회 전이거나 조회 실패 상태일 수 있으므로 `last_checked_at`·`errors`·체결 기록도 함께 본다. 캘린더 기준은 [KRX 정규장 안내](https://global.krx.co.kr/contents/GLB/06/0602/0602010201/GLB0602010201T1.jsp)와 [NYSE 휴장·조기 폐장 안내](https://www.nyse.com/markets/hours-calendars)를 참고하며, 미검증 특별 거래시간은 주문을 차단한다.
+
 ## 실행과 중지
 
 저장소 루트에서 ML 의존성을 설치하고, Git에서 제외되는 `.env`에 키움 **모의** API 키를 설정한다. 이미 사용하는 환경이 있으면 재설치할 필요 없다.
@@ -33,13 +48,13 @@ uv sync --extra ml --inexact --no-install-project
 조회만 검사하는 예시(주문 OFF):
 
 ```powershell
-.venv/Scripts/python.exe -m examples.run_lstm30_demo --once --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
+.venv/Scripts/python.exe -m examples.run_lstm30_demo --once --buy-threshold 0.4 --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
 ```
 
 명시적으로 모의자동주문을 승인하고 계속 실행하는 예시:
 
 ```powershell
-.venv/Scripts/python.exe -m examples.run_lstm30_demo --arm DEMO_AUTOTRADE --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
+.venv/Scripts/python.exe -m examples.run_lstm30_demo --arm DEMO_AUTOTRADE --buy-threshold 0.4 --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt
 ```
 
 기본 대상은 삼성전자 `005930/KRX`와 AAPL `ND`다. 위 숫자는 **모의 연결 점검용 설정**이며 투자 추천이 아니다. 각각 주문당 최대 1주, 국내 50만 원 / 미국 1,000달러 상한이다. 한 종목의 신규 매수 시도는 해당 시장 현지 날짜별 1회로 제한한다. 상한은 계좌 전체 손실 한도나 하루 누적 매매금액 한도가 아니다. 기존 모의계좌의 해당 종목 보유분도 매도 조건의 관리 대상이다.
@@ -56,7 +71,7 @@ uv sync --extra ml --inexact --no-install-project
 
 - 처음 전체 종목의 차트·현재가·잔고·모델 입력을 주문 OFF 상태로 확인한다. 모든 초기 조회가 정상일 때만 명시적인 `DEMO_AUTOTRADE` 승인을 한 번 소비한다.
 - 최초 확인 후 약 30초 대기 간격으로 조회한다. 실제 한 순환 주기는 조회 시간 + 대기 시간이며 API 응답 지연에 따라 늘어난다. CPU에서 모델을 한 번 로드해 재사용하며 재학습하지 않는다.
-- 일봉 31개를 조회해 미완료 당일봉을 제외하고 완료봉 30개를 사용한다. 매수는 `다음 유효 관측봉 종가 >= 마지막 입력 종가 × 1.01` 예측 확률이 0.5 이상일 때만 발생한다.
+- 일봉 31개를 조회해 미완료 당일봉을 제외하고 완료봉 30개를 사용한다. 미보유 상태에서 `다음 유효 관측봉 종가 >= 마지막 입력 종가 × 1.01` 예측 확률이 **0.4 이상(경계값 포함)**이면 매수 후보가 된다. 실제 주문은 나머지 안전 검사까지 통과해야 한다.
 - 보유 중 추가매수 금지, 실제 평균 매입가 대비 +1% 익절 / −0.8% 손절. 1회 매도도 수량·매도가능 수량·금액 상한을 적용하므로 전량 청산을 보장하지 않는다.
 - 차트 내보내기 → 실제 학습 모델 → 외부 신호 파서 → 기존 주문 엔진 순으로 연결한다. 신호 출처는 `lstm30-mark0`다. 랜덤 신호·강제 매수는 사용하지 않는다.
 - 원본 잔고의 누락·잘못된 수량을 미보유로 간주하지 않는다. 현재가·잔고의 신선도, 신호 만료, 기존 미체결, 잔고·주문 가능 금액, 일반 보통주 여부를 검사한다.
@@ -64,6 +79,8 @@ uv sync --extra ml --inexact --no-install-project
 - 한 종목당 하루 한 번의 신규 매수 시도는 DB에 남아 재시작해도 유지된다. 거절·접수 불명확·시세 조회 오류 등 안전 중단 후에는 감시만 지속하고 **자동으로 다시 ON 하지 않는다**. 원인을 확인한 뒤 명시적으로 새 실행을 승인해야 한다.
 - 같은 실행 폴더는 OS 잠금으로 중복 실행을 막는다. 다른 폴더나 GUI의 자동주문까지 같은 계좌로 동시에 실행하는 계좌 전체 잠금은 아니다. 동일 계좌에 별도 자동주문기를 함께 켜지 않는다.
 - 중지 감시기는 조회 작업 중에도 중지 요청을 확인한다. 이미 서버로 전송된 주문을 되돌리거나 취소하지는 않는다.
+
+GUI·백그라운드·1회 신호 발행 예제의 `--buy-threshold` 기본값은 사용자 요청에 따라 `0.4`다. 이 값은 실행 시 판정 기준만 바꾸며 가중치나 체크포인트 메타데이터를 수정하지 않는다. 저장된 기준과 과거 보고된 테스트 성능은 여전히 `0.5` 기준이다. `0.4`에서 재학습·확률 보정·수익성 검증을 완료했다는 뜻은 아니다. 명시적 임계값 재정의 없이 `Predictor(path)`를 직접 사용하는 코드는 체크포인트의 기존 `0.5`를 유지한다.
 
 ## 저장 위치와 현재 상태 보기
 
@@ -84,6 +101,8 @@ Get-Content .dockdack/lstm30-demo/status.json
 ```
 
 `orders_enabled: true`는 **조건 충족 시 주문하도록 켜져 있다**는 뜻이지 주문이 발생하거나 체결됐다는 뜻이 아니다. `session_order_counts`의 `accepted`(접수·체결 대기)와 `filled`(체결 확인)를 구분한다. 상태 파일만으로 생존을 판단하지 말고 갱신 시각과 PID도 확인한다.
+
+`buy_thresholds`에는 시장별 실제 실행 기준(기본 `0.4`), `checkpoint_buy_thresholds`에는 저장된 원래 기준(`0.5`)이 표시된다. 두 값은 모델 재학습 여부와 별개이며, 임계값을 읽을 수 없는 테스트 대역은 `null`로 표시될 수 있다.
 
 기존 GUI 기본 장부 `.dockdack/watchlist.sqlite3`와 분리되므로 GUI 기본 화면에 이 실행기의 주문 기록이 자동으로 보이는 것은 아니다. 모의계좌 잔고 자체는 같은 계좌이므로 증권사 또는 기존 GUI의 계좌 조회에서 볼 수 있다.
 

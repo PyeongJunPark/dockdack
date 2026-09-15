@@ -360,6 +360,7 @@ def demo_position_provider(brokers, *, clock=utc_now):
     as an explicitly verified flat position.
     """
     from dockdack.models import Market, TradingMode
+    from dockdack.symbols import normalize_us_exchange
 
     def provide(stock):
         instrument(stock)
@@ -410,7 +411,7 @@ def demo_position_provider(brokers, *, clock=utc_now):
         for position in account.positions:
             if position.symbol != stock["symbol"]:
                 continue
-            exchange = {"NASDAQ": "ND", "NYSE": "NY", "AMEX": "NA"}.get(position.exchange, position.exchange)
+            exchange = normalize_us_exchange(position.exchange)
             if exchange != stock["exchange"]:
                 raise ValueError("Matching account position exchange cannot be verified")
             if position.market is not market or position.currency != stock["currency"]:

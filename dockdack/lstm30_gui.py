@@ -21,9 +21,11 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from dockdack.autotrade import AutoTrader
 from dockdack.demo_session import SessionController
+from dockdack.exceptions import OrderNotSent
 from dockdack.gui_service import Instrument, TradingService
 from dockdack.history import market_time
 from dockdack.lstm30_adapter import LSTM30SignalProducer, SOURCE_ID, demo_position_provider
+from dockdack.lstm30_close import CloseLiquidator
 from dockdack.lstm30_runtime import DEFAULT_ITEMS, DEFAULT_RUNTIME_DIR, SessionLock, _BAD_DIAGNOSTICS
 from dockdack.lstm30_universe import LSTM30Universe, ScopedRankingScheduler
 from dockdack.models import Market, OrderSide, TradingMode
@@ -42,6 +44,7 @@ class _LSTM30AutoTrader(AutoTrader):
         self.safety_reason = ""
         self.external_stop = Event()
         self.universe = None
+        self.close_liquidator = None
 
     def _ensure_environment(self, instrument=None, *, orders=False):
         if self.external_stop.is_set():
@@ -89,7 +92,41 @@ class _LSTM30AutoTrader(AutoTrader):
                 self.disarm()
             if progress is not None:
                 progress(update)
-        return super().poll(progress=guarded_progress, checkpoint=checkpoint, on_snapshot=on_snapshot)
+        def guarded_checkpoint():
+            # The same broker worker owns both normal and closing orders.
+            # Never wait for an entire 100-stock sweep before checking the close.
+            if self.close_liquidator is not None:
+                try:
+                    self.close_liquidator.tick()
+                except Exception:
+                    self.safety_reason = "CLOSE_LIQUIDATION_CHECK_FAILED"
+                    self.disarm()
+                    raise
+            return checkpoint() if checkpoint is not None else False
+        return super().poll(progress=guarded_progress, checkpoint=guarded_checkpoint, on_snapshot=on_snapshot)
+
+    def _execute(self, item, rule, snapshot):
+        if (rule.side is OrderSide.BUY and self.close_liquidator is not None
+                and self.close_liquidator.buy_blocked(item.instrument.market)):
+            self.store.pause_rule(rule.id)
+            self.store.event(item.id, "마감 청산 구간 · 신규 매수 차단", category="signal")
+            return False
+        return super()._execute(item, rule, snapshot)
+
+    def _before_order_send(self, item, rule, fresh):
+        def reject_closing_buy():
+            if (rule.side is OrderSide.BUY and self.close_liquidator is not None
+                    and self.close_liquidator.buy_blocked(item.instrument.market)):
+                raise OrderNotSent("마감 청산 구간에 진입하여 신규 매수 전송을 차단했습니다.")
+        reject_closing_buy()
+        super()._before_order_send(item, rule, fresh)
+        reject_closing_buy()
+        # The closing calendar check follows the parent's final guard. Preserve
+        # its freshness/stop guarantees if that additional local work took time.
+        if not 0 <= (self.clock()-fresh.fetched_at).total_seconds() <= 15:
+            raise OrderNotSent("마감 확인 후 시세가 15초를 초과했거나 미래 시각이므로 전송하지 않습니다.")
+        if self._stop.is_set() or self.external_stop.is_set() or not self.orders_enabled:
+            raise OrderNotSent("최종 마감 확인 중 자동주문이 OFF 또는 중지되었습니다.")
 
 class LSTM30GUIBridge:
     """No arming or order submission; produces signals for the actual GUI engine."""
@@ -200,6 +237,9 @@ class LSTM30SessionController(SessionController):
         window = self.window
         state.update(
             strategy="lstm30", source_id=SOURCE_ID, checkpoints=window.checkpoint_paths,
+            buy_thresholds=window.lstm_buy_thresholds,
+            checkpoint_buy_thresholds=window.lstm_checkpoint_buy_thresholds,
+            close_liquidation=window.close_liquidator.status(),
             diagnostics=dict(window.lstm_bridge.diagnostics), safety_reason=window.engine.safety_reason,
             buy_attempts_per_symbol_local_day=1,
             store_path=str(window.store.path),
@@ -221,10 +261,14 @@ class LSTM30WatchlistDialog(WatchlistDialog):
 
     def __init__(self, service=None, *, runtime_dir=DEFAULT_RUNTIME_DIR, predictors,
                  quantity=1, max_krw="500000", max_usd="1000", items=None,
-                 position_provider=None, clock=utc_now, checkpoint_paths=None, ranked_markets=(), parent=None):
+                 position_provider=None, clock=utc_now, checkpoint_paths=None, ranked_markets=(),
+                 close_all_before_minutes=None, close_all_confirmation=None, parent=None):
         self._lstm_configured = False
         self._lstm_released = False
         self.session_controller = None
+        self.close_all_before_minutes = close_all_before_minutes
+        if (close_all_before_minutes is None) != (close_all_confirmation is None):
+            raise ValueError("마감 전량 청산 시간과 DEMO_CLOSE_ALL_SELLABLE 승인을 함께 지정하세요.")
         self.runtime_dir = Path(runtime_dir).resolve()
         service = service if service is not None else TradingService(mode=TradingMode.DEMO)
         if getattr(service, "mode", None) is not TradingMode.DEMO:
@@ -239,6 +283,11 @@ class LSTM30WatchlistDialog(WatchlistDialog):
             if market not in predictors or getattr(predictors[market], "metadata", {}).get("market") != market:
                 raise ValueError(f"시장에 맞는 {market} 학습 모델이 필요합니다.")
         self.checkpoint_paths = {key: str(Path(path).resolve()) for key, path in (checkpoint_paths or {}).items()}
+        self.lstm_buy_thresholds = {
+            market: getattr(predictor, "buy_threshold", predictor.metadata.get("buy_threshold"))
+            for market, predictor in predictors.items()}
+        self.lstm_checkpoint_buy_thresholds = {
+            market: predictor.metadata.get("buy_threshold") for market, predictor in predictors.items()}
         self.session_lock = SessionLock(self.runtime_dir / "session.lock")
         self.session_lock.acquire()
         try:
@@ -266,6 +315,15 @@ class LSTM30WatchlistDialog(WatchlistDialog):
                 service, store, ranked_markets=self.ranked_markets, baseline_items=self.lstm_items,
                 clock=clock, stopped=lambda: self.engine._stop.is_set(), on_change=self._universe_changed)
             self.engine.universe = self.lstm_universe
+            self.close_liquidator = CloseLiquidator(
+                service, store, self.engine, enabled=close_all_before_minutes is not None,
+                minutes_before_close=close_all_before_minutes if close_all_before_minutes is not None else 5,
+                confirmation=close_all_confirmation, clock=clock)
+            self.engine.close_liquidator = self.close_liquidator
+            self.close_timer = QTimer(self)
+            self.close_timer.setInterval(1000)
+            self.close_timer.timeout.connect(self._close_wakeup)
+            self.close_timer.start()
             self.scheduler = ScopedRankingScheduler(
                 service, store, universe=self.lstm_universe, clock=clock,
                 stopped=lambda: self.engine._stop.is_set(), on_error=self._ranking_error)
@@ -308,6 +366,33 @@ class LSTM30WatchlistDialog(WatchlistDialog):
     def _ranking_error(self, market, exc):
         self.engine.safety_reason = "TOP100_REFRESH_FAILED"
         self.engine.disarm()
+
+    def _close_wakeup(self):
+        if self.monitoring and self.engine.orders_enabled and self.worker is None:
+            try:
+                if self.close_liquidator.closing_markets():
+                    self.timer.stop()
+                    self.refresh_all()
+            except Exception as exc:
+                self.engine.disarm()
+                self.message.setText(f"마감 시간 확인 실패 · 자동주문 OFF: {exc}")
+
+    def confirm_automation(self):
+        if self.close_all_before_minutes is None:
+            return super().confirm_automation()
+        self._validate_fixed_configuration()
+        return QMessageBox.question(
+            self, "LSTM30 모의자동주문 · 계좌 전체 마감 청산 확인",
+            "전체 조회 검증 후 모의자동주문을 켭니다. 실제 자금 주문은 하지 않습니다.\n\n"
+            f"일반 주문: 최대 {self.lstm_policy.max_quantity}주 · "
+            f"{self.lstm_policy.max_krw:,} KRW / {self.lstm_policy.max_usd:,} USD\n"
+            f"마감 청산: 각 시장 정규장 종료 {self.close_all_before_minutes}분 전부터 새 매수 차단\n"
+            "모의계좌의 모든 국내·미국 보유종목(기존 보유분 포함)을 청산합니다.\n"
+            "마감 청산만 일반 수량·금액 한도를 적용하지 않고 확인된 매도가능 수량 전부를 지정가로 주문합니다.\n"
+            "미체결·거래정지·API 지연 등으로 마감 전 전량 체결은 보장되지 않습니다.\n"
+            "접수 불명확한 주문은 재전송하지 않습니다. OFF/감시 중지는 마감 청산도 중지합니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
     def _run(self, operation, *, streaming=False, done=None, focus_result=False, job_kind="task"):
         if job_kind == "quotes" and streaming and not self.lstm_universe.initialized:
@@ -365,7 +450,13 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         super()._sync_environment()
         self.setWindowTitle("DOCKDACK | LSTM30 모의 실행기 · 학습 모델 자동주문")
         self.environment_caption.setText("학습된 LSTM30 · 30일봉 · 모의투자 전용")
-        self.environment_notice.setText("모의투자만 사용 · 실제 자금 주문 불가 · +1% 익절 / -0.8% 손절 · 종목별 당일 매수 시도 1회")
+        thresholds = "/".join(f"{('국내' if market == 'domestic' else '미국')} {value:.0%} 이상"
+                              for market, value in sorted(self.lstm_buy_thresholds.items()) if value is not None)
+        self.environment_notice.setText("모의투자만 사용 · 실제 자금 주문 불가 · "
+                                       + (f"매수 점수 {thresholds} · " if thresholds else "")
+                                       + "+1% 익절 / -0.8% 손절 · 종목별 당일 매수 시도 1회"
+                                       + (f" · 마감 {self.close_all_before_minutes}분 전 계좌 전체 청산"
+                                          if self.close_all_before_minutes is not None else ""))
         self.environment_selector.setEnabled(False)
         self.random_demo.setEnabled(False)
 
@@ -422,7 +513,8 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         if self.session_controller is not None:
             self.session_controller.report()
             self.session_controller.close()
-        for timer in (self.timer, self.schedule_timer, self.environment_timer, self.order_status_timer, self.health_timer):
+        for timer in (self.timer, self.schedule_timer, self.environment_timer, self.order_status_timer,
+                      self.health_timer, self.close_timer):
             timer.stop()
         if not self._lstm_released:
             self.session_lock.release()
@@ -447,6 +539,12 @@ def main(argv=None):
     parser.add_argument("--quantity", type=int, default=1)
     parser.add_argument("--max-krw", default="500000")
     parser.add_argument("--max-usd", default="1000")
+    parser.add_argument("--buy-threshold", type=float, default=0.4,
+                        help="Inclusive model-score BUY threshold (default 0.4); does not change weights")
+    parser.add_argument("--close-all-before-minutes", type=int,
+                        help="Close every DEMO account holding this many minutes before each market close; SELL-only full sellable size")
+    parser.add_argument("--confirm-close-all", choices=["DEMO_CLOSE_ALL_SELLABLE"],
+                        help="Explicit consent for all existing holdings and closing-only quantity/notional limit exemption")
     parser.add_argument("--domestic-checkpoint", type=Path, default=Path("models/lstm30/domestic.pt"))
     parser.add_argument("--us-checkpoint", type=Path, default=Path("models/lstm30/us.pt"))
     parser.add_argument("--symbol", action="append", help="Repeat MARKET:EXCHANGE:SYMBOL; defaults Samsung and Apple")
@@ -466,11 +564,13 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     try:
         from dockdack.ml30 import Predictor
-        predictors = {market: Predictor(paths[market], device="cpu") for market in markets}
+        predictors = {market: Predictor(paths[market], device="cpu", buy_threshold=args.buy_threshold)
+                      for market in markets}
         window = LSTM30WatchlistDialog(
             runtime_dir=args.runtime_dir, predictors=predictors, quantity=args.quantity,
             max_krw=args.max_krw, max_usd=args.max_usd, items=items,
-            checkpoint_paths={market: paths[market] for market in markets}, ranked_markets=ranked_markets)
+            checkpoint_paths={market: paths[market] for market in markets}, ranked_markets=ranked_markets,
+            close_all_before_minutes=args.close_all_before_minutes, close_all_confirmation=args.confirm_close_all)
     except Exception as exc:
         QMessageBox.critical(None, "LSTM30 모의 실행기 시작 실패", f"자동주문은 시작되지 않았습니다.\n{exc}")
         return 1

@@ -130,9 +130,16 @@ class Predictor:
     ``TARGET``. This object reads neither broker credentials nor positions
     and never places an order. Windows CUDA inference temporarily bypasses
     cuDNN; the model architecture, weights and caller's backend flags are kept.
+    An explicit ``buy_threshold`` override changes only the decision boundary;
+    checkpoint metadata and probability scores remain unchanged.
     """
 
-    def __init__(self, checkpoint_path: str | Path, device: str | torch.device = "cpu"):
+    def __init__(self, checkpoint_path: str | Path, device: str | torch.device = "cpu",
+                 *, buy_threshold: float | None = None):
+        if buy_threshold is not None:
+            if (isinstance(buy_threshold, bool) or not isinstance(buy_threshold, (float, int))
+                    or not math.isfinite(buy_threshold) or not 0 < buy_threshold < 1):
+                raise ValueError("buy_threshold must be a finite probability strictly between 0 and 1")
         self.device = torch.device(device)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("metadata"), dict):
@@ -167,7 +174,7 @@ class Predictor:
         self.model.to(self.device).eval()
         self.metadata = metadata
         self.market = metadata["market"]
-        self.buy_threshold = float(threshold)
+        self.buy_threshold = float(threshold if buy_threshold is None else buy_threshold)
 
     @torch.inference_mode()
     def predict(self, bars: Any) -> dict[str, float | bool]:

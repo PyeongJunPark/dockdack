@@ -3,7 +3,9 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from dockdack.lstm30_adapter import decide_position
 
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
@@ -41,10 +43,10 @@ class ThirtyBarModelTests(unittest.TestCase):
             },
         }
 
-    def load_checkpoint(self, directory, checkpoint=None):
+    def load_checkpoint(self, directory, checkpoint=None, **predictor_options):
         path = Path(directory) / "model.pt"
         torch.save(self.checkpoint() if checkpoint is None else checkpoint, path)
-        return Predictor(path)
+        return Predictor(path, **predictor_options)
 
     def test_exactly_thirty_raw_bars_make_thirty_features(self):
         raw = self.bars()
@@ -124,6 +126,86 @@ class ThirtyBarModelTests(unittest.TestCase):
             self.assertEqual(result["buy_threshold"], 0.5)
             self.assertEqual(predictor.market, "domestic")
             self.assertFalse(predictor.model.training)
+
+    def test_buy_threshold_override_preserves_checkpoint_metadata_weights_and_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = self.load_checkpoint(directory)
+            path = Path(directory) / "model.pt"
+            before = path.read_bytes()
+            overridden = Predictor(path, buy_threshold=0.4)
+            raw = self.bars(batch=1)[0]
+            original_result = original.predict(raw)
+            override_result = overridden.predict(raw)
+            self.assertEqual(original.buy_threshold, 0.5)
+            self.assertEqual(overridden.buy_threshold, 0.4)
+            self.assertEqual(overridden.metadata["buy_threshold"], 0.5)
+            self.assertEqual(original.metadata, overridden.metadata)
+            self.assertEqual(original_result["probability_ge_1pct"], override_result["probability_ge_1pct"])
+            self.assertEqual(override_result["buy_threshold"], 0.4)
+            for name, value in original.model.state_dict().items():
+                torch.testing.assert_close(value, overridden.model.state_dict()[name], rtol=0, atol=0)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(torch.load(path, weights_only=True)["metadata"]["buy_threshold"], 0.5)
+
+    def test_none_override_uses_checkpoint_threshold(self):
+        checkpoint = self.checkpoint()
+        checkpoint["metadata"]["buy_threshold"] = 0.6
+        with tempfile.TemporaryDirectory() as directory:
+            predictor = self.load_checkpoint(directory, checkpoint, buy_threshold=None)
+            self.assertEqual(predictor.buy_threshold, 0.6)
+            self.assertEqual(predictor.predict(self.bars(batch=1)[0])["buy_threshold"], 0.6)
+
+    def test_buy_threshold_override_must_be_finite_and_strictly_between_zero_and_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.load_checkpoint(directory)
+            path = Path(directory) / "model.pt"
+            for threshold in (0, 1, -0.1, 1.1, float("nan"), float("inf"), -float("inf"),
+                              True, False, "0.4", [], {}):
+                with self.subTest(threshold=threshold), self.assertRaises(ValueError):
+                    Predictor(path, buy_threshold=threshold)
+
+    def test_valid_override_does_not_hide_invalid_checkpoint_threshold(self):
+        checkpoint = self.checkpoint()
+        checkpoint["metadata"]["buy_threshold"] = float("nan")
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+            self.load_checkpoint(directory, checkpoint, buy_threshold=0.4)
+
+    def test_point_four_threshold_is_inclusive_through_prediction_and_adapter(self):
+        for market in ("domestic", "us"):
+            checkpoint = self.checkpoint()
+            checkpoint["metadata"]["market"] = market
+            with self.subTest(market=market), tempfile.TemporaryDirectory() as directory:
+                predictor = self.load_checkpoint(directory, checkpoint, buy_threshold=0.4)
+                for score, expected in ((0.3999, "hold"), (0.4, "buy"), (0.44, "buy")):
+                    with self.subTest(score=score):
+                        logits = Mock()
+                        logits.sigmoid.return_value.item.return_value = score
+                        with patch.object(predictor.model, "forward", return_value=logits):
+                            prediction = predictor.predict(self.bars(batch=1)[0])
+                        self.assertEqual(prediction["probability_ge_1pct"], score)
+                        self.assertEqual(prediction["buy_threshold"], 0.4)
+                        self.assertEqual(prediction["predicts_gain"], expected == "buy")
+                        decision = decide_position(current_price=100, quantity=0, sellable_quantity=0,
+                                                   prediction=prediction)
+                        self.assertEqual(decision["action"], expected)
+
+    def test_lower_entry_threshold_does_not_change_held_profit_loss_or_hold_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            predictor = self.load_checkpoint(directory, buy_threshold=0.4)
+            for score in (0.3999, 0.4, 0.44):
+                logits = Mock()
+                logits.sigmoid.return_value.item.return_value = score
+                with patch.object(predictor.model, "forward", return_value=logits):
+                    prediction = predictor.predict(self.bars(batch=1)[0])
+                for price, expected, field in (("101", "sell", "cost_profit_pct"),
+                                               ("99.2", "sell", "cost_loss_pct"),
+                                               ("100", "hold", None)):
+                    with self.subTest(score=score, price=price):
+                        decision = decide_position(current_price=price, quantity=1, sellable_quantity=1,
+                                                   average_price=100, prediction=prediction)
+                        self.assertEqual(decision["action"], expected)
+                        if field:
+                            self.assertEqual(decision[field], "1" if field == "cost_profit_pct" else "0.8")
 
     def test_inference_rejects_invalid_values_and_thirty_first_bar(self):
         with tempfile.TemporaryDirectory() as directory:
