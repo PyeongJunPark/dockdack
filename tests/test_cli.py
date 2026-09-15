@@ -79,9 +79,9 @@ class TerminalTests(unittest.TestCase):
                 FakeResponse({"return_code": 0, "ord_no": "123"}), inputs=["y"],
             )
             terminal.execute(parser().parse_args([side, "AAPL", "1", "--type", "current", "--exchange", "NASDAQ"]))
-            self.assertEqual(transport.calls[-1]["json"]["ord_uv"], "329.4900")
+            self.assertEqual(transport.calls[-1]["json"]["ord_uv"], "329.49")
             self.assertEqual(transport.calls[-1]["json"]["trde_tp"], "00")
-            self.assertTrue(any("지정가 329.4900 USD" in line for line in output))
+            self.assertTrue(any("지정가 329.49 USD" in line for line in output))
 
     def test_current_dry_run_queries_but_does_not_order(self):
         terminal, transport, _ = self.terminal(token_response(), FakeResponse({"cur_prc": "251250"}))

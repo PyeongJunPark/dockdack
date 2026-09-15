@@ -16,8 +16,12 @@ from PySide6.QtWidgets import (
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from dockdack import Market, OrderOutcomeUnknown, OrderRequest, OrderSide
+from dockdack import Market, OrderOutcomeUnknown, OrderRequest, OrderSide, TradingMode
 from dockdack.gui_service import Instrument, TradingService
+from dockdack.environment_gui import EnvironmentSelector, confirm_environment, environment_name
+from dockdack.environment_store import environment_base, selected_mode, store_for_service
+from dockdack.window_controls import WindowControls
+from dockdack.branding import APP_NAME, TAGLINE, app_icon, apply_branding, set_windows_app_id
 
 
 STYLE = """
@@ -50,7 +54,7 @@ QPushButton#primary:hover { background: #91ecd5; }
 QPushButton#buy { background: #ec617b; color: #fff; border: none; min-height: 26px; }
 QPushButton#sell { background: #527feb; color: #fff; border: none; min-height: 26px; }
 QPushButton:disabled { color: #637087; background: #1d2839; border-color: #29374c; }
-QPushButton#buy:disabled, QPushButton#sell:disabled { color: #637087; background: #1d2839; }
+QPushButton#buy:disabled, QPushButton#sell:disabled, QPushButton#primary:disabled { color: #637087; background: #1d2839; }
 QPushButton#watch { text-align: left; background: #172235; padding: 13px; }
 QTabWidget::pane { border: 1px solid #253249; border-radius: 7px; background: #121b2a; }
 QTabBar::tab { background: #101927; color: #93a4be; padding: 11px 18px; border-bottom: 2px solid transparent; }
@@ -103,6 +107,7 @@ def table(headers: list[str]) -> QTableWidget:
 
 class WorkerSignals(QObject):
     completed = Signal(object, object)
+    progress = Signal(object)
 
 
 class Worker(QRunnable):
@@ -122,16 +127,17 @@ class Worker(QRunnable):
 
 
 class OrderDialog(QDialog):
-    def __init__(self, request: OrderRequest, parent=None):
+    def __init__(self, request: OrderRequest, parent=None, *, mode=TradingMode.DEMO):
         super().__init__(parent)
-        self.setWindowTitle("모의 주문 최종 확인")
+        name = environment_name(mode)
+        self.setWindowTitle(f"{name} 주문 최종 확인")
         self.setMinimumWidth(450)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(17)
         side = "매수" if request.side is OrderSide.BUY else "매도"
         currency = "KRW" if request.market is Market.DOMESTIC else "USD"
-        layout.addWidget(label("모의투자 주문", "badge"))
+        layout.addWidget(label(f"{name} 주문" + (" · 실제 자금 사용" if mode is TradingMode.REAL else ""), "badge"))
         layout.addWidget(label(f"{request.symbol}  {side} {request.quantity:,}주", "heading"))
         price = f"{request.price:,.4f} {currency}" if request.price is not None else "시장가 / 체결가격 미정"
         layout.addWidget(label(f"거래소  {request.exchange}\n주문 단가  {price}"))
@@ -139,7 +145,7 @@ class OrderDialog(QDialog):
             layout.addWidget(label(f"주문금액  {request.estimated_notional:,.4f} {currency}\n수수료 제외", "section"))
         layout.addWidget(label("확인한 가격으로 한 번 전송합니다. 접수 후에도 체결 여부를 확인하세요.", "muted", wrap=True))
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(f"모의 {side} 전송")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(f"{'실전' if mode is TradingMode.REAL else '모의'} {side} 전송")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(False)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("돌아가기")
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
@@ -149,9 +155,16 @@ class OrderDialog(QDialog):
 
 
 class TradingWindow(QMainWindow):
-    def __init__(self, service: TradingService | None = None):
+    def __init__(self, service: TradingService | None = None, *, store=None):
         super().__init__()
         self.service = service or TradingService()
+        self.store = store if store is not None else store_for_service(self.service)
+        if self.store.mode is not selected_mode(self.service):
+            raise ValueError('거래 환경과 저장소가 다릅니다.')
+        if self.store.mode is TradingMode.REAL and self.store.storage_scope != getattr(self.service, 'storage_scope', None):
+            raise ValueError('실전 API 인증 범위와 저장소가 다릅니다.')
+        self._environment_base = environment_base(self.store)
+        self._environment_stores = {(self.store.mode, self.store.storage_scope): self.store}
         self.instrument: Instrument | None = None
         self.last_quote = None
         self._worker: Worker | None = None
@@ -160,15 +173,78 @@ class TradingWindow(QMainWindow):
         self._job_name = ""
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.setWindowTitle("DockDack | 모의투자 트레이딩 데스크")
+        self.setWindowTitle(f"{APP_NAME} | 모의투자 트레이딩 데스크")
+        self.setWindowIcon(app_icon())
+        self.window_controls = WindowControls(self)
         self.resize(1280, 880)
         self.setMinimumSize(1080, 790)
         self.setStyleSheet(STYLE)
         self._build()
+        self._sync_environment()
         self.timer = QTimer(self)
         self.timer.setInterval(15000)
         self.timer.timeout.connect(self._auto_refresh)
         self.timer.start()
+
+    def _sync_environment(self):
+        mode = selected_mode(self.service)
+        name = environment_name(mode)
+        self.environment_selector.apply(mode)
+        self.account_mode_badge.setText(f'{name} 계좌 · 선택')
+        market_index = self.order_kind.findData('market')
+        self.order_kind.setItemText(market_index, '시장가' if mode is TradingMode.REAL else '시장가 (국내)')
+        self.environment_notice.setText(
+            '실제 자금이 사용됩니다.\n실전 API 키와\nDOCKDACK_ALLOW_LIVE_ORDERS=true가 필요합니다.'
+            if mode is TradingMode.REAL else '가상 자금으로 거래합니다.\n모의 API 키는 로컬 .env에서 읽습니다.')
+        self.environment_notice.setStyleSheet('color: #ffad9d;' if mode is TradingMode.REAL else '')
+        self.setWindowTitle(f'{APP_NAME} | {name} 트레이딩 데스크')
+        self.statusBar().showMessage(f'{name} · 주문 접수와 체결은 다릅니다')
+
+    def _clear_environment_context(self):
+        self.instrument = self.last_quote = None
+        self.auto_refresh.setChecked(False)
+        self.stock_name.setText('거래 환경 전환 · 종목을 새로 조회하세요')
+        self.price_label.setText('—')
+        self.change_label.setText('이전 환경 시세를 사용하지 않습니다.')
+        self.market_tag.setText('—')
+        self.order_symbol.setText('선택된 종목 없음')
+        self.quote_time.setText('아직 조회하지 않음')
+        self.limit_price.setValue(0)
+        for view in (self.positions, self.open_orders, self.executions, self.activity):
+            view.setRowCount(0)
+        for metric in (self.cash_label, self.available_label, self.profit_label):
+            metric.setText('—')
+        self._set_busy(False)
+
+    def request_environment(self, mode):
+        mode = TradingMode(mode)
+        if self._worker or self._confirming or mode is selected_mode(self.service):
+            return
+        self._confirming = True
+        self._set_busy(True)
+        try:
+            if not confirm_environment(self, mode):
+                return
+            service = TradingService(mode=mode)
+            if mode is TradingMode.REAL:
+                service.acknowledge_live_risk('REAL_TRADING_RISK_ACKNOWLEDGED')
+            key = (mode, service.storage_scope)
+            store = self._environment_stores.get(key)
+            if store is None:
+                store = store_for_service(service, base_folder=self._environment_base)
+                self._environment_stores[key] = store
+            revoke = getattr(self.service, 'revoke_live_risk', None)
+            if revoke:
+                revoke()
+            self.service, self.store = service, store
+            self._clear_environment_context()
+            self._sync_environment()
+            self.message.setText(f'{environment_name(mode)} 선택됨 · 종목과 계좌를 새로 조회한 뒤 주문하세요.')
+        except Exception as exc:
+            self.message.setText(f'거래 환경 전환 실패: {exc}')
+        finally:
+            self._confirming = False
+            self._set_busy(False)
 
     def _build(self):
         root = QWidget()
@@ -183,10 +259,18 @@ class TradingWindow(QMainWindow):
         left = QVBoxLayout(self.sidebar)
         left.setContentsMargins(18, 28, 18, 20)
         left.setSpacing(13)
-        left.addWidget(label("DockDack", "brand"))
-        left.addWidget(label("KIWOOM TRADING", "muted"))
+        brand_mark = QLabel()
+        brand_mark.setPixmap(app_icon().pixmap(48, 48))
+        brand_mark.setToolTip("야구의 똑딱이 타자 · 짧고 정확한 타격을 담은 DOCKDACK 심볼")
+        left.addWidget(brand_mark)
+        left.addWidget(label(APP_NAME, "brand"))
+        left.addWidget(label(TAGLINE, "muted"))
         left.addSpacing(30)
-        left.addWidget(label("관심 종목", "section"))
+        self.watchlist_button = QPushButton("관심종목 · 자동매매")
+        self.watchlist_button.setObjectName("primary")
+        self.watchlist_button.clicked.connect(self.open_watchlist)
+        left.addWidget(self.watchlist_button)
+        left.addWidget(label("바로가기", "section"))
         self.watch_buttons = []
         for symbol, name in (("005930", "삼성전자"), ("000660", "SK하이닉스"), ("AAPL", "애플"), ("GOOGL", "알파벳 A")):
             button = QPushButton(f"{name}\n{symbol}")
@@ -195,8 +279,10 @@ class TradingWindow(QMainWindow):
             left.addWidget(button)
             self.watch_buttons.append(button)
         left.addStretch()
-        left.addWidget(label("모의 계좌 연결", "badge"))
-        left.addWidget(label("실제 자금이 사용되지 않습니다.\nAPI 키는 로컬 .env에서 읽습니다.", "muted", wrap=True))
+        self.account_mode_badge = label("모의 계좌 연결", "badge")
+        self.environment_notice = label("", "muted", wrap=True)
+        left.addWidget(self.account_mode_badge)
+        left.addWidget(self.environment_notice)
         outer.addWidget(self.sidebar)
         main = QVBoxLayout()
         main.setContentsMargins(26, 23, 26, 18)
@@ -208,7 +294,10 @@ class TradingWindow(QMainWindow):
         headings.addWidget(label("국내 · 미국주식  /  현재가, 주문, 계좌를 한곳에서", "muted"))
         heading.addLayout(headings)
         heading.addStretch()
-        heading.addWidget(label("●  모의투자", "badge"))
+        self.environment_selector = EnvironmentSelector(selected_mode(self.service))
+        self.environment_selector.requested.connect(self.request_environment)
+        heading.addWidget(self.environment_selector)
+        self.window_controls.add_to(heading)
         main.addLayout(heading)
 
         self.search_panel = QWidget()
@@ -290,7 +379,7 @@ class TradingWindow(QMainWindow):
         fields.addWidget(self.quantity, 1, 0)
         fields.addWidget(self.limit_price, 1, 1)
         order_layout.addLayout(fields)
-        self.order_hint = label("최신 현재가를 다시 조회해 지정가로 주문합니다. 전송 전 최종 가격을 확인하세요.", "muted", wrap=True)
+        self.order_hint = label("최신 현재가로 지정가를 준비합니다. 미국 가격 단위는 매수 내림·매도 올림하며 수량은 그대로입니다. 최종 가격을 확인하세요.", "muted", wrap=True)
         order_layout.addWidget(self.order_hint)
         order_layout.addStretch()
         buttons = QHBoxLayout()
@@ -328,6 +417,7 @@ class TradingWindow(QMainWindow):
         self._set_busy(False)
 
     def _set_busy(self, busy: bool):
+        self.environment_selector.setEnabled(not busy)
         for widget in (self.search_panel, self.ticket, self.sidebar):
             widget.setEnabled(not busy)
         enabled = not busy and self.instrument is not None
@@ -339,8 +429,8 @@ class TradingWindow(QMainWindow):
     def _order_type_changed(self):
         kind = self.order_kind.currentData()
         self.limit_price.setEnabled(kind == "limit")
-        hints = {"current": "최신 현재가를 다시 조회해 지정가로 주문합니다. 전송 전 최종 가격을 확인하세요.",
-                 "limit": "입력한 단가로 지정가 주문합니다. 국내는 원, 미국은 달러 기준입니다.",
+        hints = {"current": "최신 현재가로 지정가를 준비합니다. 미국 가격 단위는 매수 내림·매도 올림하며 수량은 그대로입니다. 최종 가격을 확인하세요.",
+                 "limit": "입력한 단가로 주문합니다. 미국 $1 이상은 소수 2자리, 미만은 4자리까지입니다. 가격을 임의로 반올림하지 않습니다.",
                  "market": "체결가격이 정해지지 않은 주문입니다. 미국 모의투자는 지정가만 지원합니다."}
         self.order_hint.setText(hints[kind])
 
@@ -387,6 +477,25 @@ class TradingWindow(QMainWindow):
         self.statusBar().showMessage(f"{name} 완료 · {datetime.now():%H:%M:%S}")
         if callback is not None:
             callback(result)
+
+    def open_watchlist(self):
+        if self._worker or self._confirming:
+            return
+        from dockdack.watch_gui import WatchlistDialog
+        self._confirming = True
+        self._set_busy(True)
+        try:
+            dialog = WatchlistDialog(self.service, self.store, parent=self)
+            dialog.exec()
+            if dialog.service is not self.service:
+                self.service, self.store = dialog.service, dialog.store
+                self._clear_environment_context()
+                self._sync_environment()
+        except Exception as exc:
+            self.message.setText(f"관심종목 화면을 열 수 없습니다: {exc}")
+        finally:
+            self._confirming = False
+            self._set_busy(False)
 
     def select_symbol(self, symbol: str):
         self.symbol_input.setText(symbol)
@@ -455,7 +564,7 @@ class TradingWindow(QMainWindow):
         self._run("주문 준비", lambda: self.service.prepare(instrument, side, quantity, kind, price), self._confirm_prepared)
 
     def confirm_order(self, request: OrderRequest) -> bool:
-        return OrderDialog(request, self).exec() == QDialog.DialogCode.Accepted
+        return OrderDialog(request, self, mode=selected_mode(self.service)).exec() == QDialog.DialogCode.Accepted
 
     def _confirm_prepared(self, request):
         self._confirming = True
@@ -469,11 +578,14 @@ class TradingWindow(QMainWindow):
             self.log("주문 확인 취소 · 전송하지 않음")
             self.message.setText("주문을 전송하지 않았습니다.")
             return
-        self._run("주문 전송", lambda: self.service.submit(request), self._order_submitted)
+        from dockdack.manual_orders import submit_manual_order
+        reference = self.last_quote.price if self.last_quote is not None else None
+        service, store = self.service, self.store
+        self._run("주문 전송", lambda: submit_manual_order(service, store, request, reference), self._order_submitted)
 
     def _order_submitted(self, result):
         side = "매수" if result.request.side is OrderSide.BUY else "매도"
-        text = f"모의 {side} 접수 · {result.request.symbol} {result.request.quantity}주 · 주문번호 {result.order_number or '확인 필요'}"
+        text = f"{'실전' if result.mode is TradingMode.REAL else '모의'} {side} 접수 · {result.request.symbol} {result.request.quantity}주 · 주문번호 {result.order_number or '확인 필요'}"
         self.log(text)
         self.message.setText(text + " / 체결 상태를 조회합니다.")
         self.tabs.setCurrentWidget(self.executions)
@@ -486,9 +598,13 @@ class TradingWindow(QMainWindow):
         def load():
             # Retain successful sections even when another account endpoint fails.
             result = {}
-            for key, operation in (("account", self.service.account), ("orders", self.service.orders), ("executions", self.service.executions)):
+            execution_reader = getattr(self.service, 'safety_executions', self.service.executions)
+            for key, operation in (("account", self.service.account), ("orders", self.service.orders), ("executions", execution_reader)):
                 try:
                     result[key] = operation(instrument)
+                    if key == 'executions':
+                        from dockdack.manual_orders import reconcile_manual_executions
+                        reconcile_manual_executions(self.store, instrument, result[key])
                 except Exception as exc:
                     result[key] = exc
             return result
@@ -546,7 +662,9 @@ def main() -> int:
     from dotenv import load_dotenv
     # The executable/shortcut can start outside the repository directory.
     load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+    set_windows_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
+    apply_branding(app)
     app.setStyle("Fusion")
     app.setFont(QFont("Malgun Gothic", 10))
     window = TradingWindow()

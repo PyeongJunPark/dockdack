@@ -23,7 +23,7 @@ class CurrentPriceOrderTests(unittest.TestCase):
                         market=market, symbol=symbol.lower(), quantity=2,
                     )
                     order = transport.calls[-1]
-                    self.assertEqual(order["json"]["ord_uv"], "251250" if market == "domestic" else "329.4900")
+                    self.assertEqual(order["json"]["ord_uv"], "251250" if market == "domestic" else "329.49")
                     self.assertEqual(order["json"]["trde_tp"], "0" if market == "domestic" else "00")
                     self.assertEqual(order["json"]["ord_qty"], "2")
                     self.assertEqual(order["headers"]["api-id"],
