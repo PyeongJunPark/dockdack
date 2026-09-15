@@ -72,6 +72,43 @@ class UniverseTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(BrokerAPIError):
                 top_turnover(Pages(body), Market.US)
 
+    def test_us_np_listing_before_100_is_excluded_without_remapping_or_stopping(self):
+        classified = set()
+        def classify(http, market, candidates):
+            candidates = frozenset(candidates)
+            classified.update(candidates)
+            return candidates
+        self.classifier.side_effect = classify
+        rows = [dict(stk_cd=f"S{i}", rank=str(i + 1), stex_tp="ND", trde_prica=str(1000 - i))
+                for i in range(99)]
+        unsupported = dict(stk_cd="TCEHY", rank="100", stex_tp="NP", trde_prica="901")
+        final = dict(stk_cd="LAST", rank="101", stex_tp="NY", trde_prica="900")
+        http = Pages({"result_list": rows + [unsupported]}, {"result_list": [final]})
+        ranks = top_turnover(http, Market.US, 100)
+        self.assertEqual(len(ranks), 100)
+        self.assertEqual(http.read, 2)
+        self.assertEqual(ranks[-1].symbol, "LAST")
+        self.assertNotIn("TCEHY", {r.symbol for r in ranks})
+        self.assertTrue(all(r.exchange in {"ND", "NY", "NA"} for r in ranks))
+        self.assertEqual(len(classified), 100)
+        self.assertNotIn(("TCEHY", "NP"), classified)
+
+    def test_us_np_does_not_pad_short_supported_common_share_list(self):
+        rows = [dict(stk_cd="AAPL", stex_tp="ND", rank="1", trde_prica="100"),
+                dict(stk_cd="TCEHY", stex_tp="NP", rank="2", trde_prica="99")]
+        with self.assertRaisesRegex(BrokerAPIError, "1개뿐"):
+            top_turnover(Pages({"result_list": rows}), Market.US, 2)
+
+    def test_us_missing_blank_and_unknown_exchange_still_fail_closed(self):
+        for exchange in (None, "", "  ", "BAD", "ZZ"):
+            row = dict(stk_cd="AAPL", rank="1", trde_prica="100")
+            if exchange is not None:
+                row["stex_tp"] = exchange
+            with self.subTest(exchange=exchange), self.assertRaisesRegex(BrokerAPIError, "거래소"):
+                top_turnover(Pages({"result_list": [row]}), Market.US, 1)
+        with self.assertRaisesRegex(BrokerAPIError, "종목"):
+            top_turnover(Pages({"result_list": [dict(stk_cd="", stex_tp="NP", rank="1", trde_prica="100")]}), Market.US, 1)
+
     def test_case_sensitive_share_class_survives_rank_and_watchlist(self):
         from dockdack.cli import identify_symbol
         from dockdack import KiwoomBroker
