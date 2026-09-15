@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>DOCKDACK — the contact hitter</title>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="#132239"/>
+  <path d="M58 63h56c60 0 91 28 91 65s-31 65-91 65H58z" fill="#65dfc3"/>
+  <path d="M91 94v68h23c37 0 56-14 56-34s-19-34-56-34z" fill="#132239"/>
+  <path d="M71 179l68-69c8-8 19-8 26-1s7 18-1 26l-69 68" fill="#f2c88c"/>
+  <path d="M70 180l23 23-9 10-24-24z" fill="#d99a62"/>
+  <path d="M58 191l24 24" stroke="#f7e6c7" stroke-width="10" stroke-linecap="round"/>
+  <path d="M137 70l-20-5m26 19l-17-1" stroke="#b1f3e1" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="185" cy="69" r="30" fill="#f6f5ed"/>
+  <path d="M169 45c15 11 15 34 1 49m30-46c-12 11-12 29 0 43" fill="none" stroke="#ee7187" stroke-width="4"/>
+  <path d="M169 55l8-4m-7 17l9-1m-10 15l8 3m18-29l8 4m-10 8l9 1m-9 9l9-2" stroke="#ee7187" stroke-width="3" stroke-linecap="round"/>
+</svg>

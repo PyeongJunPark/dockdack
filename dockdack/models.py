@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
@@ -161,6 +162,37 @@ class OrderExecution:
     order_price: Decimal
     fill_price: Decimal
     order_time: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionHistoryRecord:
+    """A dated broker order snapshot, not individual fill events.
+
+    ``order_date`` is the explicit query date, not a date returned by the API;
+    the US API does not document the query date's timezone. History retention
+    and multi-share VWAP semantics are not assumed. ``fill_price`` is usable
+    only for a verified one-share fill. An empty exchange means unknown venue.
+    """
+
+    market: Market
+    order_date: date
+    order_number: str
+    symbol: str
+    exchange: str
+    side: OrderSide
+    order_quantity: Decimal
+    filled_quantity: Decimal
+    remaining_quantity: Decimal
+    order_price: Decimal | None
+    fill_price: Decimal | None
+    reported_fill_price: Decimal | None
+    price_basis: str
+    order_time: str
+    fill_time: str
+    status: str
+    currency: str
+    source_api: str
+    original_order_number: str = ""
 
 
 @dataclass(frozen=True, slots=True)

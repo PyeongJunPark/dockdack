@@ -42,7 +42,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def identify_symbol(value: str, market: str | None = None) -> tuple[Market, str]:
-    symbol = value.strip().upper()
+    from dockdack.symbols import normalize_symbol
+    symbol = normalize_symbol(value)
     if re.fullmatch(r"A[0-9]{6}", symbol):
         symbol = symbol[1:]
     domestic = re.fullmatch(r"[0-9][A-Z0-9]{5}", symbol) is not None
@@ -50,7 +51,7 @@ def identify_symbol(value: str, market: str | None = None) -> tuple[Market, str]
     if selected is Market.DOMESTIC:
         if not re.fullmatch(r"[A-Z0-9]{6}", symbol):
             raise ValueError("한국 종목코드는 6자리로 입력하세요. 예: 005930")
-    elif not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,11}", symbol):
+    elif not re.fullmatch(r"[A-Z][A-Za-z0-9.-]{0,11}", symbol):
         raise ValueError("미국 티커를 확인하세요. 예: AAPL (한국 코드는 005930)")
     return selected, symbol
 

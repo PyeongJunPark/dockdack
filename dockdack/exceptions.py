@@ -28,6 +28,10 @@ class OrderOutcomeUnknown(BrokerAPIError):
     """An order acknowledgement is incomplete; reconcile before resubmitting."""
 
 
+class OrderNotSent(BrokerError):
+    """A final local safety gate denied an order before any transport send."""
+
+
 class LiveOrderConfirmationRequired(BrokerError):
     """Raised when the live-order safety gates have not been satisfied."""
 

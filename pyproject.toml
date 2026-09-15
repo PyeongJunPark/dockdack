@@ -11,6 +11,8 @@ requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.0,<2",
     "requests>=2.31,<3",
+    "tzdata>=2025.2",
+    "exchange-calendars>=4.13.2,<5",
 ]
 
 [project.scripts]
@@ -27,3 +29,6 @@ conditions = [
 
 [tool.setuptools.packages.find]
 include = ["dockdack*"]
+
+[tool.setuptools.package-data]
+dockdack = ["assets/*.svg", "assets/*.ico"]

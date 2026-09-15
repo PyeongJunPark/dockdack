@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from dockdack import KiwoomBroker, Market, TradingMode
 from dockdack.gui_service import TradingService
@@ -65,6 +67,53 @@ class GuiServiceTests(unittest.TestCase):
             self.assertEqual(orders[0].remaining_quantity, 1)
             self.assertEqual(orders[0].status, "접수")
             self.assertEqual(transport.calls[-1]["headers"]["api-id"], "ust21510")
+
+    def test_safety_orders_rejects_missing_or_malformed_lists(self):
+        for body in ({}, {"oso": None}, {"oso": [{"stk_cd": "005930", "ord_no": "1"}]}):
+            service, _ = self.service(token_response(), FakeResponse(body))
+            with self.assertRaises(ValueError):
+                service.safety_orders(service.resolve("005930"))
+
+    def test_safety_account_rejects_missing_position_quantities(self):
+        service, _ = self.service(token_response(), FakeResponse({"acnt_evlt_remn_indv_tot": [{"stk_cd": "005930"}]}),
+                                  FakeResponse({"ord_alow_amt": "10000"}))
+        with self.assertRaises(ValueError):
+            service.safety_account(service.resolve("005930"))
+
+    def test_us_non_usd_deposit_is_not_used_as_usd_available_funds(self):
+        service, _ = self.service(token_response(), FakeResponse({"result_list": []}),
+                                  FakeResponse({"result_list": [{"crnc_code": "JPY", "fc_entra": "100000", "fc_ord_alowa": "100000"}]}))
+        account = service.safety_account(service.resolve("AAPL", "ND"))
+        self.assertIsNone(account.available_to_order)
+        self.assertIsNone(account.cash)
+
+    def test_safety_executions_rejects_missing_quantity_or_list(self):
+        for body in ({}, {"cntr": [{"ord_no": "1", "stk_cd": "005930", "ord_qty": "1", "cntr_qty": "1"}]}):
+            service, _ = self.service(token_response(), FakeResponse(body))
+            with self.assertRaises(ValueError):
+                service.safety_executions(service.resolve("005930"))
+
+    def test_protected_symbols_reads_all_market_holdings_and_orders(self):
+        for market, exchange, currency in ((Market.DOMESTIC, "KRX", "KRW"), (Market.US, "%", "USD")):
+            service = TradingService()
+            account = SimpleNamespace(market=market, currency=currency, positions=(
+                SimpleNamespace(market=market, currency=currency, symbol="HELD", quantity=Decimal(1)),))
+            broker = Mock()
+            broker.list_open_orders.return_value = (
+                SimpleNamespace(symbol="PENDING", remaining_quantity=Decimal(1)),
+                SimpleNamespace(symbol="DONE", remaining_quantity=Decimal(0)))
+            with patch.object(service, "safety_account", return_value=account), patch.object(service, "broker", return_value=broker):
+                self.assertEqual(service.protected_symbols(market), {"HELD", "PENDING"})
+            broker.list_open_orders.assert_called_once_with(market, exchange=exchange, strict=True)
+
+    def test_protected_symbols_fails_closed_for_unverifiable_quantity(self):
+        service = TradingService()
+        account = SimpleNamespace(market=Market.US, currency="USD", positions=(
+            SimpleNamespace(market=Market.US, currency="USD", symbol="AAPL", quantity=Decimal("NaN")),))
+        with patch.object(service, "safety_account", return_value=account), patch.object(service, "broker") as broker:
+            with self.assertRaises(ValueError):
+                service.protected_symbols(Market.US)
+        broker.assert_not_called()
 
 
 if __name__ == "__main__":

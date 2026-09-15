@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from datetime import date
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from dockdack.conditions import ConnectFactory, KiwoomConditionClient
 from dockdack.config import KiwoomConfig
 from dockdack.exceptions import LiveOrderConfirmationRequired, OrderOutcomeUnknown
 from dockdack.http import HttpTransport, KiwoomHTTPClient
+from dockdack.history import DailyHistory, fetch_daily_history
+from dockdack.universe import RankedStock, top_turnover
+from dockdack.symbols import normalize_symbol
+from dockdack.order_prices import current_limit_price, validate_us_order_price
 from dockdack.models import (
     AccountSnapshot,
     CancelResult,
     ConditionMatch,
     DomesticExchange,
+    ExecutionHistoryRecord,
     Market,
     OpenOrder,
     OrderRequest,
@@ -135,7 +141,7 @@ class KiwoomBroker:
         exchanges = {
             _us_exchange(str(row.get("stex_tp", "")), allow_all=False)
             for row in _records(body.get("list", []), _US_STOCK_KEYS)
-            if str(row.get("stk_cd", "")).strip().upper() == ticker
+            if str(row.get("stk_cd", "")).strip() == ticker
         }
         if len(exchanges) != 1:
             raise ValueError(
@@ -155,6 +161,23 @@ class KiwoomBroker:
         if selected_market is Market.DOMESTIC:
             return self.quote_domestic(symbol, exchange=exchange)
         return self.quote_us(symbol, exchange=exchange)
+
+    def top_turnover(self, market: Market | str, limit: int = 100) -> tuple[RankedStock, ...]:
+        selected = _market(market)
+        return top_turnover(self._http_for(selected), selected, limit)
+
+    def common_equities(self, market: Market, candidates):
+        from dockdack.equity_policy import common_equities
+        selected = _market(market)
+        return common_equities(self._http_for(selected), selected, candidates)
+
+    def daily_history(self, market: Market | str, symbol: str, *,
+                      exchange: DomesticExchange | USExchange | str, days: int = 30,
+                      as_of: date | None = None) -> DailyHistory:
+        selected = _market(market)
+        venue = _domestic_exchange(exchange) if selected is Market.DOMESTIC else _us_exchange(exchange, allow_all=False)
+        ticker = _clean_domestic_symbol(_symbol(symbol)) if selected is Market.DOMESTIC else _symbol(symbol)
+        return fetch_daily_history(self._http_for(selected), selected, ticker, venue.value, days, as_of=as_of)
 
     def list_domestic_stocks(
         self,
@@ -400,6 +423,7 @@ class KiwoomBroker:
         exchange: DomesticExchange | USExchange | str,
         symbol: str = "",
         max_pages: int = 10,
+        strict: bool = False,
     ) -> tuple[OpenOrder, ...]:
         """Return outstanding orders so API acceptance is not mistaken for a fill."""
         selected_market = _market(market)
@@ -423,6 +447,8 @@ class KiwoomBroker:
                 body=body,
                 max_pages=max_pages,
             ):
+                if strict:
+                    _validate_order_rows(page.body.get("oso"), "oso_qty")
                 rows.extend(_records(page.body.get("oso", []), _DOMESTIC_OPEN_ORDER_KEYS))
             return tuple(_domestic_open_order(row) for row in rows)
 
@@ -439,6 +465,8 @@ class KiwoomBroker:
             body=body,
             max_pages=max_pages,
         ):
+            if strict:
+                _validate_order_rows(page.body.get("result_list"), "ord_remnq")
             rows.extend(_records(page.body.get("result_list", []), _US_OPEN_ORDER_KEYS))
         return tuple(_us_open_order(row) for row in rows)
 
@@ -449,6 +477,7 @@ class KiwoomBroker:
         symbol: str,
         exchange: DomesticExchange | USExchange | str,
         max_pages: int = 10,
+        strict: bool = False,
     ) -> tuple[OrderExecution, ...]:
         """Read today's order/fill records, including actual fill quantity and price."""
         selected_market = _market(market)
@@ -466,9 +495,18 @@ class KiwoomBroker:
         for page in self._http_for(selected_market).iter_pages(
             api_id=api_id, path=path, body=body, max_pages=max_pages,
         ):
-            rows = page.body.get("cntr", []) if selected_market is Market.DOMESTIC else (
-                page.body.get("result_list", page.body.get("result_lsit", []))
+            fallback = None if strict else []
+            rows = page.body.get("cntr", fallback) if selected_market is Market.DOMESTIC else (
+                page.body.get("result_list", page.body.get("result_lsit", fallback))
             )
+            if strict:
+                remaining_key = "oso_qty" if selected_market is Market.DOMESTIC else "ord_remnq"
+                # Missing quantity fields must never be interpreted as a completed fill.
+                _validate_order_rows(rows, remaining_key)
+                for row in rows:
+                    for key in ("ord_qty", "cntr_qty"):
+                        if _required_decimal(row.get(key), key) < 0:
+                            raise ValueError("체결 수량이 음수입니다.")
             for row in _records(rows):
                 orders.append(OrderExecution(
                     order_number=str(row.get("ord_no", "")),
@@ -483,6 +521,59 @@ class KiwoomBroker:
                     order_time=str(row.get("ord_tm") or row.get("ord_time", "")),
                 ))
         return tuple(orders)
+
+    def list_execution_history(
+        self,
+        market: Market | str,
+        day: date,
+        *,
+        max_pages: int = 10,
+    ) -> tuple[ExecutionHistoryRecord, ...]:
+        """Read complete account/day order history without per-symbol calls.
+
+        Official schemas: Kiwoom-Securities/Kiwoom-REST-API, examples/
+        국내주식/계좌/get_domestic_account_order_fill_detail.py (kt00007), and
+        미국주식/계좌/get_overseas_daily_order_fills.py (ust21150).
+        No undocumented retention, US query timezone, or VWAP is assumed.
+        """
+        if type(day) is not date:
+            raise ValueError("체결 조회일은 datetime.date 형식이어야 합니다.")
+        if type(max_pages) is not int or not 1 <= max_pages <= 100:
+            raise ValueError("체결 조회 페이지 상한은 1~100 사이 정수여야 합니다.")
+        selected = _market(market)
+        if selected is Market.DOMESTIC:
+            api_id, path = "kt00007", "/api/dostk/acnt"
+            body = {"ord_dt": day.strftime("%Y%m%d"), "qry_tp": "1",
+                    "stk_bond_tp": "1", "sell_tp": "0", "stk_cd": "",
+                    "fr_ord_no": "", "dmst_stex_tp": "%"}
+        else:
+            api_id, path = "ust21150", "/api/us/acnt"
+            body = {"ord_dt": day.strftime("%Y%m%d"), "query_tp": "1",
+                    "slby_tp": "0", "stex_tp": "", "stk_cd": "",
+                    "oppo_trde_tp": "%", "fr_ord_no": ""}
+        records: list[ExecutionHistoryRecord] = []
+        by_order: dict[str, ExecutionHistoryRecord] = {}
+        for page in self._http_for(selected).iter_pages(
+            api_id=api_id, path=path, body=body, max_pages=max_pages,
+        ):
+            if selected is Market.DOMESTIC:
+                rows = page.body.get("acnt_ord_cntr_prps_dtl")
+            else:
+                # The official JSON schema and response example differ here.
+                rows = page.body.get("result_list", page.body.get("result_lsit"))
+            if not isinstance(rows, list):
+                raise ValueError("체결 내역 응답 목록이 없거나 잘못되었습니다.")
+            for row in rows:
+                record = _execution_history_record(row, selected, day, api_id)
+                previous = by_order.get(record.order_number)
+                if previous is not None:
+                    # Never add snapshots as if they were distinct executions.
+                    if previous != record:
+                        raise ValueError("동일 주문번호의 체결 내역이 서로 달라 가격을 확정할 수 없습니다.")
+                    continue
+                by_order[record.order_number] = record
+                records.append(record)
+        return tuple(records)
 
     def build_order(
         self,
@@ -499,6 +590,11 @@ class KiwoomBroker:
         selected_market = _market(market)
         selected_side = _side(side)
         _validate_order_quantity(quantity)
+        if selected_market is Market.US:
+            if price is not None:
+                price = validate_us_order_price(_decimal(price), "미국 주문 가격")
+            if stop_price is not None:
+                stop_price = validate_us_order_price(_decimal(stop_price), "미국 스톱 가격")
         selected_price = _order_decimal(price, "주문 가격")
         selected_stop_price = _order_decimal(stop_price, "스톱 가격")
 
@@ -538,7 +634,7 @@ class KiwoomBroker:
         quantity: int,
         exchange: DomesticExchange | USExchange | str | None = None,
     ) -> OrderRequest:
-        """Fetch a quote and build a limit order at that price, without submitting."""
+        """Fetch a quote and build a side-conservative legal limit, without submitting."""
         selected_market = _market(market)
         selected_side = _side(side)
         _validate_order_quantity(quantity)
@@ -556,7 +652,8 @@ class KiwoomBroker:
             raise ValueError("조회한 현재가의 종목코드가 요청 종목과 다릅니다. 주문을 중단합니다.")
         return self.build_order(
             market=selected_market, side=selected_side, symbol=selected_symbol,
-            quantity=quantity, exchange=selected_exchange, price=quote.price, order_type="limit",
+            quantity=quantity, exchange=selected_exchange,
+            price=current_limit_price(selected_market, selected_side, quote.price), order_type="limit",
         )
 
     def buy_at_current_price(
@@ -568,7 +665,7 @@ class KiwoomBroker:
         exchange: DomesticExchange | USExchange | str | None = None,
         confirm_live_order: str | None = None,
     ) -> OrderResult:
-        """Buy once with a limit equal to the latest queried price; a fill is not guaranteed."""
+        """Buy once at a legal limit no higher than the quote; a fill is not guaranteed."""
         return self._trade_at_current_price(
             market=market, side=OrderSide.BUY, symbol=symbol, quantity=quantity,
             exchange=exchange, confirm_live_order=confirm_live_order,
@@ -583,7 +680,7 @@ class KiwoomBroker:
         exchange: DomesticExchange | USExchange | str | None = None,
         confirm_live_order: str | None = None,
     ) -> OrderResult:
-        """Sell once with a limit equal to the latest queried price; a fill is not guaranteed."""
+        """Sell once at a legal limit no lower than the quote; a fill is not guaranteed."""
         return self._trade_at_current_price(
             market=market, side=OrderSide.SELL, symbol=symbol, quantity=quantity,
             exchange=exchange, confirm_live_order=confirm_live_order,
@@ -849,7 +946,7 @@ def _us_exchange(value: USExchange | str, *, allow_all: bool) -> USExchange:
 
 
 def _symbol(value: str) -> str:
-    result = str(value).strip().upper()
+    result = normalize_symbol(str(value))
     if not result:
         raise ValueError("종목코드가 필요합니다.")
     return result
@@ -872,6 +969,99 @@ def _clean_domestic_symbol(symbol: str) -> str:
         if result.endswith(suffix):
             result = result[: -len(suffix)]
     return result
+
+
+def _validate_order_rows(rows, remaining_key: str):
+    if not isinstance(rows, list):
+        raise ValueError("미체결 응답 목록이 없거나 잘못되었습니다. 자동 주문을 차단합니다.")
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("stk_cd") or not row.get("ord_no"):
+            raise ValueError("미체결 응답의 종목·주문번호를 확인할 수 없습니다.")
+        quantity = _required_decimal(row.get(remaining_key), "미체결 잔량")
+        if quantity < 0:
+            raise ValueError("미체결 잔량이 음수입니다.")
+
+
+def _execution_history_record(row: Any, market: Market, day: date,
+                              api_id: str) -> ExecutionHistoryRecord:
+    if not isinstance(row, dict):
+        raise ValueError("체결 내역 행이 올바른 객체가 아닙니다.")
+
+    def text_field(key: str, *, required: bool = False) -> str:
+        value = row.get(key, "")
+        if not isinstance(value, str) or (required and not value.strip()):
+            raise ValueError(f"체결 내역의 {key} 값을 확인할 수 없습니다.")
+        return value.strip()
+
+    def quantity(key: str) -> Decimal:
+        value = _required_decimal(row.get(key), key)
+        if value < 0 or value != value.to_integral_value():
+            raise ValueError(f"체결 내역의 {key} 수량이 올바르지 않습니다.")
+        return value
+
+    def price(key: str) -> Decimal | None:
+        raw = row.get(key)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        value = _required_decimal(raw, key)
+        if value < 0:
+            raise ValueError(f"체결 내역의 {key} 가격이 음수입니다.")
+        return value if value > 0 else None
+
+    order_number = text_field("ord_no", required=True)
+    if not order_number.isascii() or not order_number.isdigit() or int(order_number) == 0:
+        raise ValueError("체결 내역의 주문번호가 올바르지 않습니다.")
+    symbol = text_field("stk_cd", required=True)
+    exchange = ""
+    if market is Market.DOMESTIC:
+        symbol = _clean_domestic_symbol(symbol)
+        # The account endpoint also documents J:ELW / Q:ETN prefixes. Keep
+        # those prefixes so unrelated account instruments cannot alias a stock.
+        digits = symbol[1:] if symbol.startswith(("J", "Q")) else symbol
+        if len(digits) != 6 or not digits.isascii() or not digits.isdigit():
+            raise ValueError("체결 내역의 국내 종목번호가 올바르지 않습니다.")
+        exchange = text_field("dmst_stex_tp", required=True).upper()
+        if exchange not in {"KRX", "NXT", "SOR"}:
+            raise ValueError("체결 내역의 국내 거래소를 확인할 수 없습니다.")
+        side_text = text_field("io_tp_nm", required=True)
+        order_time, fill_time = text_field("ord_tm"), ""
+        status = text_field("acpt_tp")
+        original_order = text_field("ori_ord")
+        currency = "KRW"
+    else:
+        symbol = _symbol(symbol)
+        currency = text_field("crnc_code", required=True).upper()
+        if currency != "USD":
+            raise ValueError("미국 체결 내역의 통화가 USD가 아닙니다.")
+        # stex_nm is a country display name (e.g. 미국), not ND/NY/NA.
+        side_text = text_field("slby_tp_nm", required=True)
+        order_time, fill_time = text_field("ord_time"), text_field("cntr_time")
+        status = text_field("ord_stat_nm")
+        original_order = ""
+    buy, sell = "매수" in side_text, "매도" in side_text
+    if buy == sell:
+        raise ValueError("체결 내역의 매수·매도 방향을 확인할 수 없습니다.")
+    order_qty, filled, remaining = (quantity(key) for key in ("ord_qty", "cntr_qty", "ord_remnq"))
+    if order_qty <= 0 or filled > order_qty or remaining > order_qty or filled + remaining > order_qty:
+        raise ValueError("체결 내역의 주문·체결·잔량 수량이 일치하지 않습니다.")
+    reported = price("cntr_uv")
+    fill_price = None
+    if filled == 0:
+        basis = "not_filled"
+    elif reported is None:
+        basis = "missing"
+    elif order_qty == filled == 1:
+        basis, fill_price = "single_share", reported
+    else:
+        basis = "unverified_multi_share"
+    return ExecutionHistoryRecord(
+        market=market, order_date=day, order_number=order_number, symbol=symbol,
+        exchange=exchange, side=OrderSide.BUY if buy else OrderSide.SELL,
+        order_quantity=order_qty, filled_quantity=filled, remaining_quantity=remaining,
+        order_price=price("ord_uv"), fill_price=fill_price, reported_fill_price=reported,
+        price_basis=basis, order_time=order_time, fill_time=fill_time, status=status,
+        currency=currency, source_api=api_id, original_order_number=original_order,
+    )
 
 
 def _confirmed_order_number(response: Mapping[str, Any], operation: str) -> str:
@@ -1014,7 +1204,7 @@ def _find_currency(rows: list[dict[str, Any]], currency: str) -> dict[str, Any] 
     for row in rows:
         if str(row.get("crnc_code", "")).upper() == currency.upper():
             return row
-    return rows[0] if rows else None
+    return None
 
 
 def _domestic_open_order(row: dict[str, Any]) -> OpenOrder:
