@@ -137,7 +137,9 @@ uv run --extra gui python -m unittest discover -s tests -v
 테스트는 가짜 응답과 임시 DB를 사용하며 실제 주문을 보내지 않는다.
 2026-09-14 조회 전용 검증에서는 삼성전자·SK하이닉스·AAPL·GOOGL의 최신 30개 일봉과 현재가,
 국내·미국 잔고/미체결/체결 조회를 확인했다. 이번 기능 검증으로 주문을 전송하지 않았다.
-자동 트리거 → 모의 API 접수·체결의 전체 경로는 실제 주문으로 검증하지 않았으며, 전송과 체결 연결은 테스트 대역으로 검증했다.
+이후 2026-09-15 사용자 승인 모의 실행에서 국내 자동주문의 접수·체결을 확인했다.
+미국 프리마켓 시험은 장 시작 전 거절로 끝났으며, 미국 정상 접수·체결과 실전 계좌 주문은 미검증이다.
+[시간대 시험 결과](mock-trading-hours.md)와 [모의/실전 선택](trading-modes.md)을 참고한다.
 
 - 국내 일봉: [`ka10081`, `/api/dostk/chart`](https://openapi.kiwoom.com/guide/apiGuideContents/07/ka10081)
 - 미국 일봉: [`usa06012`, `/api/us/chart`](https://openapi.kiwoom.com/guide/apiGuideContents/36/usa06012)

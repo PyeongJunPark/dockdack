@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "snapshot_tag": "daily-data-2026-09-14",
+  "snapshot_created_at": "2026-09-14T19:57:33+09:00",
+  "source": "Kiwoom REST API (demo)",
+  "release_url": "https://github.com/PyeongJunPark/dockdack/releases/tag/daily-data-2026-09-14",
+  "coverage_note": "Per-symbol API history collected at different times; not a synchronized latest-day refresh. Status complete may include zero-row responses.",
+  "markets": [
+    {
+      "market": "domestic",
+      "database_filename": "domestic_daily.sqlite3",
+      "database_bytes": 2671648768,
+      "database_sha256": "c24cde64bc91e5cec14882e432899b539c8e43a1aa65fab7ae16e6579798c868",
+      "asset_filename": "domestic_daily.daily-data-2026-09-14.zip",
+      "asset_bytes": 541607146,
+      "asset_sha256": "c0792f71b6e762bbf57bbd273bb8f653856e8bef8226e5741e399abbafb9b4be",
+      "download_url": "https://github.com/PyeongJunPark/dockdack/releases/download/daily-data-2026-09-14/domestic_daily.daily-data-2026-09-14.zip",
+      "instruments": 7374,
+      "instruments_with_bars": 7039,
+      "progress_statuses": {
+        "complete": 7374
+      },
+      "daily_bars": 14772418,
+      "earliest_trade_date": "1985-01-04",
+      "latest_trade_date": "2026-08-21",
+      "last_progress_update": "2026-08-22T00:42:33+09:00",
+      "sqlite_quick_check": "ok",
+      "errors": []
+    },
+    {
+      "market": "us",
+      "database_filename": "us_daily.sqlite3",
+      "database_bytes": 4910518272,
+      "database_sha256": "d8723d82c6831a398ada9c5d51b9b44e6421e7de1875492bd9385942cf34f671",
+      "asset_filename": "us_daily.daily-data-2026-09-14.zip",
+      "asset_bytes": 1168346666,
+      "asset_sha256": "cb2addf3c99e751b3093e42edacdb2141460480d3c077641bbdb4bf9d4abb2aa",
+      "download_url": "https://github.com/PyeongJunPark/dockdack/releases/download/daily-data-2026-09-14/us_daily.daily-data-2026-09-14.zip",
+      "instruments": 12742,
+      "instruments_with_bars": 12716,
+      "progress_statuses": {
+        "complete": 12718,
+        "error": 24
+      },
+      "daily_bars": 26100170,
+      "earliest_trade_date": "1970-01-02",
+      "latest_trade_date": "2026-09-11",
+      "last_progress_update": "2026-09-14T19:46:56+09:00",
+      "sqlite_quick_check": "ok",
+      "errors": [
+        {
+          "symbol": "LBRDA",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=LBRDA]",
+          "updated_at": "2026-09-14T19:43:50+09:00"
+        },
+        {
+          "symbol": "LBRDK",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=LBRDK]",
+          "updated_at": "2026-09-14T19:43:58+09:00"
+        },
+        {
+          "symbol": "LEG",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=LEG]",
+          "updated_at": "2026-09-14T19:44:06+09:00"
+        },
+        {
+          "symbol": "MGKX",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=MGKX]",
+          "updated_at": "2026-09-14T19:44:14+09:00"
+        },
+        {
+          "symbol": "NCL",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=NCL]",
+          "updated_at": "2026-09-14T19:44:22+09:00"
+        },
+        {
+          "symbol": "NTZ",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=NTZ]",
+          "updated_at": "2026-09-14T19:44:30+09:00"
+        },
+        {
+          "symbol": "OSRH",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=OSRH]",
+          "updated_at": "2026-09-14T19:44:38+09:00"
+        },
+        {
+          "symbol": "PS",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 키움 API가 JSON이 아닌 응답을 반환했습니다.",
+          "updated_at": "2026-09-14T19:44:46+09:00"
+        },
+        {
+          "symbol": "RMAX",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=RMAX]",
+          "updated_at": "2026-09-14T19:44:55+09:00"
+        },
+        {
+          "symbol": "SBEV",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=SBEV]",
+          "updated_at": "2026-09-14T19:45:03+09:00"
+        },
+        {
+          "symbol": "SIC",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=SIC]",
+          "updated_at": "2026-09-14T19:45:11+09:00"
+        },
+        {
+          "symbol": "TUGN",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=TUGN]",
+          "updated_at": "2026-09-14T19:45:19+09:00"
+        },
+        {
+          "symbol": "TWO",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=TWO]",
+          "updated_at": "2026-09-14T19:45:27+09:00"
+        },
+        {
+          "symbol": "VBX",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=VBX]",
+          "updated_at": "2026-09-14T19:45:35+09:00"
+        },
+        {
+          "symbol": "VICE",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=VICE]",
+          "updated_at": "2026-09-14T19:45:43+09:00"
+        },
+        {
+          "symbol": "VLLU",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=VLLU]",
+          "updated_at": "2026-09-14T19:45:51+09:00"
+        },
+        {
+          "symbol": "VOOX",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=VOOX]",
+          "updated_at": "2026-09-14T19:46:00+09:00"
+        },
+        {
+          "symbol": "WILC",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=WILC]",
+          "updated_at": "2026-09-14T19:46:08+09:00"
+        },
+        {
+          "symbol": "XVO",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=XVO]",
+          "updated_at": "2026-09-14T19:46:16+09:00"
+        },
+        {
+          "symbol": "XVUG",
+          "exchange": "NA",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NA, 종목코드=XVUG]",
+          "updated_at": "2026-09-14T19:46:24+09:00"
+        },
+        {
+          "symbol": "YBMN",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=YBMN]",
+          "updated_at": "2026-09-14T19:46:32+09:00"
+        },
+        {
+          "symbol": "YYGH",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=YYGH]",
+          "updated_at": "2026-09-14T19:46:40+09:00"
+        },
+        {
+          "symbol": "ZETX",
+          "exchange": "NY",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=NY, 종목코드=ZETX]",
+          "updated_at": "2026-09-14T19:46:48+09:00"
+        },
+        {
+          "symbol": "ZTEK",
+          "exchange": "ND",
+          "error": "BrokerAPIError: 서비스를 처리하는 중에 오류가 발생했습니다[1903:종목 정보가 없습니다. 입력한 종목코드, 거래소구분 값을 확인바랍니다. 거래소구분=ND, 종목코드=ZTEK]",
+          "updated_at": "2026-09-14T19:46:56+09:00"
+        }
+      ]
+    }
+  ]
+}
