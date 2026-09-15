@@ -1,6 +1,6 @@
 # 30개 일봉 모델과 +1% 익절 / −0.8% 손절 모듈
 
-이 모듈은 기존 60일 방향 분류 예제와 별개다. `dockdack.ml30`은 학습된 모델 추론을, `dockdack.lstm30_adapter`는 기존 자동매매 엔진에 전달할 JSON 신호 생성을 담당한다. 코드가 자동주문을 켜거나 주문 API를 호출하지 않는다. 현재 어댑터는 모의투자 전용이다.
+이 모듈은 기존 60일 방향 분류 예제와 별개다. `dockdack.ml30`은 학습된 모델 추론을, `dockdack.lstm30_adapter`는 기존 자동매매 엔진에 전달할 JSON 신호 생성을 담당한다. 이 두 모듈 자체는 주문 API를 호출하지 않는다. 별도 [연속 모의 실행기](lstm30-demo-runtime.md)는 명시적인 실행 승인 후 main 자동매매 엔진으로 신호를 보내 모의주문까지 처리한다. 어댑터와 연속 실행기는 모의투자 전용이다.
 
 ## 학습하는 것과 규칙으로 처리하는 것
 
@@ -63,7 +63,7 @@ uv pip install --python .venv-ml-cuda/Scripts/python.exe -r requirements-ml-cuda
 .venv-ml-cuda/Scripts/python.exe -m examples.train_lstm30 --market domestic --device cuda --resume outputs/ml30/domestic-new-run/last_model.pt
 ```
 
-출력 폴더에는 `best_model.pt`, 재개용 `last_model.pt`, 종목·제외 이유·분할별 샘플 목록 `manifest.json`, `run_config.json`, `history.json`, `metrics.json`, 테스트 예측 `test_predictions.npz`가 저장된다. 데이터와 모델 산출물 및 CUDA 환경은 Git에서 제외한다.
+출력 폴더에는 `best_model.pt`, 재개용 `last_model.pt`, 종목·제외 이유·분할별 샘플 목록 `manifest.json`, `run_config.json`, `history.json`, `metrics.json`, 테스트 예측 `test_predictions.npz`가 저장된다. 원본 데이터와 `outputs/` 산출물 및 CUDA 환경은 Git에서 제외한다. 배포를 위해 최적 가중치 두 개만 `models/lstm30/domestic.pt`, `models/lstm30/us.pt`에 복사해 [모델 설명·체크섬](../models/lstm30/README.md)과 함께 버전 관리한다.
 
 ## 2026-09-15 본학습 결과
 
@@ -95,7 +95,7 @@ print(prediction)  # probability_ge_1pct, buy_threshold, predicts_gain
 
 ## 기존 main 자동매매 코드와 연결
 
-최신 main의 `signal_bridge` 차트/신호 JSON 버전 1 계약을 사용한다. 이 브랜치에 main을 자동 병합하거나 GUI에 새 모드를 등록한 것은 아니다. 모델 모듈과 어댑터를 main에 반영한 뒤 외부 신호 모드에 연결할 수 있다.
+최신 main의 `signal_bridge` 차트/신호 JSON 버전 1 계약을 사용하며 기존 자동매매 코드와 통합했다. GUI에 새 모델 선택 화면을 추가한 것은 아니다. 연속 모의 실행기를 사용하거나 GUI의 외부 신호 모드에 별도로 연결할 수 있다.
 
 1. main이 내보낸 최신 차트(`charts.json` 또는 종목별 `charts_updates/*.json`)를 어댑터에 전달한다. 개별 업데이트를 사용하면 전체 관심종목 조회 완료까지 기다리지 않는다.
 2. `position_provider(stock)` 콜백으로 같은 종목의 실제 모의계좌 보유·매도가능 수량·평균 매입가와 수신 시각을 제공한다. 잔고가 없다는 것과 잔고 조회 실패는 구분한다.

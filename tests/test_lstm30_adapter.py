@@ -274,7 +274,10 @@ class AdapterTests(unittest.TestCase):
                                 quantity=Decimal(qty), sellable_quantity=Decimal(qty), average_price=Decimal(avg))
                 for qty, avg in (("2", "100"), ("1", "130"))]
         broker = SimpleNamespace(mode=TradingMode.DEMO, account_us=Mock(return_value=SimpleNamespace(
-            market=Market.US, currency="USD", positions=rows)))
+            market=Market.US, currency="USD", positions=rows,
+            raw={"balance": [{"result_list": [
+                {"stk_cd": "AAPL", "poss_qty": str(row.quantity), "sell_alowq": str(row.sellable_quantity),
+                 "frgn_stk_book_uv": str(row.average_price)} for row in rows]}]})))
         result = demo_position_provider({"us": broker}, clock=lambda: NOW)(stock)
         self.assertEqual(result["quantity"], "3")
         self.assertEqual(result["average_price"], "110")
@@ -286,6 +289,67 @@ class AdapterTests(unittest.TestCase):
         broker.mode = TradingMode.REAL
         with self.assertRaises(ValueError):
             demo_position_provider({"us": broker})(stock)
+
+    def test_live_provider_requires_verified_raw_empty_list_before_reporting_flat(self):
+        stock = chart()["stocks"][0]
+        account = SimpleNamespace(market=Market.DOMESTIC, currency="KRW", positions=[])
+        broker = SimpleNamespace(mode=TradingMode.DEMO, account_domestic=Mock(return_value=account))
+        provide = demo_position_provider({"domestic": broker}, clock=lambda: NOW)
+        for raw in (None, {}, {"balance": []}, {"balance": [{}]},
+                    {"balance": [{"acnt_evlt_remn_indv_tot": None}]}, {"balance": [None]}):
+            account.raw = raw
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                provide(stock)
+            payload, diagnostics = producer(provider=provide)(chart())
+            self.assertEqual(payload["signals"][0]["action"], "hold")
+            self.assertEqual(diagnostics[0]["reason"], "QUOTE_OR_POSITION_UNAVAILABLE")
+        account.raw = {"balance": [{"acnt_evlt_remn_indv_tot": []}]}
+        self.assertEqual(provide(stock)["quantity"], "0")
+
+    def test_live_provider_rejects_raw_quantities_hidden_by_normalized_zero_or_absolute(self):
+        stock = chart()["stocks"][0]
+        normalized = SimpleNamespace(market=Market.DOMESTIC, currency="KRW", exchange="KRX", symbol="005930",
+                                     quantity=Decimal(0), sellable_quantity=Decimal(0), average_price=Decimal(0))
+        account = SimpleNamespace(market=Market.DOMESTIC, currency="KRW", positions=[normalized])
+        broker = SimpleNamespace(mode=TradingMode.DEMO, account_domestic=Mock(return_value=account))
+        provide = demo_position_provider({"domestic": broker}, clock=lambda: NOW)
+        base = {"stk_cd": "A005930", "rmnd_qty": "0", "trde_able_qty": "0", "pur_pric": "0"}
+        for changes in ({"rmnd_qty": None}, {"rmnd_qty": "bad"}, {"rmnd_qty": "NaN"},
+                        {"rmnd_qty": "-1"}, {"rmnd_qty": "0.5"}, {"trde_able_qty": "1"},
+                        {"rmnd_qty": "1", "pur_pric": "-100"}, {"rmnd_qty": "1", "pur_pric": None}):
+            account.raw = {"balance": [{"acnt_evlt_remn_indv_tot": [{**base, **changes}]}]}
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                provide(stock)
+        # A valid raw holding also cannot disappear from normalized positions.
+        account.raw = {"balance": [{"acnt_evlt_remn_indv_tot": [{**base, "rmnd_qty": "1", "pur_pric": "100"}]}]}
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            provide(stock)
+
+    def test_live_provider_validates_domestic_raw_alias_and_formatted_prices(self):
+        stock = chart()["stocks"][0]
+        normalized = SimpleNamespace(market=Market.DOMESTIC, currency="KRW", exchange="KRX", symbol="005930",
+                                     quantity=Decimal(2), sellable_quantity=Decimal(1), average_price=Decimal(70000))
+        account = SimpleNamespace(market=Market.DOMESTIC, currency="KRW", positions=[normalized],
+                                  raw={"balance": [{"acnt_evlt_remn_indv_tot": [
+                                      {"stk_cd": "A005930", "rmnd_qty": "2", "trde_able_qty": "1", "pur_pric": "70,000"}]}]})
+        broker = SimpleNamespace(mode=TradingMode.DEMO, account_domestic=Mock(return_value=account))
+        result = demo_position_provider({"domestic": broker}, clock=lambda: NOW)(stock)
+        self.assertEqual((result["quantity"], result["sellable_quantity"], result["average_price"]), ("2", "1", "70000"))
+
+    def test_live_provider_unknown_matching_exchange_never_becomes_flat(self):
+        stock = chart(market="us")["stocks"][0]
+        normalized = SimpleNamespace(market=Market.US, currency="USD", exchange="UNKNOWN", symbol="AAPL",
+                                     quantity=Decimal(1), sellable_quantity=Decimal(1), average_price=Decimal(100))
+        account = SimpleNamespace(market=Market.US, currency="USD", positions=[normalized],
+                                  raw={"balance": [{"result_list": [
+                                      {"stk_cd": "AAPL", "poss_qty": "1", "sell_alowq": "1", "frgn_stk_book_uv": "100"}]}]})
+        broker = SimpleNamespace(mode=TradingMode.DEMO, account_us=Mock(return_value=account))
+        provide = demo_position_provider({"us": broker}, clock=lambda: NOW)
+        with self.assertRaisesRegex(ValueError, "exchange"):
+            provide(stock)
+        payload, diagnostics = producer(provider=provide, market="us")(chart(market="us"))
+        self.assertEqual(payload["signals"][0]["action"], "hold")
+        self.assertEqual(diagnostics[0]["reason"], "QUOTE_OR_POSITION_UNAVAILABLE")
 
     def test_fixture_missing_symbol_is_unknown_not_flat(self):
         provide = fixture_position_provider({"trading_mode": "demo", "positions": []})

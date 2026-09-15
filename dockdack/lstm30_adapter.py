@@ -353,7 +353,12 @@ class LSTM30SignalProducer:
 
 
 def demo_position_provider(brokers, *, clock=utc_now):
-    """Read-only Kiwoom holdings provider; no quote/order/enable calls."""
+    """Read-only, fail-closed Kiwoom holdings; no quote/order/enable calls.
+
+    The broker's display-oriented normalization substitutes zero for malformed
+    quantities. Validate its raw balance pages before treating an absent holding
+    as an explicitly verified flat position.
+    """
     from dockdack.models import Market, TradingMode
 
     def provide(stock):
@@ -366,11 +371,48 @@ def demo_position_provider(brokers, *, clock=utc_now):
                    else broker.account_us(exchange=stock["exchange"], symbol=stock["symbol"]))
         if account.market is not market or account.currency != stock["currency"]:
             raise ValueError("Account market/currency mismatch")
+        raw = getattr(account, "raw", None)
+        pages = raw.get("balance") if isinstance(raw, dict) else None
+        if not isinstance(pages, list) or not pages:
+            raise ValueError("Account raw balance pages are required to verify holdings")
+        row_key, qty_key, sell_key, average_key = (
+            ("acnt_evlt_remn_indv_tot", "rmnd_qty", "trde_able_qty", "pur_pric")
+            if market is Market.DOMESTIC else
+            ("result_list", "poss_qty", "sell_alowq", "frgn_stk_book_uv")
+        )
+        raw_quantity, raw_sellable, raw_cost = Decimal(0), Decimal(0), Decimal(0)
+        for page in pages:
+            rows = page.get(row_key) if isinstance(page, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("Account raw balance list is missing or invalid")
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get("stk_cd"), str) or not row["stk_cd"].strip():
+                    raise ValueError("Account raw balance instrument is missing or invalid")
+                qty = number(str(row.get(qty_key)).replace(",", ""), "raw position quantity", zero=True)
+                sell = number(str(row.get(sell_key)).replace(",", ""), "raw sellable quantity", zero=True)
+                if qty != qty.to_integral_value() or sell != sell.to_integral_value() or sell > qty:
+                    raise ValueError("Account raw position/sellable quantities are inconsistent")
+                average = (number(str(row.get(average_key)).replace(",", ""), "raw average price")
+                           if qty else Decimal(0))
+                symbol = row["stk_cd"]
+                if market is Market.DOMESTIC:
+                    symbol = symbol.strip().upper()
+                    if symbol.startswith("A") and symbol[1:].isdigit():
+                        symbol = symbol[1:]
+                    for suffix in ("_NX", "_AL"):
+                        if symbol.endswith(suffix):
+                            symbol = symbol[:-len(suffix)]
+                if symbol == stock["symbol"]:
+                    raw_quantity += qty
+                    raw_sellable += sell
+                    raw_cost += qty * average
         quantity, sellable, cost = Decimal(0), Decimal(0), Decimal(0)
         for position in account.positions:
-            exchange = {"NASDAQ": "ND", "NYSE": "NY", "AMEX": "NA"}.get(position.exchange, position.exchange)
-            if position.symbol != stock["symbol"] or exchange != stock["exchange"]:
+            if position.symbol != stock["symbol"]:
                 continue
+            exchange = {"NASDAQ": "ND", "NYSE": "NY", "AMEX": "NA"}.get(position.exchange, position.exchange)
+            if exchange != stock["exchange"]:
+                raise ValueError("Matching account position exchange cannot be verified")
             if position.market is not market or position.currency != stock["currency"]:
                 raise ValueError("Account position market/currency mismatch")
             qty = number(position.quantity, "position quantity", zero=True)
@@ -381,6 +423,8 @@ def demo_position_provider(brokers, *, clock=utc_now):
             quantity += qty
             sellable += sell
             cost += qty * average
+        if (quantity, sellable, cost) != (raw_quantity, raw_sellable, raw_cost):
+            raise ValueError("Normalized holdings disagree with verified raw account balances")
         return {**{key: stock[key] for key in ("market", "symbol", "exchange", "currency")},
                 "quantity": str(quantity), "sellable_quantity": str(sellable),
                 "average_price": str(cost / quantity) if quantity else None,
