@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import time
+import tempfile
+from pathlib import Path
 import unittest
 from decimal import Decimal
 
@@ -16,6 +18,7 @@ if HAS_QT:
 
 from dockdack import AccountSnapshot, Market, OrderOutcomeUnknown, OrderRequest, OrderResult, OrderSide, Quote, TradingMode
 from dockdack.gui_service import Instrument
+from dockdack.watchlist import WatchStore
 
 
 class FakeService:
@@ -44,7 +47,7 @@ class FakeService:
             raise OrderOutcomeUnknown("응답의 주문번호를 확인할 수 없습니다.")
         if self.fail_submit:
             raise ValueError("모의투자 장종료")
-        return OrderResult(True, TradingMode.DEMO, request, "TEST-123", "모의주문 접수")
+        return OrderResult(True, TradingMode.DEMO, request, "123", "모의주문 접수")
 
     def account(self, instrument):
         if self.fail_account:
@@ -66,7 +69,10 @@ class GuiTests(unittest.TestCase):
 
     def setUp(self):
         self.service = FakeService()
-        self.window = TradingWindow(self.service)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = WatchStore(Path(self.temp.name) / 'gui.sqlite3')
+        self.window = TradingWindow(self.service, store=self.store)
         self.window.timer.stop()
         self.window.show()
         self.app.processEvents()
