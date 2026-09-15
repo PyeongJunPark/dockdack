@@ -22,7 +22,7 @@ if HAS_QT:
 
 from dockdack import BrokerAPIError, Market, OrderSide, TradingMode
 from dockdack.gui_service import Instrument
-from dockdack.lstm30_adapter import previous_trading_day
+from dockdack.lstm30_adapter import previous_trading_day, read_json
 from dockdack.lstm30_runtime import DemoLSTMRuntime, SessionLock, request_stop
 from dockdack.market_schedule import calendar_for
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
@@ -135,6 +135,36 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual((request.side, request.quantity, request.order_type), (OrderSide.BUY, 1, "0"))
         self.assertEqual(request.price, Decimal(100))
         self.assertTrue(all(len(call.args[0]) == 30 for call in self.predictor.predict.call_args_list))
+
+    def test_threshold_point_four_boundary_uses_effective_setting_and_original_metadata(self):
+        for score, expected_orders in ((0.3999, 0), (0.4, 1), (0.44, 1)):
+            with self.subTest(score=score):
+                self.root = Path(self.temp.name) / f"threshold-{score}"
+                self.service = FakeTradingService()
+                predictor = SimpleNamespace(
+                    metadata={"market": "domestic", "buy_threshold": 0.5},
+                    buy_threshold=0.4, checkpoint_buy_threshold=0.5,
+                    predict=Mock(return_value={"probability_ge_1pct": score, "buy_threshold": 0.4,
+                                               "predicts_gain": score >= 0.4}))
+                window = self.window(predictors={"domestic": predictor})
+                window.start_session("DEMO_AUTOTRADE")
+                self.wait_idle(window)
+                self.assertTrue(window.engine.orders_enabled)
+                self.assertEqual(len(self.service.submitted), expected_orders)
+                self.assertEqual(window.engine.external_policy.max_quantity, 1)
+                self.assertEqual(window.engine.external_policy.max_krw, Decimal(1000))
+                self.assertEqual(window.engine.external_policy.max_usd, Decimal(1000))
+                if expected_orders:
+                    self.assertEqual(self.service.submitted[0].side, OrderSide.BUY)
+                    self.assertEqual(self.service.submitted[0].quantity, 1)
+                window.session_controller.report()
+                status = read_json(self.root / "status.json")
+                self.assertEqual(status["buy_thresholds"]["domestic"], 0.4)
+                self.assertEqual(status["checkpoint_buy_thresholds"]["domestic"], 0.5)
+                self.assertEqual(predictor.metadata["buy_threshold"], 0.5)
+                window.stop_monitoring()
+                self.wait_idle(window)
+                window.shutdown()
 
     def test_authorized_launcher_warms_with_orders_off_before_auto_on(self):
         window = self.window()
@@ -473,6 +503,58 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertFalse(window.pending_auto_arm)
         self.assertEqual(self.service.submitted, [])
         self.assertIn("035420", str(window.lstm_bridge.diagnostics))
+
+    def test_closing_window_pauses_new_buy_without_disarming_liquidation_authority(self):
+        window = self.window()
+        closer = SimpleNamespace(tick=Mock(), buy_blocked=Mock(return_value=True))
+        window.engine.close_liquidator = closer
+        window.start_session("DEMO_AUTOTRADE")
+        self.wait_idle(window)
+        self.assertTrue(window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(window.store.attempts(), ())
+        self.assertTrue(closer.tick.called)
+        self.assertTrue(closer.buy_blocked.called)
+        self.assertEqual(window.lstm_policy.max_quantity, 1)
+        self.assertEqual(window.lstm_policy.max_krw, Decimal(1000))
+
+    def test_final_buy_guard_rechecks_closing_boundary_after_parent_guard(self):
+        from dockdack.autotrade import AutoTrader
+        from dockdack.exceptions import OrderNotSent
+        window = self.window()
+        closer = SimpleNamespace(buy_blocked=Mock(side_effect=(False, True)))
+        window.engine.close_liquidator = closer
+        rule = TriggerRule.create(self.item, "price_ge", "buy", 1, Decimal(1000), Decimal(100))
+        with patch.object(AutoTrader, "_before_order_send") as parent_guard:
+            with self.assertRaises(OrderNotSent):
+                window.engine._before_order_send(self.item, rule, None)
+        parent_guard.assert_called_once()
+        self.assertEqual(closer.buy_blocked.call_count, 2)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_close_timer_only_wakes_authorized_idle_same_worker(self):
+        window = self.window()
+        window.close_liquidator = SimpleNamespace(closing_markets=Mock(return_value={Market.US}))
+        with patch.object(window, "refresh_all") as refresh:
+            window._close_wakeup()
+            refresh.assert_not_called()
+            window.monitoring = True
+            window.engine._armed.set()
+            window._close_wakeup()
+            refresh.assert_called_once()
+            refresh.reset_mock()
+            window.worker = object()
+            try:
+                window._close_wakeup()
+                refresh.assert_not_called()
+            finally:
+                window.worker = None
+
+    def test_close_policy_requires_both_minutes_and_explicit_confirmation(self):
+        for settings in ({"close_all_before_minutes": 5},
+                         {"close_all_confirmation": "DEMO_CLOSE_ALL_SELLABLE"}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                self.window(**settings)
 
 
 if __name__ == "__main__":

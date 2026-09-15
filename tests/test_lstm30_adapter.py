@@ -351,6 +351,25 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(payload["signals"][0]["action"], "hold")
         self.assertEqual(diagnostics[0]["reason"], "QUOTE_OR_POSITION_UNAVAILABLE")
 
+    def test_live_provider_accepts_specific_korean_venue_names_but_not_country_names(self):
+        stock = chart(market="us")["stocks"][0]
+        row = SimpleNamespace(market=Market.US, currency="USD", exchange="나스닥", symbol="AAPL",
+                              quantity=Decimal(1), sellable_quantity=Decimal(1), average_price=Decimal(100))
+        account = SimpleNamespace(market=Market.US, currency="USD", positions=[row],
+                                  raw={"balance": [{"result_list": [
+                                      {"stk_cd": "AAPL", "poss_qty": "1", "sell_alowq": "1", "frgn_stk_book_uv": "100"}]}]})
+        broker = SimpleNamespace(mode=TradingMode.DEMO, account_us=Mock(return_value=account))
+        provide = demo_position_provider({"us": broker}, clock=lambda: NOW)
+        for label, exchange in (("나스닥", "ND"), ("뉴욕", "NY"), ("아멕스", "NA")):
+            row.exchange = label
+            with self.subTest(label=label):
+                result = provide({**stock, "exchange": exchange, "watch_id": f"us:{exchange}:AAPL"})
+                self.assertEqual((result["quantity"], result["exchange"]), ("1", exchange))
+        for label in ("미국", "NP", "UNKNOWN", ""):
+            row.exchange = label
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, "exchange"):
+                provide(stock)
+
     def test_fixture_missing_symbol_is_unknown_not_flat(self):
         provide = fixture_position_provider({"trading_mode": "demo", "positions": []})
         self.assertIsNone(provide(chart()["stocks"][0]))

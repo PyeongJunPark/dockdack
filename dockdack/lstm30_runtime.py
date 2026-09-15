@@ -304,6 +304,15 @@ class DemoLSTMRuntime:
     def status(self):
         counts = Counter()
         orders = []
+        thresholds, checkpoint_thresholds = {}, {}
+        for market, predictor in self.predictors.items():
+            metadata = getattr(predictor, "metadata", {})
+            original = metadata.get("buy_threshold") if isinstance(metadata, dict) else None
+            effective = getattr(predictor, "buy_threshold", original)
+            checkpoint_thresholds[market] = (float(original) if type(original) in (int, float)
+                                             and 0 < original < 1 else None)
+            thresholds[market] = (float(effective) if type(effective) in (int, float)
+                                  and 0 < effective < 1 else checkpoint_thresholds[market])
         if self.store is not None:
             for row in self.store.attempts():
                 if row["rule_id"] not in self._initial_attempts:
@@ -321,6 +330,7 @@ class DemoLSTMRuntime:
                        "max_usd": str(self.policy.max_usd), "buy_attempts_per_symbol_local_day": 1},
             "regular_session": {market.value: regular_session(market, self.clock()) for market in markets},
             "checkpoints": self.checkpoint_paths, "results": self.results,
+            "buy_thresholds": thresholds, "checkpoint_buy_thresholds": checkpoint_thresholds,
             "diagnostics": self.diagnostics, "errors": self.errors,
             "safety_latch": self.safety_latch,
             "session_order_counts": dict(counts), "session_orders": orders[-100:],
@@ -402,6 +412,8 @@ def main(argv=None):
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--domestic-checkpoint", type=Path)
     parser.add_argument("--us-checkpoint", type=Path)
+    parser.add_argument("--buy-threshold", type=float, default=0.4,
+                        help="Inclusive runtime BUY probability threshold (default 0.4); does not retrain or modify weights")
     parser.add_argument("--symbol", action="append", help="Repeat MARKET:EXCHANGE:SYMBOL, e.g. domestic:KRX:005930 or us:ND:AAPL")
     args = parser.parse_args(argv)
     if args.stop:
@@ -410,6 +422,8 @@ def main(argv=None):
         return 0
     if args.once and args.arm:
         parser.error("--once is orders-OFF only and cannot be combined with --arm")
+    if not 0 < args.buy_threshold < 1:
+        parser.error("--buy-threshold must be a finite probability strictly between 0 and 1")
     if any(value is None for value in (args.quantity, args.max_krw, args.max_usd)):
         parser.error("Provide explicit --quantity, --max-krw and --max-usd limits")
     paths = {market: path for market, path in (("domestic", args.domestic_checkpoint), ("us", args.us_checkpoint)) if path}
@@ -421,7 +435,7 @@ def main(argv=None):
         except (ValueError, TypeError) as exc:
             parser.error(f"Invalid --symbol selection: {exc}")
     from dockdack.ml30 import Predictor
-    predictors = {market: Predictor(path, device="cpu") for market, path in paths.items()}
+    predictors = {market: Predictor(path, device="cpu", buy_threshold=args.buy_threshold) for market, path in paths.items()}
     runtime = DemoLSTMRuntime(
         args.runtime_dir, predictors=predictors, quantity=args.quantity, max_krw=args.max_krw,
         max_usd=args.max_usd, items=items, interval_seconds=args.interval, checkpoint_paths=paths)

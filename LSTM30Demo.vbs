@@ -10,4 +10,4 @@ If Not files.FileExists(pythonw) Then
     WScript.Quit 1
 End If
 ' Opening the GUI never silently enables orders. Use its explicit ON confirmation.
-shell.Run Chr(34) & pythonw & Chr(34) & " -m examples.run_lstm30_gui --top-us100 --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt", 1, False
+shell.Run Chr(34) & pythonw & Chr(34) & " -m examples.run_lstm30_gui --top-us100 --buy-threshold 0.4 --close-all-before-minutes 5 --confirm-close-all DEMO_CLOSE_ALL_SELLABLE --quantity 1 --max-krw 500000 --max-usd 1000 --domestic-checkpoint models/lstm30/domestic.pt --us-checkpoint models/lstm30/us.pt", 1, False

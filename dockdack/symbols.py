@@ -10,3 +10,12 @@ def normalize_symbol(value: str) -> str:
     if re.fullmatch(r"[A-Z]{1,10}[a-z]", value):
         return value
     return value.upper()
+
+
+def normalize_us_exchange(value: str) -> str:
+    """Normalize only specific venue labels; country/unknown names stay unknown."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip().upper()
+    return {"NASDAQ": "ND", "NYSE": "NY", "AMEX": "NA",
+            "나스닥": "ND", "뉴욕": "NY", "아멕스": "NA"}.get(value, value)

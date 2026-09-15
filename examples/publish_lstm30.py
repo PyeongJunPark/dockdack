@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--domestic-checkpoint", type=Path)
     parser.add_argument("--us-checkpoint", type=Path)
     parser.add_argument("--device", default="cpu", help="Model inference device, e.g. cpu or cuda")
+    parser.add_argument("--buy-threshold", type=float, default=0.4,
+                        help="Inclusive runtime BUY probability threshold (default 0.4); checkpoint weights stay unchanged")
     parser.add_argument("--quantity", type=int, required=True, help="BUY shares and maximum shares per SELL")
     parser.add_argument("--max-krw", required=True, help="Per-order KRW cap; 0 blocks domestic signals")
     parser.add_argument("--max-usd", required=True, help="Per-order USD cap; 0 blocks US signals")
@@ -51,6 +53,8 @@ def main():
     positions.add_argument("--positions", type=Path, help="Offline demo position snapshots JSON")
     positions.add_argument("--kiwoom-demo", action="store_true", help="Read current Kiwoom DEMO holdings only")
     args = parser.parse_args()
+    if not 0 < args.buy_threshold < 1:
+        parser.error("--buy-threshold must be a finite probability strictly between 0 and 1")
     state_path = args.state or args.output.with_name(args.output.stem + ".state.json")
     diagnostic_path = args.output.with_name(args.output.stem + ".diagnostics.json")
     output_paths = [path.resolve() for path in (args.output, state_path, diagnostic_path)]
@@ -66,7 +70,7 @@ def main():
             if path is not None:
                 try:
                     from dockdack.ml30 import Predictor
-                    predictors[market] = Predictor(path, device=args.device)
+                    predictors[market] = Predictor(path, device=args.device, buy_threshold=args.buy_threshold)
                 except (ValueError, RuntimeError, OSError, ImportError) as exc:
                     # Missing/broken models must not disable cost-based held exits.
                     print(f"{market} model unavailable: {exc}; flat positions will HOLD", file=sys.stderr)
