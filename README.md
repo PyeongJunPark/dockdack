@@ -57,6 +57,17 @@
 
 국내·미국 전 종목의 최장 일봉 OHLCV 수집 방법과 수집된 DB 다운로드는 [키움 전 종목 일봉 데이터셋 문서](docs/daily-dataset.md)를 참고한다.
 
+수집한 일봉으로 다음 거래일 상승 여부를 학습하는 [PyTorch LSTM 예제](docs/lstm-example.md):
+
+```powershell
+uv sync --extra ml --inexact --no-install-project
+uv run --no-sync python examples/train_lstm_daily.py --epochs 20
+```
+
+학습된 모델과 현재가를 연결하는 [매매 신호 예제](docs/trading-signals.md)는 `UP` + 전일 대비 하락 시 매수, `NOT_UP` + 전일 대비 상승 시 보유분 매도, 평균 매입가 대비 +1% 이상이면 우선 매도 신호를 출력한다. 주문은 전송하지 않는다.
+
+새 [30봉 LSTM 전략 모듈](docs/lstm30-strategy.md)은 국내·미국 DB의 여러 종목으로 다음 종가 +1% 이상 상승 여부를 학습한다. 미보유 시 예측에 따른 매수, 보유 시 실제 평균 매입가 대비 +1% 익절·−0.8% 손절 신호를 main의 외부 신호 규격으로 제공한다. 기존 60일 예제와 별도이며 모듈만 불러오면 주문하지 않는다. [학습 가중치](models/lstm30/README.md)와 [명시적 승인 기반 연속 모의 실행기](docs/lstm30-demo-runtime.md)를 제공한다. 실전 실행은 지원하지 않는다.
+
 ## 터미널에서 조회·주문
 
 GUI에서 **모의투자 / 실전투자**를 선택할 수 있다. 기본은 모의이며, 실전 선택에는 위험 경고와 별도 API 키·주문 허용 설정이 필요하다.

@@ -152,6 +152,7 @@ activemq-data/
 .dockdack/
 .envrc
 .venv
+.venv-ml-cuda/
 env/
 venv/
 ENV/
@@ -206,6 +207,9 @@ tempCodeRunnerFile.py
 
 # Large local market-data artifacts
 /data/kiwoom_daily/
+
+# Local model checkpoints, metrics and training plots
+/outputs/
 
 # Ruff stuff:
 .ruff_cache/

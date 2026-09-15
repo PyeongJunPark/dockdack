@@ -20,6 +20,11 @@ dockdack = "dockdack.cli:main"
 dockdack-gui = "dockdack.gui:main"
 
 [project.optional-dependencies]
+ml = [
+    "torch>=2.6,<3",
+    "numpy>=2.0,<3",
+    "matplotlib>=3.9,<4",
+]
 gui = [
     "PySide6>=6.10,<7",
 ]
