@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from dockdack.gui import label, number, table
 from dockdack.watchlist import STATUS_LABELS
 from dockdack.performance import realized_performance
+from dockdack.activity_snapshot import LedgerCollector, MAX_VISIBLE_ROWS, collect_event_logs
 
 
 def local_time(value):
@@ -33,18 +34,29 @@ def populate(widget, rows, keys):
     old_scroll = scrollbar.value()
     first = widget.item(widget.rowAt(0), 0)
     anchor = first.data(Qt.ItemDataRole.UserRole) if first and old_scroll else None
-    widget.setRowCount(len(rows))
-    for row, values in enumerate(rows):
-        for column, value in enumerate(values):
-            cell = QTableWidgetItem(str(value))
-            cell.setToolTip(str(value))
-            if column == 0:
-                cell.setData(Qt.ItemDataRole.UserRole, keys[row])
-            widget.setItem(row, column, cell)
-    if anchor in keys:
-        widget.scrollToItem(widget.item(keys.index(anchor), 0), widget.ScrollHint.PositionAtTop)
-    else:
-        scrollbar.setValue(old_scroll)
+    enabled = widget.updatesEnabled()
+    widget.setUpdatesEnabled(False)
+    try:
+        widget.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                text = str(value)
+                cell = widget.item(row, column)
+                if cell is None:
+                    cell = QTableWidgetItem(text)
+                    widget.setItem(row, column, cell)
+                elif cell.text() != text:
+                    cell.setText(text)
+                cell.setToolTip(text)
+                cell.setData(Qt.ItemDataRole.ForegroundRole, None)
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, keys[row])
+        if anchor in keys:
+            widget.scrollToItem(widget.item(keys.index(anchor), 0), widget.ScrollHint.PositionAtTop)
+        else:
+            scrollbar.setValue(old_scroll)
+    finally:
+        widget.setUpdatesEnabled(enabled)
     return True
 
 
@@ -67,6 +79,11 @@ class EventLog(QWidget):
         if not force and head is not None and head == self._head:
             return
         events = store.events(limit=500, category=self.category)
+        self.apply_events(events, head=head)
+
+    def apply_events(self, events, *, head=None):
+        """Qt-only bounded paint; collection has already completed elsewhere."""
+        events = events[:MAX_VISIBLE_ROWS]
         self.latest = events[0]["time"] if events else None
         populate(self.table, [(local_time(r["time"]), r["symbol"].split(":")[-1], r["message"])
                               for r in events], [r["id"] for r in events])
@@ -96,10 +113,16 @@ class OperationsPanel(QWidget):
         layout.addWidget(self.tabs, 1)
 
     def reload(self, store, *, visible_only=False, force=False):
-        heads = store.event_heads()
+        categories = (self.tabs.currentWidget().category,) if visible_only else tuple(self.logs)
+        self.apply_logs(collect_event_logs(store, categories,
+            previous_heads={key: view._head for key, view in self.logs.items()}, force=force))
+
+    def apply_logs(self, payload):
+        """Apply worker-collected events without DB reads or a full-log rebuild."""
+        heads = payload["heads"]
         for view in self.logs.values():
-            if not visible_only or view is self.tabs.currentWidget():
-                view.reload(store, head=heads[view.category], force=force)
+            if view.category in payload["events"]:
+                view.apply_events(payload["events"][view.category], head=heads[view.category])
             view.latest = heads[view.category]["time"]
         self.flow.setText(f"최근 감시 기록 {local_time(self.logs['monitor'].latest)}  ·  최근 신호 기록 {local_time(self.logs['signal'].latest)}")
 
@@ -114,6 +137,8 @@ class OrderHistoryPanel(QWidget):
         self.records = ()
         self._ledger = ()
         self.performance = realized_performance(())
+        self._collector = None
+        self._applied_snapshot = None
         layout = QVBoxLayout(self)
         heading = QHBoxLayout()
         self.heading = label("실제 주문·체결 내역 · 모의계좌", "section")
@@ -169,18 +194,31 @@ class OrderHistoryPanel(QWidget):
         return record["status"] == "filled" or Decimal(str(record.get("filled_quantity") or 0)) > 0
 
     def reload(self, store, *, visible_only=False, force=False):
-        # A fill snapshot may change without an event. Always check visible order
-        # records; never use signal/order log revisions to infer broker fills.
-        ledger = store.order_history(limit=None)
-        if ledger != self._ledger:
-            self._ledger = ledger
-            self.performance = realized_performance(ledger)
-            self.records = tuple(reversed(ledger[-500:]))
-            self.render()
-        elif not self.table.rowCount():
-            self.render()
+        # Compatibility path for synchronous callers. The dashboard uses a
+        # worker-owned LedgerCollector then apply_snapshot to keep I/O/FIFO off
+        # the UI thread. The revision includes fill snapshots, not only logs.
+        if self._collector is None or self._collector.store is not store:
+            self._collector = LedgerCollector(store)
+        snapshot = self._collector.collect(force=force or self._ledger is None)
+        if snapshot is not None:
+            self.apply_snapshot(snapshot, force=force)
         if not visible_only or self.tabs.currentWidget() is self.audit:
             self.audit.reload(store, head=store.event_heads()["order"], force=force)
+
+    def apply_snapshot(self, snapshot, *, force=False):
+        """Paint precomputed results only; never reads SQLite or recomputes FIFO."""
+        if snapshot is self._applied_snapshot and self._ledger is not None and not force:
+            return False
+        self._applied_snapshot = snapshot
+        self._ledger = snapshot.ledger
+        self.performance = snapshot.performance
+        self.records = tuple(reversed(snapshot.ledger[-MAX_VISIBLE_ROWS:]))
+        self.render()
+        return True
+
+    def apply_logs(self, payload):
+        if "order" in payload["events"]:
+            self.audit.apply_events(payload["events"]["order"], head=payload["heads"]["order"])
 
     def set_recovery_status(self, status):
         text = status.get("message") or "체결가 확인 전"

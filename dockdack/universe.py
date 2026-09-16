@@ -1,4 +1,4 @@
-"""Kiwoom's market-specific daily turnover rankings, normalized to KRW / USD."""
+"""Kiwoom market rankings: share volume and legacy monetary turnover."""
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -19,6 +19,69 @@ class RankedStock:
     rank: int
     turnover: Decimal
     currency: str
+    volume: int | None = None
+    ranking_basis: str = "turnover"
+
+
+def top_volume(http: KiwoomHTTPClient, market: Market, limit: int = 100) -> tuple[RankedStock, ...]:
+    """Rank verified common shares by actual traded shares, never by amount.
+
+    Official contracts: ka10030 sort_tp=1 / trde_qty (no rank field),
+    usa20530 qry_tp=0 / acc_trde_qty. Volume is in individual shares in both
+    markets. In the pre-open preparation window this is the broker's latest
+    available daily snapshot; an empty/short snapshot must not invent names.
+    """
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("거래량 순위는 1~100개를 요청할 수 있습니다.")
+    domestic = market is Market.DOMESTIC
+    api_id, path, key = ("ka10030", "/api/dostk/rkinfo", "tdy_trde_qty_upper") if domestic else (
+        "usa20530", "/api/us/rkinfo", "result_list")
+    body = {"mrkt_tp": "000", "sort_tp": "1", "mang_stk_incls": "4", "crd_tp": "0",
+            "trde_qty_tp": "0", "pric_tp": "0", "trde_prica_tp": "0",
+            "mrkt_open_tp": "0", "stex_tp": "1"} if domestic else {
+        "stex_tp": "0", "inds_cd": "000", "stk_tp": "1", "trde_qty_tp": "0",
+        "qry_tp": "0", "stk_cnd": "0", "pric_cnd": "0", "trde_prica_cnd": "0"}
+    results, ordinal = {}, 0
+    for page in http.iter_pages(api_id=api_id, path=path, body=body, max_pages=20):
+        rows = page.body.get(key)
+        if not isinstance(rows, list):
+            raise BrokerAPIError("거래량 순위 응답 목록을 확인할 수 없습니다.")
+        candidates = []
+        for row in rows:
+            ordinal += 1
+            if not isinstance(row, dict):
+                raise BrokerAPIError("잘못된 거래량 순위 응답입니다.")
+            symbol = normalize_symbol(str(row.get("stk_cd", "")))
+            exchange = "KRX" if domestic else str(row.get("stex_tp", "")).strip().upper()
+            if symbol and not domestic and exchange == "NP":
+                continue
+            if not symbol or exchange not in ({"KRX"} if domestic else {"ND", "NY", "NA"}):
+                raise BrokerAPIError("거래량 순위 종목 또는 거래소를 확인할 수 없습니다.")
+            try:
+                volume = Decimal(str(row.get("trde_qty" if domestic else "acc_trde_qty")).replace(",", ""))
+                # ka10030 defines no rank: preserve page order for tie-breaking.
+                rank = ordinal if domestic else int(str(row.get("rank")))
+                amount = Decimal(str(row.get("trde_amt" if domestic else "trde_prica", "0")).replace(",", ""))
+            except (ValueError, InvalidOperation) as exc:
+                raise BrokerAPIError("순위/거래량/거래대금을 숫자로 해석할 수 없습니다.") from exc
+            if (not volume.is_finite() or volume < 0 or volume != volume.to_integral_value()
+                    or not amount.is_finite() or amount < 0 or rank <= 0):
+                raise BrokerAPIError("잘못된 순위/거래량/거래대금 값입니다.")
+            candidates.append(RankedStock(market, symbol, exchange,
+                str(row.get("stk_nm") or row.get("stk_enm") or symbol), rank,
+                amount * (1_000_000 if domestic else 1_000), "KRW" if domestic else "USD",
+                int(volume), "volume"))
+        eligible = common_equities(http, market, ((r.symbol, r.exchange) for r in candidates))
+        for result in candidates:
+            if (result.symbol, result.exchange) in eligible:
+                results.setdefault((result.symbol, result.exchange), result)
+        if len(results) >= limit:
+            break
+    if len(results) < limit:
+        raise BrokerAPIError(f"분류가 확인된 일반기업 보통주가 {len(results)}개뿐이어서 거래량 상위 {limit}개를 확정하지 않았습니다.")
+    selected = sorted(results.values(), key=lambda item: (-item.volume, item.rank, item.symbol))[:limit]
+    return tuple(RankedStock(r.market, r.symbol, r.exchange, r.name, i, r.turnover,
+                            r.currency, r.volume, "volume") for i, r in enumerate(selected, 1))
 
 
 def top_turnover(http: KiwoomHTTPClient, market: Market, limit: int = 100) -> tuple[RankedStock, ...]:

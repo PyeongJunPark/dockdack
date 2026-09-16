@@ -141,6 +141,10 @@ class Predictor:
                     or not math.isfinite(buy_threshold) or not 0 < buy_threshold < 1):
                 raise ValueError("buy_threshold must be a finite probability strictly between 0 and 1")
         self.device = torch.device(device)
+        # Tiny single-symbol inference must not saturate every desktop CPU core.
+        # Training constructs CandleLSTM directly and is unaffected by this path.
+        if self.device.type == 'cpu' and torch.get_num_threads() > 2:
+            torch.set_num_threads(2)
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("metadata"), dict):
             raise ValueError("checkpoint requires a metadata dictionary")

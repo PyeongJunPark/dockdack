@@ -11,8 +11,8 @@ from unittest.mock import patch
 try:
     import numpy as np
     import torch
-except ImportError:
-    ML_AVAILABLE = False
+except (ImportError, OSError) as exc:
+    raise unittest.SkipTest(f"Optional ML dependency cannot be imported: {type(exc).__name__}: {exc}") from exc
 else:
     ML_AVAILABLE = True
     from examples.train_lstm30 import (

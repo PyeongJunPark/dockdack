@@ -43,6 +43,9 @@ class WatchGuiTests(unittest.TestCase):
         self.item = WatchItem(self.service.resolve("005930"), "삼성전자")
         self.store.save_item(self.item)
         self.window = WatchlistDialog(self.service, self.store)
+        # These legacy interaction tests use fixed one-share rules. Percentage
+        # sizing is covered with complete valuation fixtures in v0.0 tests.
+        self.window.percent_sizing.setChecked(False)
         self.window.hourly_ranking.setChecked(False)
         self.window.engine.clock = lambda: datetime(2026, 9, 14, 1, tzinfo=timezone.utc)
         self.window.show()
@@ -50,7 +53,7 @@ class WatchGuiTests(unittest.TestCase):
 
     def wait_idle(self):
         deadline = time.monotonic() + 30
-        while self.window.worker:
+        while self.window.worker or self.window._activity_worker or self.window._schedule_probe:
             QTest.qWait(10)
             self.assertLess(time.monotonic(), deadline)
         self.app.processEvents()
@@ -88,6 +91,7 @@ class WatchGuiTests(unittest.TestCase):
         self.assertEqual(self.window.selected_item().instrument.symbol, "AAPL")
         self.window.days_input.setValue(60)
         self.window.days_button.click()
+        self.window.engine.clock = lambda: datetime(2026, 9, 14, 14, tzinfo=timezone.utc)
         self.window.refresh_all()
         self.wait_idle()
         self.assertEqual(len(self.window.chart.bars), 60)
@@ -176,19 +180,55 @@ class WatchGuiTests(unittest.TestCase):
         self.assertIn("내보내기 완료", self.window.message.text())
         self.assertEqual(self.service.submitted, [])
 
-    def test_top100_button_fetches_both_markets_and_preserves_existing(self):
+    def test_top100_button_fetches_only_eligible_market_and_preserves_existing(self):
+        calls = []
+        start = 100000
         def ranked(market, limit):
+            calls.append(market)
             self.assertEqual(limit, 100)
             if market is Market.DOMESTIC:
-                return (RankedStock(market, "000660", "KRX", "SK", 1, Decimal(100), "KRW"),)
-            return (RankedStock(market, "AAPL", "ND", "애플", 1, Decimal(100), "USD"),)
-        self.service.top_turnover = ranked
+                return tuple(RankedStock(market, str(start+i), "KRX", f"Common {i}", i+1,
+                                         Decimal(100), "KRW", 1000-i, "volume") for i in range(100))
+            return tuple(RankedStock(market, f"S{i}", "ND", f"Common {i}", i+1,
+                                     Decimal(100), "USD", 1000-i, "volume") for i in range(100))
+        self.service.top_volume = ranked
+        self.service.protected_symbols = lambda market: {"100000"}  # Held outside ranks is not a buy interest.
         self.window.ranking_button.click()
         self.wait_idle()
-        self.assertEqual(len(self.store.items()), 3)
-        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 2)
-        self.assertEqual(self.window.watch_tables[Market.US].rowCount(), 1)
+        self.assertEqual(calls, [Market.DOMESTIC])
+        self.assertEqual(len(self.store.items()), 101)
+        self.assertEqual(self.window.watch_tables[Market.US].rowCount(), 0)
+        start = 200000
+        self.window.ranking_button.click()
+        self.wait_idle()
+        self.assertEqual(len(self.store.items()), 101)
+        self.assertNotIn("100000", {item.instrument.symbol for item in self.store.items()})
+        self.assertIn("005930", {item.instrument.symbol for item in self.store.items()})
+        self.window.engine.clock = lambda: datetime(2026, 9, 14, 14, tzinfo=timezone.utc)
+        self.window.ranking_button.click()
+        self.wait_idle()
+        self.assertEqual(calls, [Market.DOMESTIC, Market.DOMESTIC, Market.US])
+        self.assertEqual(len(self.store.items()), 201)
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 101)
+        self.assertEqual(self.window.watch_tables[Market.US].rowCount(), 100)
         self.assertEqual(self.service.submitted, [])
+
+    def test_top100_button_closed_market_or_close_during_fetch_keeps_previous(self):
+        self.window.engine.clock = lambda: datetime(2026, 9, 19, 1, tzinfo=timezone.utc)
+        previous = self.store.items()
+        with patch.object(self.service, "top_volume", create=True) as ranking:
+            self.window.ranking_button.click()
+            self.wait_idle()
+            ranking.assert_not_called()
+        def closed(market, limit):
+            self.window.engine.clock = lambda: datetime(2026, 9, 14, 7, tzinfo=timezone.utc)
+            return ()
+        self.service.top_volume = closed
+        self.window.engine.clock = lambda: datetime(2026, 9, 14, 1, tzinfo=timezone.utc)
+        self.window.ranking_button.click()
+        self.wait_idle()
+        self.assertEqual(self.store.items(), previous)
+        self.assertIn("종료", self.window.message.text())
 
     def test_same_signal_and_chart_path_prevents_monitor_start(self):
         self.window.signal_path.setText(self.window.chart_path.text())
@@ -225,10 +265,10 @@ class WatchGuiTests(unittest.TestCase):
 
     def test_hourly_wakeup_runs_during_price_poll_wait(self):
         self.window.monitoring=True
-        with patch.object(self.window.scheduler,"due",return_value=True), patch.object(self.window.scheduler,"tick",return_value=True) as tick:
+        with patch.object(self.window.scheduler,"due",return_value=True), patch.object(self.window,"refresh_all") as refresh:
             self.window._schedule_wakeup()
             self.wait_idle()
-        tick.assert_called_once()
+        refresh.assert_called_once()
         self.assertEqual(self.service.quote_calls,0)
 
     def test_random_toggle_uses_separate_inbox_and_restores_external_settings(self):
@@ -277,8 +317,8 @@ class WatchGuiTests(unittest.TestCase):
                 self.assertTrue(tables[market].item(row, 0).data(Qt.ItemDataRole.UserRole).startswith(market.value + ":"))
         self.window.watch_market_tabs.setCurrentIndex(1)
         self.assertEqual(self.window.selected_item().instrument.symbol, "MSFT")
-        self.assertIn("MSFT", self.window.chart_title.text())
-        self.assertEqual(self.window.chart.currency, "USD")
+        self.assertEqual(self.window.chart.bars, ())
+        self.assertEqual(self.window.chart.currency, "")
         self.assertEqual(self.service.submitted, [])
 
     def test_switching_both_market_tabs_is_display_only_even_while_orders_on(self):
@@ -334,7 +374,7 @@ class WatchGuiTests(unittest.TestCase):
         self.assertEqual(self.store.rules(), ())
         self.assertEqual(self.service.submitted, [])
 
-    def test_selected_market_does_not_limit_both_market_poll_and_chart_export(self):
+    def test_selected_tab_does_not_override_market_hours_for_poll_and_export(self):
         us = WatchItem(self.service.resolve("AAPL"), "애플")
         self.store.save_item(us)
         self.window.reload_tables()
@@ -342,16 +382,19 @@ class WatchGuiTests(unittest.TestCase):
         self.window.external_mode.setChecked(True)
         self.window.start_monitoring()
         self.wait_idle()
-        self.assertEqual(self.service.quote_calls, 2)
-        self.assertEqual(self.window.fresh_ids, {self.item.id, us.id})
+        self.assertEqual(self.service.quote_calls, 1)
+        self.assertEqual(self.window.fresh_ids, {self.item.id})
         payload = json.loads(Path(self.window.chart_path.text()).read_text(encoding="utf-8"))
         self.assertEqual({row["market"] for row in payload["stocks"]}, {"domestic", "us"})
         self.assertEqual({row["symbol"] for row in payload["stocks"]}, {"005930", "AAPL"})
+        # Export membership remains complete; the closed-market row has no fresh data.
+        us_row = next(row for row in payload["stocks"] if row["market"] == "us")
+        self.assertNotEqual(us_row["status"], "ok")
         updates = Path(self.temp.name) / "exchange/charts_updates"
         self.assertTrue((updates / "domestic_KRX_005930.json").exists())
-        self.assertTrue((updates / "us_ND_AAPL.json").exists())
+        self.assertFalse((updates / "us_ND_AAPL.json").exists())
         self.assertEqual(self.window.watch_market, Market.US)
-        self.assertEqual(self.window.chart.currency, "USD")
+        self.assertEqual(self.window.chart.currency, "")
         self.assertTrue(self.window.monitoring)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])

@@ -25,7 +25,7 @@ def domestic_row(**overrides):
 
 def us_row(**overrides):
     return {
-        "ord_no": "000000252", "stk_cd": "NVDA", "crnc_code": "USD", "stex_nm": "미국",
+        "ord_dt": "20260915", "ord_no": "000000252", "stk_cd": "NVDA", "crnc_code": "USD", "stex_nm": "미국",
         "ord_qty": "000000000001", "cntr_qty": "000000000001", "ord_uv": "201.0200",
         "cntr_uv": "201.3147", "ord_remnq": "000000000000", "slby_tp_nm": "매도",
         "ord_stat_nm": "체결완료", "ord_time": "21:04:41", "cntr_time": "21:05:41",
@@ -69,10 +69,11 @@ class ExecutionHistoryTests(unittest.TestCase):
                 self.assertEqual((row.side, row.fill_price, row.order_price),
                                  (OrderSide.SELL, Decimal("201.3147"), Decimal("201.0200")))
                 self.assertEqual((row.order_time, row.fill_time), ("21:04:41", "21:05:41"))
+                self.assertEqual(row.broker_order_date, DAY)
                 call = transport.calls[-1]
-                self.assertEqual(call["headers"]["api-id"], "ust21150")
-                self.assertEqual(call["json"], {"ord_dt": "20260915", "query_tp": "1", "slby_tp": "0",
-                                 "stex_tp": "", "stk_cd": "", "oppo_trde_tp": "%", "fr_ord_no": ""})
+                self.assertEqual(call["headers"]["api-id"], "ust21180")
+                self.assertEqual(call["json"], {"strt_dt": "20260915", "end_dt": "20260916", "slby_tp": "0",
+                                 "stex_tp": "", "stk_cd": "", "oppo_trde_tp": "%"})
 
     def test_dated_history_does_not_substitute_today(self):
         service, _, transport = self.service(FakeResponse({"acnt_ord_cntr_prps_dtl": []}))
@@ -155,7 +156,7 @@ class ExecutionHistoryTests(unittest.TestCase):
         service, _, transport = self.service(first, second)
         self.assertEqual(len(service.execution_history(Market.US, DAY)), 2)
         self.assertEqual(transport.calls[-1]["headers"]["next-key"], "page2")
-        self.assertEqual(transport.calls[-1]["json"]["ord_dt"], "20260915")
+        self.assertEqual(transport.calls[-1]["json"]["strt_dt"], "20260915")
 
     def test_conflicting_same_order_is_not_double_counted(self):
         service, _, _ = self.service(FakeResponse({"result_list": [us_row(), us_row(cntr_uv="202")]}))
@@ -191,6 +192,55 @@ class ExecutionHistoryTests(unittest.TestCase):
         self.assertIn(("ust21150", "/api/us/acnt"), _READ_ONLY_APIS)
         self.assertNotIn(("kt00007", "/api/dostk/ordr"), _READ_ONLY_APIS)
         self.assertNotIn(("ust21150", "/api/us/ordr"), _READ_ONLY_APIS)
+        self.assertIn(("ust21180", "/api/us/acnt"), _READ_ONLY_APIS)
+        self.assertNotIn(("ust21180", "/api/us/ordr"), _READ_ONLY_APIS)
+
+    def test_us_amount_proves_cumulative_average_not_last_fill_price(self):
+        for filled, remaining, amount, expected in (("2", "1", "401.50", "200.75"),
+                                                    ("3", "0", "603.60", "201.20")):
+            service, _, _ = self.service(FakeResponse({"result_list": [us_row(
+                ord_qty="3", cntr_qty=filled, ord_remnq=remaining, cntr_amt=amount, cntr_uv="202")]}))
+            row, = service.execution_history(Market.US, DAY)
+            self.assertEqual(row.fill_price, Decimal(expected))
+            self.assertEqual(row.reported_fill_price, Decimal("202"))
+            self.assertEqual(row.fill_amount, Decimal(amount))
+            self.assertEqual(row.price_basis, "broker_average")
+
+    def test_amount_recovers_price_when_unit_price_missing(self):
+        service, _, _ = self.service(FakeResponse({"result_list": [us_row(cntr_amt="201.32", cntr_uv="")]}))
+        row, = service.execution_history(Market.US, DAY)
+        self.assertEqual(row.fill_price, Decimal("201.32"))
+        self.assertIsNone(row.reported_fill_price)
+
+    def test_malformed_us_returned_date_and_amount_fail_closed(self):
+        for changed in ({"ord_dt": ""}, {"ord_dt": "20260917"}, {"ord_dt": "20260230"},
+                        {"ord_dt": None}, {"cntr_amt": "NaN"}, {"cntr_amt": "-1"},
+                        {"cntr_qty": "0", "ord_remnq": "1", "cntr_amt": "201"}):
+            with self.subTest(changed=changed):
+                service, _, _ = self.service(FakeResponse({"result_list": [us_row(**changed)]}))
+                with self.assertRaises(ValueError):
+                    service.execution_history(Market.US, DAY)
+
+    def test_adjacent_returned_dates_can_reuse_order_number_without_collapsing(self):
+        service, _, _ = self.service(FakeResponse({"result_list": [us_row(), us_row(ord_dt="20260916")]}))
+        records = service.execution_history(Market.US, DAY)
+        self.assertEqual(len(records), 2)
+        self.assertEqual({r.broker_order_date for r in records}, {date(2026, 9, 15), date(2026, 9, 16)})
+
+    def test_us_today_uses_us_fill_field_even_if_domestic_field_is_present_but_blank(self):
+        _, broker, _ = self.service(FakeResponse({"result_list": [us_row(cntr_pric="", cntr_uv="201.3147")]}))
+        row, = broker.list_order_executions(Market.US, symbol="NVDA", exchange="ND", strict=True)
+        self.assertEqual(row.fill_price, Decimal("201.3147"))
+
+    def test_explicit_real_mode_history_uses_same_parser_with_fake_transport_and_no_orders(self):
+        transport = QueueTransport(token_response(), FakeResponse({"result_list": [us_row(cntr_amt="201.3147")]}))
+        broker = KiwoomBroker(config(TradingMode.REAL), transport=transport)
+        service = TradingService(lambda _: broker, mode=TradingMode.REAL)
+        row, = service.execution_history(Market.US, DAY)
+        self.assertEqual(row.fill_price, Decimal("201.3147"))
+        self.assertFalse(service.live_risk_acknowledged)
+        self.assertTrue(all(call["url"].startswith("https://api.kiwoom.com/") for call in transport.calls))
+        self.assertFalse(any(call["url"].endswith("/ordr") for call in transport.calls))
 
 
 if __name__ == "__main__":

@@ -68,10 +68,14 @@ class SessionResumptionTests(unittest.TestCase):
     def assert_armed_monitor_only(self, results):
         self.assertTrue(self.engine.orders_enabled)
         self.assertFalse(self.engine._stop.is_set())
-        self.assertIsInstance(results[self.item.id], MarketSnapshot)
+        if self.session.opened <= self.now < self.session.closed:
+            self.assertIsInstance(results[self.item.id], MarketSnapshot)
+            self.assertEqual(self.payloads[-1]["signals"][0]["action"], "hold")
+        else:
+            self.assertEqual(results, {})
+            self.assertEqual(self.payloads, [])
         self.assertEqual(self.service.submitted, [])
         self.assertEqual(self.store.attempts(), ())
-        self.assertEqual(self.payloads[-1]["signals"][0]["action"], "hold")
 
     def test_closed_monitoring_stays_armed_and_buys_at_open_without_second_on(self):
         for market in Market:
@@ -80,7 +84,8 @@ class SessionResumptionTests(unittest.TestCase):
                 self.engine.enable_orders("DEMO_AUTOTRADE")
                 self.assert_armed_monitor_only(self.poll())
                 self.assert_armed_monitor_only(self.poll())
-                self.assertEqual(self.service.quote_calls, 2)
+                self.assertEqual(self.service.quote_calls, 0)
+                self.assertEqual(self.service.history_calls, 0)
                 self.assertEqual(self.draws, [])  # Closed markets do not draw entries.
                 self.now = self.session.opened
                 self.poll()  # No second enable_orders call.
@@ -188,10 +193,9 @@ class SessionResumptionTests(unittest.TestCase):
         self.now = datetime(2026, 9, 13, 20, tzinfo=timezone.utc)
         self.engine.enable_orders("DEMO_AUTOTRADE")
         results = self.poll()
-        self.assertEqual(set(results), {self.item.id, us.id})
-        self.assertTrue(all(isinstance(value, MarketSnapshot) for value in results.values()))
+        self.assertEqual(results, {})
         self.assertTrue(self.engine.orders_enabled)
-        self.assertEqual(self.service.quote_calls, 2)
+        self.assertEqual(self.service.quote_calls, 0)
         self.assertEqual(self.service.submitted, [])
         self.now = self.session.opened
         self.poll()
@@ -201,14 +205,15 @@ class SessionResumptionTests(unittest.TestCase):
         self.assertTrue(self.engine.orders_enabled)
         self.assertEqual([order.market for order in self.service.submitted], [Market.DOMESTIC, Market.US])
 
-    def test_closed_history_error_is_observable_and_recovery_at_open_needs_no_second_on(self):
+    def test_closed_history_endpoint_is_not_called_and_open_needs_no_second_on(self):
         for market in Market:
             with self.subTest(market=market):
                 self.configure(market)
                 self.engine.enable_orders("DEMO_AUTOTRADE")
                 self.service.fail_history = True
                 results = self.poll()
-                self.assertIsInstance(results[self.item.id], Exception)
+                self.assertEqual(results, {})
+                self.assertEqual(self.service.history_calls, 0)
                 self.assertTrue(self.engine.orders_enabled)
                 self.assertEqual(self.service.submitted, [])
                 self.service.fail_history = False

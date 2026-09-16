@@ -16,6 +16,7 @@ from dockdack.gui import card, label, table
 from dockdack.operations_gui import populate
 from dockdack.trade_journal import DATE_DESCRIPTION, MARKETS, RETURN_DESCRIPTION, daily_trade_journal, empty_day
 from dockdack.watchlist import STATUS_LABELS
+from dockdack.activity_snapshot import LedgerSnapshot, MAX_VISIBLE_ROWS
 
 
 def _money(value, currency, *, signed=False, price=False):
@@ -41,6 +42,7 @@ class DailyTradeJournalPanel(QWidget):
         self._ledger = None
         self._head = object()
         self._last_read = float("-inf")
+        self._applied_snapshot = None
         self.journal = daily_trade_journal(())
         self.pages, self.dates, self.tables, self.values, self.summaries = {}, {}, {}, {}, {}
         self.scroll_areas, self.metric_grids, self.metric_cards = {}, {}, {}
@@ -195,8 +197,16 @@ class DailyTradeJournalPanel(QWidget):
         self._set_mode()
         if ledger == self._ledger and not force:
             return False
-        self._ledger = ledger
-        self.journal = daily_trade_journal(ledger)
+        return self.apply_snapshot(LedgerSnapshot(head, ledger, daily_trade_journal(ledger)), force=force)
+
+    def apply_snapshot(self, snapshot, *, force=False):
+        """Apply precomputed worker results; no DB or FIFO work on the UI thread."""
+        self._set_mode()
+        if snapshot is self._applied_snapshot and not force:
+            return False
+        self._applied_snapshot = snapshot
+        self._ledger = snapshot.ledger
+        self.journal = snapshot.journal
         for market in MARKETS:
             self.render_market(market)
         count = len(self.journal["undated"])
@@ -229,7 +239,7 @@ class DailyTradeJournalPanel(QWidget):
             # QLabel's word-wrap height hint can be sacrificed by a crowded
             # parent layout. Explicit newlines carry accounting caveats and
             # must always receive their full line height.
-            value.setMinimumHeight(value.fontMetrics().lineSpacing() * len(value.text().splitlines()) + 4)
+            value.setMinimumHeight(value.fontMetrics().lineSpacing() * max(2, len(value.text().splitlines())) + 4)
         values["profit"].setToolTip("전체 과거 매수를 사용한 주문순서 FIFO · 수수료·세금 제외 · 미확인 손익은 0원이 아닙니다.")
         values["return"].setToolTip(RETURN_DESCRIPTION)
         self.summaries[market].setText(
@@ -237,7 +247,10 @@ class DailyTradeJournalPanel(QWidget):
             f"매도 손익 확인 {summary['known_profit_count']}건 / 미확인 {summary['unknown_profit_count']}건\n"
             f"접수·확인 대기 {summary['pending_count']}건 · 거절 {summary['rejected_count']}건 · 취소/기타 {summary['other_count']}건"
             + (f" · 장부 정보 불일치 {summary['invalid_count']}건" if summary["invalid_count"] else ""))
-        rows = tuple(reversed(summary["rows"]))
+        rows = tuple(reversed(summary["rows"][-MAX_VISIBLE_ROWS:]))
+        if len(summary["rows"]) > MAX_VISIBLE_ROWS:
+            self.summaries[market].setText(self.summaries[market].text() +
+                f"\n상세 표 최근 {MAX_VISIBLE_ROWS}건 / 전체 {len(summary['rows'])}건 · 위 합계는 전체 주문 기준")
         cells = []
         for row in rows:
             metric, filled = row["metric"], row["has_fill"]

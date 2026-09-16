@@ -8,6 +8,7 @@ an export is one immutable decision, including its original expiry time.
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 import hashlib
 import json
 import math
@@ -222,7 +223,11 @@ class LSTM30SignalProducer:
     """
 
     def __init__(self, predictors, *, position_provider, quantity, max_krw, max_usd,
-                 state_path=None, clock=utc_now):
+                 state_path=None, clock=utc_now, trading_mode="demo"):
+        if trading_mode not in {"demo", "real"}:
+            raise ValueError('Explicit demo or real trading mode required')
+        self.trading_mode = trading_mode
+        self._prediction_cache = OrderedDict()
         if type(quantity) is not int or not 1 <= quantity <= 999_999_999:
             raise ValueError("quantity must be an explicit positive integer")
         self.predictors = dict(predictors)
@@ -249,8 +254,8 @@ class LSTM30SignalProducer:
         if (not isinstance(charts, dict) or type(charts.get("schema_version")) is not int
                 or charts["schema_version"] != 1):
             raise ValueError("Expected chart schema_version=1")
-        if charts.get("trading_mode") != "demo" or charts.get("source") != "kiwoom_demo":
-            raise ValueError("Only explicit Kiwoom demo chart exports are accepted")
+        if charts.get("trading_mode") != self.trading_mode or charts.get("source") != f"kiwoom_{self.trading_mode}":
+            raise ValueError("Only matching explicit Kiwoom trading-mode chart exports are accepted")
         export_id = charts.get("export_id")
         if not isinstance(export_id, str) or not IDENTIFIER.fullmatch(export_id):
             raise ValueError("Invalid export_id")
@@ -286,7 +291,7 @@ class LSTM30SignalProducer:
                 signal.update({key: value for key, value in decision.items() if key not in {"action", "reason"}})
             signals.append(signal)
             diagnostics.append({"watch_id": key, "reason": decision["reason"], "emitted": True, **detail})
-        payload = {"schema_version": 1, "source_id": SOURCE_ID, "trading_mode": "demo", "signals": signals}
+        payload = {"schema_version": 1, "source_id": SOURCE_ID, "trading_mode": self.trading_mode, "signals": signals}
         # Only recent immutable decisions are useful. Deleted entries cannot be
         # regenerated: new processing rejects exports older than SIGNAL_TTL.
         self.state = {key: value for key, value in self.state.items()
@@ -325,7 +330,15 @@ class LSTM30SignalProducer:
                 if predictor is None or predictor.metadata.get("market") != stock["market"]:
                     raise ValueError("A matching market checkpoint is required")
                 bars = completed_bars(stock, checked_at)
-                prediction = predictor.predict(bars)
+                key = (stock['market'], stock['exchange'], stock['symbol'], tuple(tuple(bar) for bar in bars))
+                prediction = self._prediction_cache.get(key)
+                if prediction is None:
+                    prediction = predictor.predict(bars)
+                    self._prediction_cache[key] = prediction
+                    while len(self._prediction_cache) > 512:
+                        self._prediction_cache.popitem(last=False)
+                else:
+                    self._prediction_cache.move_to_end(key)
                 decision = decide_position(current_price=price, quantity=qty,
                                            sellable_quantity=sellable, prediction=prediction)
                 detail["prediction"] = prediction

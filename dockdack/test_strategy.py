@@ -91,6 +91,9 @@ class RandomDemoSignals:
                 if action != "hold":
                     entry.update(action=action, quantity=self.quantity, max_notional=str(self.policy.cap(inst.market)),
                                  order_type="market" if inst.market is Market.DOMESTIC else "limit")
+                    if action == "buy":
+                        entry["take_profit_price"] = format((price * Decimal("1.01")).quantize(Decimal("0.00000001")), "f")
+                        entry["stop_loss_price"] = format((price * Decimal("0.992")).quantize(Decimal("0.00000001")), "f")
                     if exit_kind == "profit":
                         entry["min_sell_price"] = format(floor.quantize(Decimal("0.00000001"), rounding=ROUND_CEILING), "f")
                         entry["cost_profit_pct"] = "1"

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,7 @@ if HAS_QT:
     from dockdack.demo_session import SessionController
     from dockdack.watch_gui import WatchlistDialog
 
-from dockdack.models import Quote
+from dockdack.models import Market, Quote
 from dockdack.watchlist import MarketSnapshot, WatchItem, WatchStore
 from test_autotrade import FakeTradingService, NOW
 
@@ -30,6 +31,11 @@ from test_autotrade import FakeTradingService, NOW
 class OrderStatusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # The badge worker uses calendars even when quote monitoring is OFF.
+        # Import them here so QTest's event loop cannot starve a first import.
+        from dockdack.market_schedule import calendar_for
+        for market in Market:
+            calendar_for(market, 2026)
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
@@ -58,12 +64,28 @@ class OrderStatusTests(unittest.TestCase):
         self.app.processEvents()
 
     def tearDown(self):
+        self.window.health_timer.stop()
+        self.window.order_status_timer.stop()
+        self.window.environment_timer.stop()
         self.window.worker = None
         self.window.stop_monitoring()
+        self.wait_local_workers()
         self.window.close()
+        self.wait_local_workers()
         self.window.deleteLater()
         self.app.processEvents()
         self.temp.cleanup()
+
+    def wait_local_workers(self):
+        deadline = time.monotonic() + 10
+        idle_rounds = 0
+        while idle_rounds < 2:
+            self.app.processEvents()
+            busy = (self.window._activity_worker or self.window._activity_pending
+                    or self.window._schedule_probe or self.window.activity_pool.activeThreadCount())
+            idle_rounds = 0 if busy else idle_rounds + 1
+            QTest.qWait(10)
+            self.assertLess(time.monotonic(), deadline, "Local display worker did not finish")
 
     def arm(self):
         # These tests isolate state reporting; the deferred ON button workflow
@@ -87,7 +109,12 @@ class OrderStatusTests(unittest.TestCase):
         thread.start()
         thread.join(timeout=1)
         self.assertFalse(thread.is_alive())
-        QTest.qWait(300)
+        self.assertTrue(self.window.order_status_timer.isActive())
+        # Wait for the real timer, not a manual sync. A fixed 300 ms allowed
+        # only 50 ms scheduling slack for the 250 ms timer under a full suite.
+        deadline = time.monotonic() + 3
+        while "자동주문 OFF" not in self.window.mode_label.text() and time.monotonic() < deadline:
+            QTest.qWait(20)
         self.assertIn("자동주문 OFF", self.window.mode_label.text())
         self.assertIn("주문 차단", self.window.mode_label.text())
         self.assertTrue(self.window.arm_button.isEnabled())
