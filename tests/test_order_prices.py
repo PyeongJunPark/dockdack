@@ -4,7 +4,7 @@ from decimal import Decimal, localcontext
 import unittest
 
 from dockdack import KiwoomBroker, Market, OrderRequest, OrderSide
-from dockdack.order_prices import current_limit_price, validate_us_order_price
+from dockdack.order_prices import current_common_equity_limit_price, current_limit_price, validate_us_order_price
 from test_kiwoom import FakeResponse, QueueTransport, config, token_response
 
 
@@ -42,6 +42,70 @@ class CurrentLimitPriceTests(unittest.TestCase):
         with localcontext() as context:
             context.prec = 3
             self.assertEqual(current_limit_price("us", "sell", Decimal("330.8003")), Decimal("330.81"))
+
+
+class CommonEquityLimitPriceTests(unittest.TestCase):
+    def test_domestic_tick_multiples_and_every_price_band_boundary(self):
+        for quote, buy, sell in (
+            ("1998.25", "1998", "1999"),
+            ("1999.9", "1999", "2000"),
+            ("2000", "2000", "2000"),
+            ("2001", "2000", "2005"),
+            ("4999.9", "4995", "5000"),
+            ("5000", "5000", "5000"),
+            ("5001", "5000", "5010"),
+            ("19999", "19990", "20000"),
+            ("20000", "20000", "20000"),
+            ("20001", "20000", "20050"),
+            ("49999", "49950", "50000"),
+            ("50000", "50000", "50000"),
+            ("50001", "50000", "50100"),
+            ("199999", "199900", "200000"),
+            ("200000", "200000", "200000"),
+            ("200001", "200000", "200500"),
+            ("310750", "310500", "311000"),
+            ("499999", "499500", "500000"),
+            ("500000", "500000", "500000"),
+            ("500001", "500000", "501000"),
+            ("750100", "750000", "751000"),
+        ):
+            for side, expected in (("buy", buy), ("sell", sell)):
+                with self.subTest(quote=quote, side=side):
+                    value = current_common_equity_limit_price("domestic", side, Decimal(quote))
+                    self.assertEqual(value, Decimal(expected))
+                    self.assertTrue(value <= Decimal(quote) if side == "buy" else value >= Decimal(quote))
+                    self.assertEqual(current_common_equity_limit_price("domestic", side, value), value)
+
+    def test_generic_domestic_path_stays_unchanged_for_noncommon_instruments(self):
+        quote = Decimal("310750")
+        for side in ("buy", "sell"):
+            self.assertIs(current_limit_price("domestic", side, quote), quote)
+
+    def test_us_dispatch_preserves_existing_precision_behavior(self):
+        for quote in ("330.8003", "0.123456", "0.99999"):
+            for side in ("buy", "sell"):
+                self.assertEqual(current_common_equity_limit_price("us", side, Decimal(quote)),
+                                 current_limit_price("us", side, Decimal(quote)))
+
+    def test_invalid_domestic_values_and_zero_rounded_buy_are_rejected(self):
+        for value in (Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity"),
+                      Decimal("-Infinity"), "310750", 310750, True):
+            for side in ("buy", "sell"):
+                with self.subTest(value=value, side=side), self.assertRaises(ValueError):
+                    current_common_equity_limit_price("domestic", side, value)
+        with self.assertRaises(ValueError):
+            current_common_equity_limit_price("domestic", "buy", Decimal("0.1"))
+        self.assertEqual(current_common_equity_limit_price("domestic", "sell", Decimal("0.1")), Decimal(1))
+
+    def test_low_decimal_precision_does_not_change_tick_multiple(self):
+        with localcontext() as context:
+            context.prec = 2
+            for quote, buy, sell in (("310750", "310500", "311000"),
+                                     ("499999.9999", "499500", "500000"),
+                                     ("3.1075E+5", "310500", "311000")):
+                self.assertEqual(current_common_equity_limit_price("domestic", "buy", Decimal(quote)), Decimal(buy))
+                self.assertEqual(current_common_equity_limit_price("domestic", "sell", Decimal(quote)), Decimal(sell))
+            self.assertEqual(context.prec, 2)
 
 
 class BrokerPricePrecisionTests(unittest.TestCase):

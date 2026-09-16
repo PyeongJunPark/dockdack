@@ -305,6 +305,73 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(len(self.service.submitted), 1)
         self.assertEqual(second.store.path, first.store.path)
 
+    def test_confirmed_reject_keeps_gui_on_for_other_symbols_and_reports_quarantine(self):
+        other = WatchItem(Instrument(Market.DOMESTIC, "035420", "KRX"), "Naver", 31)
+        original_submit = self.service.submit
+
+        def reject_only_first(request):
+            if request.symbol == self.item.instrument.symbol:
+                self.service.submitted.append(request)
+                raise BrokerAPIError("confirmed mock rejection", return_code=2000, status_code=200)
+            return original_submit(request)
+
+        self.service.submit = reject_only_first
+        window = self.window(items=[self.item, other])
+        window.start_session("DEMO_AUTOTRADE")
+        self.wait_idle(window)
+        self.assertTrue(window.engine.orders_enabled)
+        self.assertEqual({order.symbol for order in self.service.submitted}, {"005930", "035420"})
+        self.assertEqual({row["status"] for row in window.store.attempts()}, {"rejected", "accepted"})
+        self.sweep(window)
+        self.assertTrue(window.engine.orders_enabled)
+        self.assertEqual(len(self.service.submitted), 2)
+        self.assertEqual(window.lstm_bridge.diagnostics[self.item.id]["execution_gate"], "REJECTED_TODAY")
+        self.assertEqual(len(window.store.attempts(self.item.id)), 1)
+
+    def test_rejected_holding_blocks_new_sell_after_gui_restart_without_blocking_explicit_on(self):
+        from test_lstm30_rejections import seed_attempt
+
+        self.service.positions = (position(),)
+        self.service.prices = [Decimal(101)]
+        first = self.window()
+        seed_attempt(first.store, self.item, self.now)
+        first.start_session("DEMO_AUTOTRADE")
+        self.wait_idle(first)
+        self.assertTrue(first.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(first.lstm_bridge.diagnostics[self.item.id]["execution_gate"], "REJECTED_TODAY")
+        first.disarm_button.click()
+        self.sweep(first)
+        self.assertFalse(first.engine.orders_enabled)
+        with patch.object(first, "confirm_automation", return_value=True):
+            first.arm_button.click()
+        self.wait_idle(first)
+        self.assertTrue(first.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        first.stop_monitoring()
+        self.wait_idle(first)
+        self.assertTrue(first.shutdown())
+        second = self.window()
+        second.start_session("DEMO_AUTOTRADE")
+        self.wait_idle(second)
+        self.assertTrue(second.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(second.lstm_bridge.diagnostics[self.item.id]["execution_gate"], "REJECTED_TODAY")
+        self.assertFalse(any(rule.status == "ready" and rule.side is OrderSide.SELL for rule in second.store.rules()))
+
+    def test_malformed_rejected_timestamp_blocks_gui_warmup_auto_on(self):
+        from test_lstm30_rejections import seed_attempt
+
+        window = self.window()
+        # Naive ISO is renderable but unsafe for market-local-day decisions.
+        # Literal corrupt strings are covered by the helper and engine tests.
+        seed_attempt(window.store, self.item, self.now.replace(tzinfo=None).isoformat())
+        window.start_session("DEMO_AUTOTRADE")
+        self.wait_idle(window)
+        self.assertFalse(window.engine.orders_enabled)
+        self.assertFalse(window.pending_auto_arm)
+        self.assertEqual(self.service.submitted, [])
+
     def test_existing_runtime_lock_prevents_gui_construction(self):
         lock = SessionLock(self.root / "session.lock")
         lock.acquire()

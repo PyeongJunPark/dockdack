@@ -18,6 +18,7 @@ from dockdack.exceptions import BrokerAPIError, OrderNotSent, OrderOutcomeUnknow
 from dockdack.gui_service import Instrument
 from dockdack.history import market_time
 from dockdack.http import order_send_guard
+from dockdack.lstm30_rejections import rejected_today
 from dockdack.market_schedule import session_on
 from dockdack.models import AccountSnapshot, Market, OrderExecution, OrderResult, OrderSide, TradingMode
 from dockdack.order_prices import current_limit_price
@@ -263,6 +264,13 @@ class CloseLiquidator:
                               (rule.watch_id, rule.id)).fetchone():
                     raise ValueError("다른 미확정/미체결 주문이 생겨 청산을 전송하지 않습니다.")
             self._permission(instrument, closing=True)
+            try:
+                quarantined = rejected_today(self.store, instrument, self.clock())
+            except Exception:
+                self.engine.disarm()
+                raise
+            if quarantined:
+                raise OrderNotSent("이 종목은 오늘 확정 거절된 주문이 있어 마감 청산도 재전송하지 않습니다.")
             # SQLite waits and the final local permission checks can consume
             # the remaining freshness budget after the first validation. Resolve
             # session bounds before sampling the final clock; calendar work must
@@ -291,6 +299,8 @@ class CloseLiquidator:
         if any(row["status"] in {"submitting", "unknown"} for row in pending):
             self.engine.disarm()
             return "UNKNOWN_ORDER_REQUIRES_REVIEW"
+        if rejected_today(self.store, instrument, self.clock()):
+            return "REJECTED_TODAY"
         if pending:
             return "PENDING_ORDER"
         orders = self.service.safety_orders(instrument)
@@ -342,7 +352,7 @@ class CloseLiquidator:
                      and type(exc.return_code) in (int, str) and str(exc.return_code).strip().isdigit()
                      and int(exc.return_code) != 0)
             status = "not_sent" if isinstance(exc, OrderNotSent) else "rejected" if known else "unknown"
-            if status in {"unknown", "rejected"}:
+            if status == "unknown":
                 self.engine.disarm()
             try:
                 self.store.finish(rule.id, status, f"마감 청산 · {type(exc).__name__}")

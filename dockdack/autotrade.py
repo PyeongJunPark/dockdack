@@ -16,7 +16,7 @@ from dockdack.history import market_time, regular_session
 from dockdack.history_cache import HistoryCache
 from dockdack.http import order_send_guard
 from dockdack.models import OrderSide, TradingMode
-from dockdack.order_prices import current_limit_price
+from dockdack.order_prices import current_common_equity_limit_price
 from dockdack.signal_bridge import validate_external_rule
 from dockdack.watchlist import MarketSnapshot, TriggerKind, TriggerRule, WatchItem, WatchStore, positive, utc_now
 
@@ -285,7 +285,7 @@ class AutoTrader:
             if "cost_loss_pct" in metadata and fresh.quote.price > average*(1-Decimal(metadata["cost_loss_pct"])/100):
                 raise ValueError("매도 직전 실제 평균 매입가 대비 손절 조건이 성립하지 않습니다.")
         kind = metadata.get("order_type", "limit")
-        price = None if kind == "market" else current_limit_price(inst.market, rule.side, fresh.quote.price)
+        price = None if kind == "market" else current_common_equity_limit_price(inst.market, rule.side, fresh.quote.price)
         if price is not None and price * rule.quantity > rule.max_notional:
             raise ValueError("가격 단위에 맞춘 지정가 주문금액이 규칙의 상한을 넘습니다.")
         request = self.service.prepare(inst, rule.side.value, rule.quantity, kind, price)

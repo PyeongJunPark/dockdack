@@ -26,6 +26,7 @@ from dockdack.gui_service import Instrument, TradingService
 from dockdack.history import market_time
 from dockdack.lstm30_adapter import LSTM30SignalProducer, SOURCE_ID, demo_position_provider
 from dockdack.lstm30_close import CloseLiquidator
+from dockdack.lstm30_rejections import rejected_today
 from dockdack.lstm30_runtime import DEFAULT_ITEMS, DEFAULT_RUNTIME_DIR, SessionLock, _BAD_DIAGNOSTICS
 from dockdack.lstm30_universe import LSTM30Universe, ScopedRankingScheduler
 from dockdack.models import Market, OrderSide, TradingMode
@@ -35,7 +36,7 @@ from dockdack.watchlist import WatchItem, WatchStore, utc_now
 
 
 class _LSTM30AutoTrader(AutoTrader):
-    """Preserve main's checks while making quote/rejection failures sticky OFF."""
+    """Keep uncertain failures sticky OFF; isolate confirmed rejected symbols."""
 
     def __init__(self, service, store, *, items, clock):
         super().__init__(service, store, clock=clock)
@@ -67,7 +68,7 @@ class _LSTM30AutoTrader(AutoTrader):
     def _critical_attempts(self):
         return [row for row in self.store.attempts()
                 if row["rule_id"] not in self.initial_attempts
-                and row["status"] in {"rejected", "unknown", "submitting"}]
+                and row["status"] in {"unknown", "submitting"}]
 
     def enable_orders(self, confirmation):
         if confirmation != "DEMO_AUTOTRADE":
@@ -75,7 +76,7 @@ class _LSTM30AutoTrader(AutoTrader):
             raise ValueError("DEMO_AUTOTRADE 확인만 허용합니다.")
         if self._critical_attempts():
             self.disarm()
-            raise ValueError("이 세션의 거절/미확정 주문을 확인한 후 실행기를 다시 시작하세요.")
+            raise ValueError("이 세션의 접수 불명확/전송 중 주문을 확인한 후 실행기를 다시 시작하세요.")
         if self.universe is not None and not self.universe.initialized:
             self.disarm()
             raise ValueError("승인된 시장의 보통주 TOP100 확정·전체 조회가 필요합니다.")
@@ -88,7 +89,7 @@ class _LSTM30AutoTrader(AutoTrader):
                 self.safety_reason = "QUOTE_OR_SNAPSHOT_FAILED"
                 self.disarm()
             if self._critical_attempts():
-                self.safety_reason = "ORDER_REJECTED_OR_OUTCOME_UNKNOWN"
+                self.safety_reason = "ORDER_OUTCOME_UNKNOWN_OR_SUBMITTING"
                 self.disarm()
             if progress is not None:
                 progress(update)
@@ -106,6 +107,16 @@ class _LSTM30AutoTrader(AutoTrader):
         return super().poll(progress=guarded_progress, checkpoint=guarded_checkpoint, on_snapshot=on_snapshot)
 
     def _execute(self, item, rule, snapshot):
+        try:
+            quarantined = rejected_today(self.store, item.instrument, self.clock())
+        except Exception:
+            self.safety_reason = "REJECTION_HISTORY_UNVERIFIED"
+            self.disarm()
+            raise
+        if quarantined:
+            self.store.pause_rule(rule.id)
+            self.store.event(item.id, "당일 확정 거절 이력 · 이 종목의 추가 자동주문만 차단", category="signal")
+            return False
         if (rule.side is OrderSide.BUY and self.close_liquidator is not None
                 and self.close_liquidator.buy_blocked(item.instrument.market)):
             self.store.pause_rule(rule.id)
@@ -114,12 +125,23 @@ class _LSTM30AutoTrader(AutoTrader):
         return super()._execute(item, rule, snapshot)
 
     def _before_order_send(self, item, rule, fresh):
+        def reject_quarantined_instrument():
+            try:
+                if rejected_today(self.store, item.instrument, self.clock()):
+                    raise OrderNotSent("당일 확정 거절 이력이 있어 이 종목의 추가 자동주문을 차단했습니다.")
+            except OrderNotSent:
+                raise
+            except Exception as exc:
+                self.disarm()
+                raise OrderNotSent("거절 이력을 검증할 수 없어 자동주문을 차단했습니다.") from exc
         def reject_closing_buy():
             if (rule.side is OrderSide.BUY and self.close_liquidator is not None
                     and self.close_liquidator.buy_blocked(item.instrument.market)):
                 raise OrderNotSent("마감 청산 구간에 진입하여 신규 매수 전송을 차단했습니다.")
+        reject_quarantined_instrument()
         reject_closing_buy()
         super()._before_order_send(item, rule, fresh)
+        reject_quarantined_instrument()
         reject_closing_buy()
         # The closing calendar check follows the parent's final guard. Preserve
         # its freshness/stop guarantees if that additional local work took time.
@@ -172,7 +194,24 @@ class LSTM30GUIBridge:
             detail = {key: value for key, value in row.items() if key not in {"error", "watch_id"}}
             detail["action"] = actions.get(row["watch_id"], "none")
             item = allowed[row["watch_id"]]
-            if self._buy_attempted_today(item):
+            try:
+                quarantined = rejected_today(window.store, item.instrument, window.engine.clock())
+            except Exception:
+                window.engine.safety_reason = "REJECTION_HISTORY_UNVERIFIED"
+                window.engine.disarm()
+                # The external producer just published a ready rule. Do not
+                # repeatedly prioritize that same invalid-history instrument
+                # before the failed warmup can settle and cancel startup ON.
+                for rule in window.store.rules(item.id):
+                    if rule.status == "ready":
+                        window.store.pause_rule(rule.id)
+                raise
+            if quarantined:
+                for rule in window.store.rules(item.id):
+                    if rule.status == "ready":
+                        window.store.pause_rule(rule.id)
+                detail["execution_gate"] = "REJECTED_TODAY"
+            elif self._buy_attempted_today(item):
                 for rule in window.store.rules(item.id):
                     if rule.status == "ready" and rule.side is OrderSide.BUY:
                         window.store.pause_rule(rule.id)
@@ -443,7 +482,7 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         if any(row["reason"] in _BAD_DIAGNOSTICS for row in diagnostics.values()):
             return "LSTM30 입력 검증 실패로 자동주문 OFF를 유지합니다."
         if self.engine._critical_attempts():
-            return "이 세션의 거절/미확정 주문을 확인해야 합니다."
+            return "이 세션의 접수 불명확/전송 중 주문을 확인해야 합니다."
         return ""
 
     def _sync_environment(self):
