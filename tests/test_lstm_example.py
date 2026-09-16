@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 try:
@@ -18,6 +20,60 @@ else:
 
 @unittest.skipUnless(ML_AVAILABLE, "Install the ml extra to test the LSTM example")
 class LSTMExampleTests(unittest.TestCase):
+    def make_database(self, path, extra_sql=(), metadata=()):
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("CREATE TABLE daily_bars (symbol TEXT, exchange TEXT, trade_date TEXT, "
+                               "open TEXT, high TEXT, low TEXT, close TEXT, volume INTEGER)")
+            connection.executemany("INSERT INTO daily_bars VALUES (?,?,?,?,?,?,?,?)", [
+                ("005930", "KRX", "2024-01-02", "100", "110", "90", "105", 10000),
+                ("005930", "KRX", "2024-01-03", "105", "112", "101", "108", 12000),
+            ])
+            for sql in extra_sql:
+                connection.execute(sql)
+            if metadata:
+                connection.execute("CREATE TABLE metadata(key TEXT, value TEXT)")
+                connection.executemany("INSERT INTO metadata VALUES (?,?)", metadata)
+
+    def test_raw_database_loading_is_unchanged_and_read_only(self):
+        for metadata in ((), (("schema_version", "1"), ("market", "domestic"))):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "raw.sqlite3"
+                self.make_database(path, metadata=metadata)
+                before = path.read_bytes()
+                dates, bars, dropped = load_bars(path, "005930", "KRX", "2024-01-02", "2024-01-03")
+                self.assertEqual(dates.tolist(), ["2024-01-02", "2024-01-03"])
+                np.testing.assert_array_equal(bars[:, 3], [105., 108.])
+                self.assertEqual(dropped, 0)
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_clean_sample_or_segment_schema_is_rejected_even_without_metadata(self):
+        for sql in ("CREATE TABLE training_samples(dummy INTEGER)",
+                    "CREATE VIEW TRAINING_SAMPLES AS SELECT 1 AS dummy",
+                    "ALTER TABLE daily_bars ADD COLUMN SEGMENT_ID INTEGER"):
+            with self.subTest(sql=sql), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.make_database(path, extra_sql=(sql,))
+                before = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "approved training_samples index"):
+                    load_bars(path, "005930", "KRX", "2024-01-01")
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_clean_metadata_is_rejected_even_with_stripped_sample_schema(self):
+        markers = (("schema_version", "clean-daily-v1"), ("schema_version", '"clean-daily-v1"'),
+                   ("schema_version", '"clean-daily-future"'), ("SCHEMA_VERSION", '"CLEAN-DAILY-V1"'),
+                   ("schema_version", '"clean-daily-v1'), ("schema_version", '{"schema":"clean-daily-v1"}'),
+                   ("schema_version", '"\\u0063lean-daily-v1"'),
+                   ("requires_training_samples", "true"), ("requires_training_samples", "false"),
+                   ("REQUIRES_TRAINING_SAMPLES", "not-json"), ("requires_training_samples", None))
+        for marker in markers:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.make_database(path, metadata=(marker,))
+                before = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "examples/train_lstm30.py"):
+                    load_bars(path, "005930", "KRX", "2024-01-01")
+                self.assertEqual(path.read_bytes(), before)
+
     def test_missing_database_does_not_create_an_empty_file(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "missing.sqlite3"

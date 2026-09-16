@@ -25,12 +25,42 @@ FEATURE_NAMES = ["open_log_return", "high_log_return", "low_log_return",
                  "close_log_return", "log_volume_change"]
 
 
+def _require_legacy_database(connection):
+    """Never bypass the approved sample index of a cleaned training database."""
+    message = ("Cleaned training databases require the approved training_samples index; "
+               "use examples/train_lstm30.py. This legacy daily LSTM example supports raw databases only.")
+    objects = {row[0].casefold() for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
+    if "training_samples" in objects:
+        raise ValueError(message)
+    columns = {row[1].casefold() for row in connection.execute("PRAGMA table_info(daily_bars)")}
+    if "segment_id" in columns:
+        raise ValueError(message)
+    if "metadata" in objects:
+        for key, value in connection.execute(
+                "SELECT key,value FROM metadata WHERE lower(key) IN ('schema_version','requires_training_samples')"):
+            if key.casefold() == "requires_training_samples":
+                # Presence is enough: an incomplete or contradictory marker
+                # must not silently turn a cleaned database into a raw one.
+                raise ValueError(message)
+            try:
+                version = json.loads(value)
+            except (TypeError, ValueError):
+                version = value
+            if ((isinstance(version, str) and "clean-daily" in version.casefold())
+                    or (isinstance(value, str) and "clean-daily" in value.casefold())):
+                raise ValueError(message)
+
+
 def load_bars(database: Path, symbol: str, exchange: str, start: str, end: str | None = None):
-    """Read one symbol only; opening a missing path never creates an empty DB."""
+    """Read one raw symbol; reject cleaned DBs and never create missing files."""
     if not database.is_file():
         raise ValueError(f"Database not found: {database}")
     connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
     try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        _require_legacy_database(connection)
         rows = connection.execute(
             "SELECT trade_date, open, high, low, close, volume FROM daily_bars "
             "WHERE symbol = ? AND exchange = ? AND trade_date >= ? "
