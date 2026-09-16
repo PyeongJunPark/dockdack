@@ -172,6 +172,9 @@ class TradingService:
     def top_turnover(self, market: Market, limit: int = 100):
         return self.broker(market).top_turnover(market, limit)
 
+    def top_volume(self, market: Market, limit: int = 100):
+        return self.broker(market).top_volume(market, limit)
+
     def common_equities(self, market: Market, candidates):
         return self.broker(market).common_equities(market, candidates)
 

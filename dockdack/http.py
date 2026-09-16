@@ -24,6 +24,7 @@ _READ_ONLY_APIS = frozenset({
     ("ka10099", "/api/dostk/stkinfo"),
     ("ka10081", "/api/dostk/chart"),
     ("ka10032", "/api/dostk/rkinfo"),
+    ("ka10030", "/api/dostk/rkinfo"),
     ("kt00018", "/api/dostk/acnt"),
     ("kt00001", "/api/dostk/acnt"),
     ("ka10075", "/api/dostk/acnt"),
@@ -35,11 +36,13 @@ _READ_ONLY_APIS = frozenset({
     ("usa10104", "/api/us/stkinfo"),
     ("usa06012", "/api/us/chart"),
     ("usa20540", "/api/us/rkinfo"),
+    ("usa20530", "/api/us/rkinfo"),
     ("ust21070", "/api/us/acnt"),
     ("ust21110", "/api/us/acnt"),
     ("ust21050", "/api/us/acnt"),
     ("ust21510", "/api/us/acnt"),
     ("ust21150", "/api/us/acnt"),
+    ("ust21180", "/api/us/acnt"),
 })
 _MAX_READ_RATE_LIMIT_RETRIES = 2
 # Verified 2026-09-15: https://openapi.kiwoom.com/intro?dummyVal=0

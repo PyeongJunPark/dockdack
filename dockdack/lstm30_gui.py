@@ -40,6 +40,9 @@ class _LSTM30AutoTrader(AutoTrader):
 
     def __init__(self, service, store, *, items, clock):
         super().__init__(service, store, clock=clock)
+        # This legacy dedicated launcher retains its same-day rejection latch.
+        # The v0.0 dashboard uses plain AutoTrader with bounded retries enabled.
+        self.us_retry_attempts = 1
         self.allowed_items = {item.id for item in items}
         self.initial_attempts = {row["rule_id"] for row in store.attempts()}
         self.safety_reason = ""
@@ -56,7 +59,7 @@ class _LSTM30AutoTrader(AutoTrader):
             raise ValueError("LSTM30 GUI는 모의투자 전용입니다. 실전 전환은 허용하지 않습니다.")
         if self.universe is not None:
             try:
-                self.universe.validate_active()
+                self.universe.validate_active(force=orders)
             except Exception:
                 self.disarm()
                 raise
@@ -77,7 +80,7 @@ class _LSTM30AutoTrader(AutoTrader):
         if self._critical_attempts():
             self.disarm()
             raise ValueError("이 세션의 접수 불명확/전송 중 주문을 확인한 후 실행기를 다시 시작하세요.")
-        if self.universe is not None and not self.universe.initialized:
+        if self.universe is not None and not self.universe.ready_for_open_markets():
             self.disarm()
             raise ValueError("승인된 시장의 보통주 TOP100 확정·전체 조회가 필요합니다.")
         super().enable_orders(confirmation)
@@ -127,6 +130,21 @@ class _LSTM30AutoTrader(AutoTrader):
     def _before_order_send(self, item, rule, fresh):
         def reject_quarantined_instrument():
             try:
+                if item.instrument.market is Market.US:
+                    with self.store.connection() as db:
+                        retry = db.execute("""SELECT retry.root_rule_id,retry.sequence,a.status
+                            FROM order_retries retry JOIN attempts a ON a.rule_id=retry.root_rule_id
+                            WHERE retry.rule_id=?""", (rule.id,)).fetchone()
+                        if retry and 2 <= retry["sequence"] <= self.us_retry_attempts and retry["status"] in {"rejected", "not_sent"}:
+                            # Only this bounded, durable chain may pass. A prior
+                            # unrelated rejected signal still quarantines the stock.
+                            other = db.execute("""SELECT 1 FROM attempts a WHERE a.watch_id=?
+                                AND a.status IN ('unknown','submitting','rejected') AND a.rule_id!=?
+                                AND a.rule_id!=? AND a.rule_id NOT IN
+                                  (SELECT rule_id FROM order_retries WHERE root_rule_id=?) LIMIT 1""",
+                                (item.id, rule.id, retry["root_rule_id"], retry["root_rule_id"])).fetchone()
+                            if other is None:
+                                return
                 if rejected_today(self.store, item.instrument, self.clock()):
                     raise OrderNotSent("당일 확정 거절 이력이 있어 이 종목의 추가 자동주문을 차단했습니다.")
             except OrderNotSent:
@@ -474,7 +492,7 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         base = super().activation_failure(results, error, external_error_baseline=external_error_baseline)
         if base:
             return base
-        if not self.lstm_universe.initialized:
+        if not self.lstm_universe.ready_for_open_markets():
             return "승인된 시장의 보통주 TOP100이 확정되지 않았습니다."
         diagnostics = self.lstm_bridge.diagnostics
         if {item.id for item in self.lstm_items} - set(diagnostics):

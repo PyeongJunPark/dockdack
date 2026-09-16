@@ -11,7 +11,11 @@ from dockdack import Market, TradingMode
 
 ML_AVAILABLE = all(importlib.util.find_spec(name) for name in ("torch", "numpy"))
 if ML_AVAILABLE:
-    import numpy as np
+    try:
+        import numpy as np
+        import torch
+    except (ImportError, OSError) as exc:
+        raise unittest.SkipTest(f"Optional ML dependency cannot be imported: {type(exc).__name__}: {exc}") from exc
     from examples.emit_lstm_signal import infer, live_signal, manual_signal, recent_completed_bars
 
 

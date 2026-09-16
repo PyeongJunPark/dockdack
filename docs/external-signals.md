@@ -1,4 +1,8 @@
-# 거래대금 TOP100 · 차트 내보내기 · 외부 매매 신호
+# 거래량 TOP100 · 차트 내보내기 · 외부 매매 신호
+
+> 이 문서의 기본 동작은 **ver 0.0 통합 데스크** 기준이다. 시장별 **거래량**으로 선정하고,
+> 개장 10분 전 준비 구간과 정규장에만 순위를 조회한다. 구버전 거래대금 도우미는 아래에서 별도로 구분한다.
+> 전체 운용 설정과 화면은 [ver 0.0 안내](VER_0_0.md)를 참고한다.
 
 기본은 모의투자다. 실전은 [환경 선택과 안전장치](trading-modes.md)를 거친 별도 환경에서 사용한다.
 신호를 만드는 모델/전략은 별도 코드에서 실행하고, DockDack은 **JSON 데이터만** 읽는다.
@@ -9,12 +13,15 @@
 
 ## 빠른 시작
 
-1. `uv run --extra gui dockdack-gui` → 왼쪽 **관심종목 · 자동매매**.
-2. **거래대금 TOP100 추가 · 한국 + 미국**을 누른다. 시장별 100종목을 별도로 선정한다.
-   기존 관심종목과 종목별 N, 규칙, 주문 이력은 유지한다. 새 종목은 입력된 N(기본 30거래일)을 사용한다.
-3. **전체 1회 조회** → **차트 JSON 내보내기**. 기본 출력은 `.dockdack/exchange/charts.json`이다.
-4. 다른 코드가 차트를 읽고 아래 규격의 신호를 `.dockdack/exchange/signals.json`에 쓴다.
+1. `DockDack.vbs` 또는 `uv run --extra gui dockdack-gui`로 통합 데스크를 연다.
+2. **현재 선정 가능한 시장 · 거래량 TOP100**을 누르거나 개장 10분 전/장중 정시 자동 선정을 사용한다.
+   시장별 일반 기업 보통주 100개를 별도 선정하며 새 종목 기본 일봉 수는 31개다. 준비 구간 이외의 장외·휴장에는 순위를 조회하지 않는다.
+3. **전체 1회 조회** → **차트 JSON 내보내기**. 연결 설정에 표시된 출력 경로를 사용한다.
+   기본은 선택한 환경의 장부 폴더 아래 `exchange/charts.json`이다. 기존 LSTM 장부를 재사용하면
+   `.dockdack/lstm30-demo/exchange/charts.json`일 수 있으므로 `.dockdack/exchange`로 고정해서 가정하지 않는다.
+4. 다른 코드가 차트를 읽고 아래 규격의 신호를 연결 설정의 입력 경로(`exchange/signals.json`)에 쓴다.
 5. 상단 **외부 신호 연결 → 연결 설정**에서 출처 `source_id`, 입력/출력 경로, 주문당 최대 수량과 KRW/USD 상한을 입력한다.
+   추가 신호기는 각각 다른 출처와 입력 파일로 연결한다. 내장 LSTM 없이 외부 추론만 쓰려면 내장 LSTM 체크를 해제한다.
    금액 0은 해당 시장 주문 차단이다. **파일 검사 (주문 없음)**는 JSON 형식/정책만 검사하며 규칙·주문을 생성하지 않는다.
    설정의 **신호 파일 1회 읽기**는 실제 신호를 접수해 대기 규칙을 생성할 수 있지만, 주문을 켜거나 전송하지 않는다.
 6. **외부 신호 모드**를 선택한 뒤 **감시 시작 (조회만)**. 이 모드에서는 수동 가격/SMA 규칙을 실행하지 않는다.
@@ -22,6 +29,12 @@
    조회 중에도 예약할 수 있으며 전체 관심종목·잔고 등의 검증에 성공한 뒤 ON이 된다. 실패하면 OFF를 유지하고 예약을 취소한다.
    모니터만 시작하면 주문은 전송되지 않는다. **자동주문 끄기 (OFF)**는 ON 예약도 취소한다.
 8. **감시·주문 중지**는 다음 전송을 막는다. 이미 접수된 주문은 취소하지 않는다.
+
+ver 0.0은 매수 신호의 `take_profit_price`와 `stop_loss_price`를 함께 받아 접수된 매수에 저장한다.
+보유종목은 관심목록과 별개로 **해당 시장 정규장에** 현재가를 조회해 목표가 도달 시 매도 조건을 재검사한다.
+열린 시장의 관심종목 매수 후보를 순회한 뒤 보유종목 매도 조건을 순회하며, 보유종목 확인만을 위해 일봉을 다시 요청하지 않는다.
+외부 `sell` 신호도 이 목표가 검사를 생략하지 않으며 **신호 수신 = 주문 접수 = 체결이 아니다**.
+정규장, 자동주문 ON, 유효기간, 현재가, 잔고, 금액 상한 및 중복 주문 방지를 통과해야 주문이 전송된다.
 
 외부 모드 감시에서는 **각 종목 조회 직후** `<출력 파일명>_updates/<시장>_<거래소>_<종목>.json`을 원자적으로 갱신한다.
 예를 들어 `charts.json`이면 `charts_updates/domestic_KRX_005930.json`이다. 한 순회가 끝나면 전체 `charts.json`도 갱신한다.
@@ -43,40 +56,56 @@
 - HOLD/매수·매도 후보/접수는 주문·체결이 아니다. 실제 주문은 **실제 주문·체결**, 서버·시세·신호 로그는 **서버·감시 로그**에서 본다.
 - 파일 검사는 감시 중에도 가능하다. 연결 설정 변경은 **감시·주문 중지** 후 진행한다. 검사 중 경로가 바뀌면 이전 검사 결과를 폐기한다.
 
-화면 없이 순위와 차트만 갱신하려면 프로젝트 루트에서:
+### 구버전 거래대금 조회 도우미 (통합 데스크와 별도)
+
+다음 조회 전용 스크립트는 호환용으로 남아 있다. **거래량 TOP100·정시 교체 기능을 실행하는 명령이 아니다.**
 
 ```powershell
 uv run python scripts/export_demo_watchlist.py --days 30 --output .dockdack/exchange/charts.json
 ```
 
-이 스크립트는 주문/계좌 변경 경로와 실전 도메인을 차단한 조회 전용 연결을 사용한다.
-기존 종목의 N은 보존하므로 `--days`는 새 종목에만 적용된다.
+이 스크립트는 `top_turnover`로 국내·미국 **거래대금** TOP100을 조회하고 `add_ranked`로 기존 목록을 유지하며 추가한다.
+개장 10분 전/정규장 시간 제한이나 자동 정시 재선정은 적용하지 않으므로 현재 데스크의 관심목록 관리와 혼용하지 않는다.
+주문/계좌 변경 경로와 실전 도메인을 차단한 조회 전용 연결을 사용하지만 관심목록·차트 파일은 변경한다.
+기존 종목의 N은 보존하므로 `--days`는 새 종목에만 적용된다. 기본 저장소와 현재 GUI의 장부가 다를 수 있다.
 
-## 순위의 범위
+## 현재 데스크의 순위·갱신 범위
 
 - 국내: KRX 코스피·코스닥 일반 기업 보통주, 관리종목 제외. 키움 종목 마스터의 시장·회사분류 및 상품별 목록으로 ETF/ETN/펀드/우선주/리츠/스팩 등을 제외한다.
 - 미국: NASDAQ/NYSE/AMEX의 일반 기업 보통주. 키움 종목/ETF·ETN 목록과 한국투자증권 공개 종목 마스터, Nasdaq 종목 디렉터리·업종 정보를 함께 확인한다. ETF/ETN/펀드/우선주/리츠/스팩/예탁증서와 분류 불명 종목은 제외한다.
 - 미국 공개 분류는 완전성을 보증하는 통합 증권유형 원장이 아니다. 서로 충돌하거나 정보가 부족한 종목은 보수적으로 제외하므로 일부 일반 기업 주식도 빠질 수 있다. 외부 분류 조회 실패 시 검증되지 않은 종목을 허용하지 않는다.
-- 당일 누적 거래대금 순위 API를 사용한다. 휴장/장 시작 전에는 API가 제공하는 최근 값일 수 있다.
-- 국내 원문 백만원 → **KRW**, 미국 원문 천달러 → **USD**로 변환한다. 두 통화의 금액을 합산해서 순위를 만들지 않는다.
-- TOP100 버튼은 즉시 추가/갱신한다. 별도의 **장중 개장·매 정시 TOP100 재선정**은 감시 시작 후 시장별 거래일 일정에 따라 자동 갱신한다.
-  자동등록된 순위 이탈 종목만 비활성화하며 수동/구버전 관심종목, 보유·미체결·미확정 종목, 대기 수동 규칙은 보존한다.
+- 거래량 API를 사용한다. 국내는 `ka10030`의 `sort_tp=1` / `trde_qty`, 미국은 `usa20530`의 `qry_tp=0` / `acc_trde_qty`다.
+  두 거래량 필드의 단위는 **주**이며, 검증된 후보를 시장별 거래량 내림차순으로 각각 100개 선정한다. 한국·미국 순위를 합치지 않는다.
+- 거래대금은 부가 정보다. 국내 원문 백만원 → **KRW**, 미국 원문 천달러 → **USD**로 변환하지만 거래량 순위 계산에는 사용하지 않는다.
+  개장 전 준비에는 API의 최신 일간 거래량 스냅샷을 사용하므로 전일 자료일 수 있다. 이미 당일 거래가 발생했다고 간주하지 않는다.
+- 수동 TOP100 버튼도 **선정 가능한 시장만** 조회하고 기존 자동관리 순위를 교체한다. 장외 시장까지 강제로 조회하거나 이전 순위를 계속 누적하지 않는다.
+- 자동 재선정은 감시 시작 후 **개장 10분 전 1회 + 장중 매 정시**에 시장별로 진행한다.
+  일반 거래일 국내는 08:50 KST 준비 후 09:00~15:00 정시, 미국은 09:20 뉴욕 현지 준비 후 10:00~15:00 정시다.
+  거래일 달력의 휴일·서머타임·조기 폐장을 반영한다. 개장 전 선정은 시세/매수/매도 감시나 주문을 허용하는 예외가 아니다.
+- 늦게 시작하거나 긴 조회로 정시를 지나도 현재 유효한 최신 선정 시각 한 번만 따라잡는다. 지난 모든 시간을 한꺼번에 호출하지 않는다.
+  완료 시각은 장부에 기록해 재시작 중복을 막고, 실패는 같은 선정 시각당 총 3회까지 60초 이상 간격으로 재시도한다.
+  중단된 작업은 10분 임대가 만료된 뒤 다시 맡을 수 있다. 조회 중 중지·폐장하면 결과를 적용하지 않는다.
+- 자동등록된 순위 이탈 종목은 비활성화한다. **보유 중이라는 이유만으로 매수 관심목록에 남기지는 않는다.**
+  보유·주문 이력과 저장된 목표가는 유지되며, 해당 시장 정규장에 독립 보유종목 감시가 계속 매도 조건을 확인한다.
+  수동/구버전 비관리 관심종목, 접수됨·미확정·전송 중 주문이 있는 종목, 대기 중인 수동 규칙은 별도로 보존될 수 있다.
 - 상품을 제외한 뒤 100개가 모일 때까지 순위 연속조회를 진행한다. 분류된 종목이 100개 미만이거나 연속조회에 문제가 있으면 임의 종목으로 채우지 않고 갱신을 실패시킨다.
 - 종목 분류는 시장 현지 날짜별로 캐시한다. 자동주문 직전에도 같은 보통주 정책을 적용해 기존 목록이나 새 외부 신호가 필터를 우회하지 못하게 한다.
-- 관심종목은 최대 500개다. 이전에 등록한 종목이 순위 밖이면 전체 관심목록은 200개보다 많을 수 있다.
+- 관심종목은 최대 500개다. 위의 수동·미확정 주문 보호 종목 때문에 전체 관심목록은 200개보다 많을 수 있다.
+  보호 종목을 포함해 한도를 넘거나 100개를 확정하지 못하면 해당 시장의 이전 목록을 유지한다.
 - 키움의 클래스 구분 코드 `BRKb`처럼 끝의 소문자가 중요한 종목은 그대로 보존한다. 외부 코드도 내보낸 `symbol`을 그대로 되돌려 보내야 한다.
 
-근거: [국내 거래대금 순위 ka10032](https://openapi.kiwoom.com/guide/apiGuideContents/05/ka10032),
-[미국 거래대금 순위 usa20540](https://openapi.kiwoom.com/guide/apiGuideContents/35/usa20540).
+구현 기준: [거래량/구버전 거래대금 어댑터](../dockdack/universe.py),
+[시장별 선정 일정](../dockdack/market_schedule.py), [관심목록 교체·보존 규칙](../dockdack/watchlist.py).
+기존 `top_turnover`의 `ka10032` / `usa20540`은 위의 구버전 도우미용이며 현재 데스크의 기본 선정 API가 아니다.
 
 분류 자료: [키움 국내 종목 마스터](https://github.com/Kiwoom-Securities/Kiwoom-REST-API/blob/main/examples/국내주식/종목정보/list_domestic_stocks.py),
 [한국투자증권 공개 해외 종목 마스터 정의](https://github.com/koreainvestment/open-trading-api/blob/main/stocks_info/overseas_stock_code.py),
 [Nasdaq 종목 디렉터리 정의](https://www.nasdaqtrader.com/Trader.aspx?id=SymbolDirDefs).
-일정, 재시작, 실패 재시도 및 구버전 목록 보존은 [지속 감시 운영 안내](server-mode.md)를 참고한다.
+일정·보유종목 분리의 현재 계약은 [ver 0.0 안내](VER_0_0.md)를, 기본 운영 방법은 [지속 감시 운영 안내](server-mode.md)를 참고한다.
 
 ## 차트 JSON 계약 (schema_version 1)
 
-최상위 필드는 `schema_version`, `export_id`, `created_at`, `source`, `adjusted_prices`,
+최상위 필드는 `schema_version`, `export_id`, `created_at`, `source`, `trading_mode`, `adjusted_prices`,
 `history_cache_max_seconds`, `intraday_history_refresh_seconds`, `completed_bars_persisted`, `scope`,
 `quote_time_is_fetch_time`, `stocks`다. 기존 버전 1의 필드는 유지하고 설명 필드를 추가했다.
 `scope`는 전체 목록 `watchlist` 또는 종목별 업데이트 `instrument`다.
@@ -86,14 +115,18 @@ uv run python scripts/export_demo_watchlist.py --days 30 --output .dockdack/exch
 | 필드 | 의미 |
 | --- | --- |
 | `watch_id`, `market`, `symbol`, `exchange`, `currency`, `name` | 종목 식별. market은 `domestic`/`us`, exchange는 `KRX`/`ND`/`NY`/`NA` |
-| `turnover_rank`, `turnover`, `ranking_fetched_at` | TOP100 등록 종목의 시장별 순위, KRW/USD 거래대금 문자열, 순위 수신시각 |
+| `ranking_basis` | 현재 순위의 기준. 데스크는 `volume`, 구버전 거래대금 도우미는 `turnover` |
+| `volume_rank`, `ranked_volume` | 거래량 순위 정수와 주 단위 거래량 숫자 문자열. 거래대금 기준이면 `volume_rank`는 `null`이며 구버전 거래량 정보도 `null`일 수 있음 |
+| `turnover_rank` | 이름을 유지한 호환 필드. **현재 선정 기준의 순위**이므로 `ranking_basis=volume`이면 거래량 순위이며, 독립적인 거래대금 순위가 아님 |
+| `turnover`, `ranking_fetched_at` | 별도 KRW/USD 거래대금 숫자 문자열과 순위 수신시각. `turnover`만으로 정렬 기준을 추정하지 않음 |
 | `requested_days`, `available_days`, `complete` | 요청/실제 거래일 수, 충분한 일봉이 있는지 |
 | `status` | `ok`, `missing`, `error`. 실패 이유는 `error` 필드 |
 | `price`, `quote_fetched_at`, `quote_age_seconds`, `quote_stale` | 현재가 문자열, 조회 시각/경과초, 조회 후 15초 초과 여부 |
 | `history_fetched_at` | 마지막 실제 일봉 조회 시각. 구버전 표시용 캐시만 있으면 `null`. 현재가 시각과 다름 |
 | `bars` | 과거→최근 순서의 `date`, `open`, `high`, `low`, `close`, `volume`, `is_current_day` |
 
-가격·거래량·거래대금은 부동소수점 정밀도 손실을 피하기 위한 **숫자 문자열**이다.
+위 순위 필드는 해당 시장의 현재 순위 레코드가 있는 종목에만 포함한다. 수동/보호 종목에는 없을 수 있다.
+가격·거래량·거래대금은 부동소수점 정밀도 손실을 피하기 위한 **숫자 문자열**이며 순위 자체는 정수다.
 일봉 날짜는 시장 현지 날짜이며 수정주가다. 당일 봉은 아직 변할 수 있다.
 완료 과거 봉은 DB에서 재사용한다. 두 `*_seconds` 값 300은 당일 일봉의 재조회 간격을 뜻하며,
 과거 일봉을 5분마다 모두 다운로드한다는 의미가 아니다. 다음 순회까지의 지연은 별도로 발생한다.
@@ -122,6 +155,8 @@ uv run python scripts/export_demo_watchlist.py --days 30 --output .dockdack/exch
       "action": "buy",
       "quantity": 1,
       "max_notional": "300000",
+      "take_profit_price": "110000",
+      "stop_loss_price": "99000",
       "generated_at": "2026-09-15T01:00:00+00:00",
       "expires_at": "2026-09-15T01:02:00+00:00"
     }
@@ -131,7 +166,12 @@ uv run python scripts/export_demo_watchlist.py --days 30 --output .dockdack/exch
 
 - `action`: `buy` / `sell` / `hold`. `hold`에는 수량·금액·주문유형·매도조건 필드를 넣지 않는다.
 - `quantity`: 양의 정수 주식 수. 비율, 소수 주식, 공매도 수량이 아니다.
+  다만 통합 데스크의 **비중 매수(기본 10%)**가 켜져 있으면 매수 수량은 주문 직전 평가자산·현재가·상한·가용금액으로 다시 계산한다.
+  이 경우 신호의 `quantity=1`은 매수를 1주로 고정하지 않는다. 정책의 주문당 최대 수량과 금액 상한은 계속 적용한다.
 - `max_notional`: 해당 시장 통화의 **주문 총액 상한** 문자열. 지정가 단가가 아니다.
+- `take_profit_price`, `stop_loss_price`: 매수에만 함께 전달하는 양의 가격 문자열. 하방 < 상방이어야 하며,
+  주문 직전 현재가가 두 목표 사이에 있어야 한다. 접수된 매수에 목표를 저장하고, 보유종목의 상방 이상/하방 이하에서 독립 매도 조건을 확인한다.
+  둘 다 생략하면 목표가 없는 보유분의 평균매입가 +1% / -0.8% 기본값을 사용한다. 해당 가격 체결을 보장하지 않는다.
 - `order_type`: 생략 시 `limit`(주문 직전 현재가 지정가). `market`은 국내만 가능하며 `ExternalPolicy.allow_market=True`가 필요하다.
   GUI는 내장 테스트 신호기를 선택한 경우에만 국내 시장가를 허용한다. 미국 시장가는 항상 거부한다.
   시장가의 `max_notional`은 최신 현재가로 추정한 금액 제한이지 실제 체결 총액의 보장은 아니다.
@@ -154,8 +194,9 @@ uv run python scripts/export_demo_watchlist.py --days 30 --output .dockdack/exch
 - `source_id`는 출처 식별자이지 암호학적 인증이 아니다. 신뢰하는 단일 프로세스만 입력 파일을 쓸 수 있는 로컬 경로를 사용한다.
 
 파일은 임시 파일에 완전히 쓴 뒤 `os.replace()`로 교체한다. 쓰는 중인 파일을 읽는 문제를 피하려면
-`dockdack.signal_bridge.atomic_json(path, payload)`를 사용한다. 신호 파일이 잘못되면 자동주문을 끄며,
-내용 수정 후에도 사용자가 다시 활성화해야 한다. 최초 입력 파일이 아직 없는 것은 정상 대기 상태다.
+`dockdack.signal_bridge.atomic_json(path, payload)`를 사용한다. 통합 데스크에서는 잘못된 파일의 **해당 출처만 격리**하고
+나머지 연결·감시를 유지한다. 해당 출처는 다음 읽기에 성공할 때 오류가 해제되며 자동주문 OFF를 자동으로 ON으로 바꾸지는 않는다.
+최초 입력 파일이 아직 없는 것은 정상 대기 상태다. 구버전 기본 `AutoTrader`의 엄격 오류 모드에서는 전체 OFF될 수 있다.
 
 ## 외부 모델 연결 예제
 
@@ -169,8 +210,10 @@ uv run python examples/external_signal_producer.py
 모델 쪽에서는 `decisions`에 `{watch_id: {"action": "buy" 또는 "sell", "quantity": 정수, "max_notional": 문자열}}`을 전달한다.
 판단이 없는 종목은 HOLD다. 모델의 동일 판단을 재전달할 때 `decision_id`와 `generated_at`을 유지한다.
 이 예제는 전략을 선택하거나 수익성을 판단하지 않는다. 필요한 전략 로직은 별도 모델 코드에서 작성한다.
-GUI의 내장 `RandomDemoSignals`는 별도 실행 없이 같은 파일 계약으로 연결되는 테스트 전략이다.
-미보유 10% 매수, +1% 익절 / -0.8% 손절이며 기본 수량은 각 1주다. 익절은 기존 `min_sell_price`와
+예제 도우미는 기본 필드만 변환하므로 목표가격 두 필드나 실전의 `trading_mode`는 생산 코드에서 위 계약에 맞게 추가해야 한다.
+현재 통합 데스크의 기본 내장 모델은 LSTM이며, 선택 가능한 `RandomDemoSignals`는 별도 실행 없이 연결되는 **모의 테스트 전략**이다.
+랜덤 테스트 신호는 미보유 10% 매수 확률, +1% 익절 / -0.8% 손절이며 신호 자체 수량은 각 1주다.
+통합 데스크의 비중 매수가 켜져 있으면 실제 매수 수량은 앞서 설명한 10% 비중으로 재계산된다. 익절 신호는 기존 `min_sell_price`와
 `cost_profit_pct="1"`, 손절은 `cost_loss_pct="0.8"`만 사용한다. 두 판단 모두 실제 평균 매입가 기준이다.
 설정 및 정확한 확률·가격 조건의 의미는 [테스트 신호기](server-mode.md#내장-모의-테스트-신호기)를 참고한다.
 
@@ -180,16 +223,25 @@ GUI 없이 연결할 때:
 from decimal import Decimal
 from dockdack.autotrade import AutoTrader
 from dockdack.gui_service import TradingService
+from dockdack.models import Market
 from dockdack.signal_bridge import ExternalPolicy, SignalFileReader
 from dockdack.watchlist import default_store
 
 store = default_store()
 engine = AutoTrader(TradingService(), store)
 engine.external_only = True
+engine.session_only_poll = True  # 해당 시장 정규장에만 시세/매수/매도 감시
+engine.enable_holdings_exits = True  # 관심목록 밖 보유종목도 정규장 매도 조건 확인
+engine.equity_buy_percent = Decimal("10")  # 실제 매수 수량은 주문 직전에 재계산
+engine.isolated_symbol_errors = True  # 출처/종목 오류 격리; 모드·장부 등 필수 차단은 유지
 engine.external_policy = ExternalPolicy(
     source_id="external-model", max_quantity=int(input("주문당 최대 수량: ")),
     max_krw=Decimal(input("주문당 KRW 상한: ")), max_usd=Decimal(input("주문당 USD 상한: ")),
 )
+engine.holding_caps = {  # 독립 보유종목 매도에도 사용자가 입력한 시장별 금액 상한 적용
+    Market.DOMESTIC: engine.external_policy.max_krw,
+    Market.US: engine.external_policy.max_usd,
+}
 engine.external_reader = SignalFileReader(store, ".dockdack/exchange/signals.json", engine.external_policy)
 engine.poll()  # 수신/조회만, 주문 OFF
 # 별도 사용자 확인을 받은 경우에만 engine.enable_orders("DEMO_AUTOTRADE")
@@ -197,14 +249,23 @@ engine.poll()  # 수신/조회만, 주문 OFF
 # 다른 제어 스레드에서 engine.stop()
 ```
 
+이 최소 예시는 기존 관심목록과 단일 신호 파일을 사용한다. 통합 데스크의 자동 순위 재선정이나
+추가 출처 목록까지 자동 구성하지 않으며, 실전 환경 초기화 예시도 아니다.
+
 상한은 **주문당** 제한이며 일일 누적 손실/회전율 한도는 아니다. 새 신호별 주문이 발생할 수 있다.
 선택한 거래 환경·주문 권한 확인, 정규장 시간, 신호 만료/중복, 미체결, 보유/매도가능 수량, 통화, 자금과 주문금액,
-현재가 재조회, 전송 의도 기록을 모두 통과해야 주문한다. 접수는 체결이 아니며 재시도/자동 정정은 하지 않는다.
+현재가 재조회, 전송 의도 기록을 모두 통과해야 주문한다. 접수는 체결이 아니다.
+미국의 **증권사 확정 거절**만 동일 시도 묶음에서 총 3회까지 조건·현재가·잔고를 재확인해 재시도한다.
+새 시도 묶음에는 종목별 5분 거절 대기시간을 적용한다. OFF·장 종료 등 로컬 전송 차단은 즉시 재시도하지 않으며,
+접수됨·부분체결·체결 확인 대기·결과 불명 주문은 중복 전송하거나 자동 정정하지 않는다.
 상세 차단/해제 규칙은 [자동매매 사용법](autotrading.md)을 참고한다.
 
 ## 확인한 범위
 
-2026-09-15 모의 조회 API로 국내 100 + 미국 100종목과 현재가/일봉 내보내기를 확인했다.
+2026-09-15 **당시 구버전 거래대금 선정**의 모의 조회 API로 국내 100 + 미국 100종목과 현재가/일봉 내보내기를 확인했다.
 199종목은 30거래일, 스카이랩스(386380)는 API 제공 이력 8거래일로 `complete=false`다.
 버크셔 B의 대소문자 구분(`BRKb`)을 종목 마스터와 조회 API에서 확인하고 정상화 과정의 손실을 수정했다.
 실제 API 주문은 전송하지 않았다. 외부 신호의 주문 연동은 가짜 브로커/HTTP 및 임시 DB로 검증한다.
+2026-09-16의 오프라인 연동 검증은 실제 `SignalFileReader`로 임시 JSON을 접수해 국내·미국 각각
+비중 매수 → 가짜 전량 체결 응답 반영 → 관심목록 제외 → 저장된 목표가 도달 시 독립 보유종목 매도까지 확인했다.
+OFF/장외 주문 차단, 금액·가용액 상한과 미체결 중복 방지도 확인했으며 실제 계좌 주문·체결 검증과는 구별한다.

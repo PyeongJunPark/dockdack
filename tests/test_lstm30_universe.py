@@ -22,19 +22,19 @@ def ranked_common_stocks(start=1, *, market=Market.US, count=100):
     return tuple(RankedStock(
         market, f"S{index}" if market is Market.US else f"{index:06d}",
         "ND" if market is Market.US else "KRX", f"Common company {index}", rank,
-        Decimal(100_000 - rank), "USD" if market is Market.US else "KRW",
+        Decimal(100_000 - rank), "USD" if market is Market.US else "KRW", 100000-rank, "volume",
     ) for rank, index in enumerate(range(start, start + count), 1))
 
 
 class RankingService:
-    """top_turnover represents the broker's already-classified common-stock API."""
+    """top_volume represents the broker's already-classified common-stock API."""
 
     mode = TradingMode.DEMO
 
     def __init__(self):
         self.data = {market: ranked_common_stocks(market=market) for market in Market}
         self.protected = {market: set() for market in Market}
-        self.top_turnover = Mock(side_effect=lambda market, limit: self.data[market])
+        self.top_volume = Mock(side_effect=lambda market, limit: self.data[market])
         self.protected_symbols = Mock(side_effect=lambda market: self.protected[market])
 
 
@@ -56,7 +56,7 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.assertEqual(len({item.id for item in items}), 100)
         self.assertTrue(all(item.instrument.market is Market.US for item in items))
         self.assertTrue(all(item.days >= 31 for item in items))
-        self.service.top_turnover.assert_called_once_with(Market.US, 100)
+        self.service.top_volume.assert_called_once_with(Market.US, 100)
         self.service.protected_symbols.assert_called_once_with(Market.US)
         self.universe.validate_active()
 
@@ -68,7 +68,7 @@ class LSTM30UniverseTests(unittest.TestCase):
         universe.bootstrap()
         self.assertIn(domestic.id, {item.id for item in universe.items()})
         self.assertEqual(sum(item.instrument.market is Market.US for item in universe.items()), 100)
-        self.service.top_turnover.assert_called_once_with(Market.US, 100)
+        self.service.top_volume.assert_called_once_with(Market.US, 100)
 
     def test_rotation_preserves_manual_held_pending_and_ready_manual_rule(self):
         self.universe.bootstrap()
@@ -84,8 +84,9 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.service.data[Market.US] = ranked_common_stocks(101)
         self.universe.refresh(Market.US)
         active = {item.instrument.symbol: item for item in self.universe.items()}
-        self.assertEqual(len(active), 104)
-        self.assertTrue({"S1", "S2", "S3", "S4"}.issubset(active))
+        self.assertEqual(len(active), 103)
+        self.assertTrue({"S1", "S2", "S4"}.issubset(active))
+        self.assertNotIn("S3", active)  # Holdings remain in the independent exit scan.
         self.assertNotIn("S5", active)
         self.assertTrue(all(item.days >= 31 for item in active.values()))
         self.assertEqual(self.store.attempts()[0]["status"], "accepted")
@@ -136,7 +137,7 @@ class LSTM30UniverseTests(unittest.TestCase):
     def test_classification_or_account_failure_preserves_previous_approved_list(self):
         self.universe.bootstrap()
         before = self.store.items()
-        for method in ("top_turnover", "protected_symbols"):
+        for method in ("top_volume", "protected_symbols"):
             with self.subTest(method=method), patch.object(
                     self.service, method, side_effect=BrokerAPIError("fake classification/account unavailable")):
                 with self.assertRaises(BrokerAPIError):
@@ -147,7 +148,7 @@ class LSTM30UniverseTests(unittest.TestCase):
     def test_unselected_market_refresh_is_rejected_without_query(self):
         with self.assertRaises(ValueError):
             self.universe.refresh(Market.DOMESTIC)
-        self.service.top_turnover.assert_not_called()
+        self.service.top_volume.assert_not_called()
 
     def test_authorized_rotation_passes_guard_but_foreign_database_edit_fails(self):
         self.universe.bootstrap()
@@ -174,12 +175,14 @@ class ScopedRankingSchedulerTests(unittest.TestCase):
         self.store = WatchStore(Path(self.temp.name) / "watch.sqlite3")
         self.service = RankingService()
         self.session = session_on(Market.US, date(2026, 9, 14))
-        self.now = self.session.opened - timedelta(minutes=1)
+        self.now = self.session.opened - timedelta(minutes=11)
         self.stopped = False
         self.universe = LSTM30Universe(self.service, self.store, ranked_markets=(Market.US,),
                                       baseline_items=(), clock=lambda: self.now)
+        self.now = self.session.opened - timedelta(minutes=10)
         self.universe.bootstrap()
-        self.service.top_turnover.reset_mock()
+        self.now = self.session.opened - timedelta(minutes=11)
+        self.service.top_volume.reset_mock()
         self.errors = Mock()
         self.scheduler = ScopedRankingScheduler(self.service, self.store, universe=self.universe,
                                                clock=lambda: self.now, stopped=lambda: self.stopped,
@@ -188,11 +191,11 @@ class ScopedRankingSchedulerTests(unittest.TestCase):
 
     def test_only_authorized_us_market_is_ranked_and_duplicate_slot_is_not_repeated(self):
         self.assertFalse(self.scheduler.tick())
-        self.now = self.session.opened
+        self.now = self.session.opened + timedelta(minutes=30)
         self.assertTrue(self.scheduler.due())
         self.assertTrue(self.scheduler.tick())
         self.assertFalse(self.scheduler.tick())
-        self.service.top_turnover.assert_called_once_with(Market.US, 100)
+        self.service.top_volume.assert_called_once_with(Market.US, 100)
         self.assertTrue(all(item.days >= 31 for item in self.store.items()))
         self.errors.assert_not_called()
 
@@ -201,22 +204,22 @@ class ScopedRankingSchedulerTests(unittest.TestCase):
         self.scheduler.record_bootstrap()
         self.assertFalse(self.scheduler.due())
         self.assertFalse(self.scheduler.tick())
-        self.service.top_turnover.assert_not_called()
+        self.service.top_volume.assert_not_called()
         self.now = self.session.opened + timedelta(minutes=30)
         self.assertTrue(self.scheduler.tick())
-        self.service.top_turnover.assert_called_once_with(Market.US, 100)
+        self.service.top_volume.assert_called_once_with(Market.US, 100)
 
     def test_domestic_open_does_not_trigger_an_unapproved_domestic_ranking(self):
         self.now = session_on(Market.DOMESTIC, date(2026, 9, 15)).opened
         self.scheduler.start()
         self.assertFalse(self.scheduler.due())
         self.assertFalse(self.scheduler.tick())
-        self.service.top_turnover.assert_not_called()
+        self.service.top_volume.assert_not_called()
 
     def test_ranking_error_keeps_prior_list_and_calls_fail_closed_handler(self):
         previous = self.store.items()
-        self.now = self.session.opened
-        self.service.top_turnover.side_effect = BrokerAPIError("fake ranking unavailable")
+        self.now = self.session.opened + timedelta(minutes=30)
+        self.service.top_volume.side_effect = BrokerAPIError("fake ranking unavailable")
         self.assertFalse(self.scheduler.tick())
         self.assertEqual(self.store.items(), previous)
         self.errors.assert_called()
@@ -228,17 +231,17 @@ class ScopedRankingSchedulerTests(unittest.TestCase):
         self.stopped = True
         self.assertFalse(self.scheduler.due())
         self.assertFalse(self.scheduler.tick())
-        self.service.top_turnover.assert_not_called()
+        self.service.top_volume.assert_not_called()
 
     def test_market_close_during_ranking_fetch_prevents_late_rotation(self):
         previous = self.store.items()
-        self.now = self.session.opened
+        self.now = self.session.opened + timedelta(minutes=30)
 
         def ranks_at_close(market, limit):
             self.now = self.session.closed
             return ranked_common_stocks(101)
 
-        self.service.top_turnover.side_effect = ranks_at_close
+        self.service.top_volume.side_effect = ranks_at_close
         self.assertFalse(self.scheduler.tick())
         self.assertEqual(self.store.items(), previous)
         self.errors.assert_called()

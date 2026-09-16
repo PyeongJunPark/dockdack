@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from dockdack.market_schedule import RankingScheduler, is_open, session_on
+from dockdack.market_schedule import RankingScheduler, is_open, ranking_allowed, ranking_slot, session_on
 from dockdack.gui_service import Instrument
 from dockdack.models import Market
 from dockdack.universe import RankedStock
@@ -16,15 +16,15 @@ from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
 def ranks(start=1, market=Market.DOMESTIC):
     return tuple(RankedStock(market, f"{i:06d}" if market is Market.DOMESTIC else f"S{i}",
                             "KRX" if market is Market.DOMESTIC else "ND", "rank", n, Decimal(1000-n),
-                            "KRW" if market is Market.DOMESTIC else "USD") for n,i in enumerate(range(start,start+100),1))
+                            "KRW" if market is Market.DOMESTIC else "USD", 10000-n, "volume") for n,i in enumerate(range(start,start+100),1))
 
 
 class ScheduleTests(unittest.TestCase):
     def test_regular_domestic_and_us_slot_times(self):
         kr = session_on(Market.DOMESTIC, date(2026,9,15))
         us = session_on(Market.US, date(2026,9,15))
-        self.assertEqual([s.strftime("%H:%M") for s in kr.slots()], [f"{h:02d}:00" for h in range(9,16)])
-        self.assertEqual([s.strftime("%H:%M") for s in us.slots()], ["09:30"]+[f"{h:02d}:00" for h in range(10,16)])
+        self.assertEqual([s.strftime("%H:%M") for s in kr.slots()], ["08:50"]+[f"{h:02d}:00" for h in range(9,16)])
+        self.assertEqual([s.strftime("%H:%M") for s in us.slots()], ["09:20"]+[f"{h:02d}:00" for h in range(10,16)])
         self.assertTrue(is_open(Market.DOMESTIC, kr.opened))
         self.assertFalse(is_open(Market.DOMESTIC, kr.closed))
 
@@ -35,7 +35,7 @@ class ScheduleTests(unittest.TestCase):
                     (Market.DOMESTIC,date(2026,12,31)), (Market.DOMESTIC,date(2026,9,19))):
             self.assertIsNone(session_on(m,d))
         early = session_on(Market.US, date(2026,11,27))
-        self.assertEqual([s.strftime("%H:%M") for s in early.slots()], ["09:30","10:00","11:00","12:00"])
+        self.assertEqual([s.strftime("%H:%M") for s in early.slots()], ["09:20","10:00","11:00","12:00"])
         self.assertEqual(session_on(Market.US,date(2026,7,2)).closed.hour,16)
         self.assertEqual(session_on(Market.US,date(2026,12,24)).closed.hour,13)
         self.assertEqual(session_on(Market.DOMESTIC,date(2026,1,2)).opened.hour,10)
@@ -56,7 +56,7 @@ class SchedulerTests(unittest.TestCase):
         self.data = ranks()
         self.error = None
         class Service:
-            def top_turnover(inner, market, limit):
+            def top_volume(inner, market, limit):
                 self.calls.append((market,limit))
                 if self.error:
                     raise self.error
@@ -68,8 +68,9 @@ class SchedulerTests(unittest.TestCase):
         self.scheduler.start()
 
     def test_runs_open_and_hour_once_with_restart_dedup(self):
+        self.now = self.now.replace(minute=49)
         self.assertFalse(self.scheduler.tick())
-        self.now += timedelta(minutes=1)
+        self.now = self.now.replace(hour=9,minute=0)
         self.assertTrue(self.scheduler.due())
         self.assertTrue(self.scheduler.tick())
         self.assertFalse(self.scheduler.due())
@@ -81,14 +82,15 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(new.tick())
         self.assertEqual(self.calls,[(Market.DOMESTIC,100)]*2)
 
-    def test_mid_hour_start_waits_and_late_wakeup_does_not_backfill_old_slots(self):
+    def test_mid_hour_start_and_long_sweep_catch_up_latest_slot_only(self):
         self.now = self.now.replace(hour=10,minute=20)
         self.scheduler.start()
-        self.assertFalse(self.scheduler.tick())
+        self.assertTrue(self.scheduler.tick())
         self.now = self.now.replace(hour=11,minute=8)
-        self.assertFalse(self.scheduler.tick())
+        self.assertTrue(self.scheduler.tick())
         self.now = self.now.replace(hour=12,minute=0,second=8)
         self.assertTrue(self.scheduler.tick())
+        self.assertEqual(len(self.calls), 3)
 
     def test_failure_keeps_previous_list_and_bounds_retries(self):
         self.store.add_ranked(ranks())
@@ -118,8 +120,9 @@ class SchedulerTests(unittest.TestCase):
         self.now += timedelta(minutes=1)
         self.assertTrue(self.scheduler.tick())
         active = {i.instrument.symbol for i in self.store.items() if i.instrument.market is Market.DOMESTIC}
-        self.assertEqual(len(active),103)
-        self.assertTrue({"000001","000002","000003"}.issubset(active))
+        self.assertEqual(len(active),102)
+        self.assertTrue({"000001","000002"}.issubset(active))
+        self.assertNotIn("000003",active)  # Holdings have their own exit scan.
         self.assertNotIn("000004",active)
         self.assertEqual(sum(i.instrument.market is Market.US for i in self.store.items()),100)
         self.assertEqual(self.store.attempts()[0]["status"],"submitting")

@@ -73,6 +73,7 @@ class LSTM30GuiTests(unittest.TestCase):
                        position_provider=self.position_snapshot, clock=self.clock)
         options.update(overrides)
         window = LSTM30WatchlistDialog(self.service, **options)
+        window.percent_sizing.setChecked(False)  # This fixture explicitly requests quantity=1.
         self.windows.append(window)
         window.show()
         self.app.processEvents()
@@ -85,7 +86,7 @@ class LSTM30GuiTests(unittest.TestCase):
         # Re-check after event delivery instead of returning in between the two.
         while idle_rounds < 3:
             self.app.processEvents()
-            if window.worker or window._inspection_worker or window.pending_auto_arm:
+            if window.worker or window._inspection_worker or window._activity_worker or window.pending_auto_arm:
                 idle_rounds = 0
             else:
                 idle_rounds += 1
@@ -468,9 +469,10 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
 
     def test_top100_initial_ranking_failure_keeps_prior_list_and_orders_off(self):
+        self.now = NOW + timedelta(hours=13)
         us_model = SimpleNamespace(metadata={"market": "us"}, predict=Mock(return_value={
             "probability_ge_1pct": 0.7, "buy_threshold": 0.5, "predicts_gain": True}))
-        self.service.top_turnover = Mock(side_effect=BrokerAPIError("fake common-stock ranking unavailable"))
+        self.service.top_volume = Mock(side_effect=BrokerAPIError("fake common-stock ranking unavailable"))
         self.service.protected_symbols = Mock(return_value=set())
         window = self.window(ranked_markets=(Market.US,),
                              predictors={"domestic": self.predictor, "us": us_model})
@@ -483,9 +485,10 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
 
     def test_top100_authorized_rotation_updates_engine_guard_but_foreign_edit_is_blocked(self):
+        self.now = NOW + timedelta(hours=13)
         us_model = SimpleNamespace(metadata={"market": "us"}, predict=Mock(return_value={
             "probability_ge_1pct": 0.7, "buy_threshold": 0.5, "predicts_gain": True}))
-        self.service.top_turnover = Mock(return_value=ranked_common_stocks())
+        self.service.top_volume = Mock(return_value=ranked_common_stocks())
         self.service.protected_symbols = Mock(return_value=set())
         window = self.window(ranked_markets=(Market.US,),
                              predictors={"domestic": self.predictor, "us": us_model})
@@ -493,12 +496,12 @@ class LSTM30GuiTests(unittest.TestCase):
         window.engine._ensure_environment()
         self.assertEqual(sum(item.instrument.market is Market.US for item in window.store.items()), 100)
         self.assertTrue(all(item.days >= 31 for item in window.store.items()))
-        self.service.top_turnover.return_value = ranked_common_stocks(101)
+        self.service.top_volume.return_value = ranked_common_stocks(101)
         window.lstm_universe.refresh(Market.US)
         window.engine._ensure_environment()
         window.store.save_item(WatchItem(Instrument(Market.US, "FOREIGN", "ND"), "Not approved", 31))
         with self.assertRaises(ValueError):
-            window.engine._ensure_environment()
+            window.engine._ensure_environment(orders=True)
         self.assertFalse(window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 
@@ -507,7 +510,7 @@ class LSTM30GuiTests(unittest.TestCase):
         item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
         model = SimpleNamespace(metadata={"market": "us"}, predict=Mock(return_value={
             "probability_ge_1pct": 0.2, "buy_threshold": 0.5, "predicts_gain": False}))
-        self.service.top_turnover = Mock(return_value=ranked_common_stocks())
+        self.service.top_volume = Mock(return_value=ranked_common_stocks())
         self.service.protected_symbols = Mock(return_value=set())
         window = self.window(items=[item], ranked_markets=(Market.US,), predictors={"us": model})
         window.lstm_universe.bootstrap()
@@ -516,7 +519,8 @@ class LSTM30GuiTests(unittest.TestCase):
         # sweep or order submission is run; full GUI warmup is covered separately.
         window.engine.enable_orders("DEMO_AUTOTRADE")
         self.assertTrue(window.engine.orders_enabled)
-        self.service.top_turnover.side_effect = BrokerAPIError("fake ranking refresh failure")
+        self.service.top_volume.side_effect = BrokerAPIError("fake ranking refresh failure")
+        self.now += timedelta(hours=1)
         window.scheduler.start()
         self.assertFalse(window.scheduler.tick())
         self.assertFalse(window.engine.orders_enabled)
@@ -525,6 +529,7 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
 
     def test_top100_restart_preserves_managed_membership_and_filled_buy_history(self):
+        self.now = NOW + timedelta(hours=13)
         store = WatchStore(self.root / "watchlist.sqlite3")
         store.save_item(self.item)
         store.add_ranked(ranked_common_stocks(), days=31)
@@ -539,7 +544,7 @@ class LSTM30GuiTests(unittest.TestCase):
             managed_before = {row[0] for row in db.execute("SELECT watch_id FROM managed_watchlist")}
         model = SimpleNamespace(metadata={"market": "us"}, predict=Mock(return_value={
             "probability_ge_1pct": 0.2, "buy_threshold": 0.5, "predicts_gain": False}))
-        self.service.top_turnover = Mock(return_value=ranked_common_stocks(101))
+        self.service.top_volume = Mock(return_value=ranked_common_stocks(101))
         self.service.protected_symbols = Mock(return_value=set())
         window = self.window(ranked_markets=(Market.US,),
                              predictors={"domestic": self.predictor, "us": model})

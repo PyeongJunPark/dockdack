@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -13,6 +14,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from dockdack.watch_gui import WatchlistDialog
 
@@ -40,10 +42,20 @@ class DashboardPerformanceTests(unittest.TestCase):
         self.snapshots = {item.id: self.window.engine.snapshot(item) for item in self.items}
         self.window.snapshots.update(self.snapshots)
         self.window.reload_tables()
+        self.wait_activity()
+
+    def wait_activity(self):
+        deadline = time.monotonic()+10
+        while self.window._activity_worker or self.window._activity_pending:
+            self.app.processEvents()
+            QTest.qWait(10)
+            self.assertLess(time.monotonic(), deadline, "local activity worker did not finish")
+        self.app.processEvents()
 
     def tearDown(self):
         self.window.worker = None
         self.window._inspection_worker = None
+        self.wait_activity()
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
@@ -69,11 +81,13 @@ class DashboardPerformanceTests(unittest.TestCase):
         with patch.object(self.store, "connection", side_effect=AssertionError("hidden logs must not poll DB")):
             self.window._update_health()
         self.window.workspace_tabs.setCurrentWidget(self.window.operations_panel)
+        self.wait_activity()
         self.assertIn("new server state", self.window.log_table.item(0, 2).text())
 
     def test_log_revision_avoids_loading_unchanged_500_rows(self):
         self.store.event("SYSTEM", "server", category="system")
         self.window._reload_activity(force=True)
+        self.wait_activity()
         with patch.object(self.store, "events", side_effect=AssertionError("same revision must use cache")):
             self.window.operations_panel.reload(self.store, visible_only=True)
 

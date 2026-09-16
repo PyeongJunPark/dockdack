@@ -208,6 +208,8 @@ class SignalBridgeTests(unittest.TestCase):
         self.export = export_charts(self.store, self.path / "charts.json", now=NOW)
         visited = []
         def progress(data):
+            if len(data) != 4:
+                return  # Start/phase notifications are not completed watch snapshots.
             visited.append(data[0])
             if len(visited) == 1:
                 self.ingest(self.payload(symbol="035420"))

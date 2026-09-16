@@ -15,4 +15,4 @@ If result <> 0 Then
     MsgBox "GUI dependencies are missing. Run 'uv sync --extra gui' in the project folder.", 48, "DockDack setup"
     WScript.Quit 1
 End If
-shell.Run Chr(34) & pythonw & Chr(34) & " -m dockdack.gui", 1, False
+shell.Run Chr(34) & pythonw & Chr(34) & " -m dockdack.v00_app", 1, False

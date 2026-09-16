@@ -72,6 +72,14 @@ def decimal_string(value, label: str) -> Decimal:
 def validate_exit_conditions(entry: dict):
     """Optional data-only SELL gates shared by ingestion and no-order inspection."""
     action = entry["action"]
+    target_keys = {"take_profit_price", "stop_loss_price"}
+    if target_keys.intersection(entry):
+        if action != "buy" or not target_keys.issubset(entry):
+            raise ValueError("매수 신호의 상방·하방 목표가격을 함께 전달하세요.")
+        upper = decimal_string(entry["take_profit_price"], "take_profit_price")
+        lower = decimal_string(entry["stop_loss_price"], "stop_loss_price")
+        if lower >= upper:
+            raise ValueError("하방 목표가격은 상방 목표가격보다 낮아야 합니다.")
     if "min_sell_price" in entry:
         if action != "sell":
             raise ValueError("min_sell_price는 매도에만 사용할 수 있습니다.")
@@ -151,6 +159,9 @@ def export_charts(store: WatchStore, path: Path | str, *, now: datetime | None =
                   "requested_days": item.days, "status": "missing", "bars": []}
         if stored["turnover_rank"] is not None:
             result["turnover_rank"] = stored["turnover_rank"]
+            result["ranking_basis"] = stored["ranking_basis"]
+            result["volume_rank"] = stored["turnover_rank"] if stored["ranking_basis"] == "volume" else None
+            result["ranked_volume"] = stored["volume"]
             result["turnover"] = stored["turnover"]
             result["ranking_fetched_at"] = stored["ranking_fetched_at"]
         try:
@@ -241,7 +252,7 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
     parsed, seen = [], set()
     for entry in entries:
         required = {"signal_id", "export_id", "market", "symbol", "exchange", "action", "generated_at", "expires_at"}
-        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct"}:
+        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"}:
             raise ValueError("외부 신호의 필수/허용 필드를 확인하세요.")
         sid, export_id = identifier(entry["signal_id"], "signal_id"), identifier(entry["export_id"], "export_id")
         inst = Instrument(Market(entry["market"]), entry["symbol"], entry["exchange"])
@@ -265,7 +276,7 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
             rule = TriggerRule(uuid4().hex, watch_id, TriggerKind.EXTERNAL, OrderSide(action), qty, amount)
             policy.validate(source, inst.market, qty, amount, entry.get("order_type", "limit"))
             validate_exit_conditions(entry)
-        elif any(key in entry for key in ("quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct")):
+        elif any(key in entry for key in ("quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price")):
             raise ValueError("hold 신호에는 수량/주문금액을 넣지 마세요.")
         # Persist the explicit REAL declaration so a later restart/final paced
         # send validates the same environment, not just an editable GUI label.
@@ -326,6 +337,11 @@ def validate_external_rule(store: WatchStore, rule: TriggerRule, policy: Externa
     record = store.external_for_rule(rule.id)
     if policy is None or not record:
         raise ValueError("외부 신호 정책 또는 수신 기록이 없습니다.")
+    with store.connection() as db:
+        latest = db.execute("SELECT signal_id FROM external_signals WHERE source_id=? AND watch_id=? AND status!='expired' ORDER BY generated_at DESC LIMIT 1",
+                            (record["source_id"], record["watch_id"])).fetchone()
+    if not latest or latest[0] != record["signal_id"]:
+        raise ValueError("동일 출처의 더 최근 매매/HOLD 신호가 도착해 이전 신호를 사용하지 않습니다.")
     if timestamp(record["expires_at"], "expires_at") <= now:
         store.expire_external(now)
         raise ValueError("외부 매매 신호가 만료되었습니다.")
@@ -373,4 +389,4 @@ class SignalFileReader:
             return result
         except Exception as exc:
             self.reader_state, self.reader_error = "error", str(exc) or type(exc).__name__
-            raise  # Preserve the engine's disarm-on-malformed-input safety behavior.
+            raise  # The engine isolates this source; another producer may remain healthy.

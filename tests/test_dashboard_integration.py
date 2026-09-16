@@ -60,12 +60,19 @@ class DashboardIntegrationTests(unittest.TestCase):
 
     def wait_idle(self):
         deadline = time.monotonic() + 10
-        while self.window.worker:
+        idle_rounds = 0
+        while idle_rounds < 2:
+            self.app.processEvents()
+            busy = (self.window.worker or self.window._activity_worker or self.window._activity_pending
+                    or self.window._schedule_probe or self.window.activity_pool.activeThreadCount())
+            idle_rounds = 0 if busy else idle_rounds + 1
             QTest.qWait(10)
             self.assertLess(time.monotonic(), deadline, "Fake account worker did not finish")
         self.app.processEvents()
 
     def tearDown(self):
+        self.window.health_timer.stop()
+        self.window.order_status_timer.stop()
         self.window.stop_monitoring()
         self.wait_idle()
         self.window.close()
@@ -131,6 +138,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.store.event("domestic:KRX:005930", "시세 감시 테스트", category="monitor")
         self.store.event("domestic:KRX:005930", "외부 신호 HOLD · 주문 생성 없음", category="signal")
         self.window._reload_activity(force=True)
+        self.wait_idle()
         self.window._update_health()
         self.assertIn("자동주문 OFF · 주문 차단", self.window.operations_panel.runtime.text())
         self.assertEqual(self.window.operations_panel.logs["monitor"].table.rowCount(), 1)
@@ -142,11 +150,15 @@ class DashboardIntegrationTests(unittest.TestCase):
     def test_log_database_error_keeps_displayed_rows_and_warns_in_health(self):
         self.store.event("SYSTEM", "서버 상태 마지막 성공 기록", category="system")
         self.window._reload_activity(force=True)
+        self.wait_idle()
         logs = self.window.operations_panel.logs["system"].table
         previous_cell = logs.item(0, 2)
         previous_count = logs.rowCount()
-        with patch.object(self.store, "events", side_effect=sqlite3.OperationalError("test database unavailable")):
+        # Unchanged event rows are cached: fail the revision query rather than
+        # expecting a redundant full-row fetch. Keep the patch through worker completion.
+        with patch.object(self.store, "event_heads", side_effect=sqlite3.OperationalError("test database unavailable")):
             self.window._reload_activity(force=True)
+            self.wait_idle()
             self.window._update_health()
         self.assertEqual(logs.rowCount(), previous_count)
         self.assertIs(logs.item(0, 2), previous_cell)

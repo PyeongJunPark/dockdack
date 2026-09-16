@@ -4,11 +4,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal as D
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dockdack.fill_recovery import FillRecovery
 from dockdack.gui_service import Instrument
 from dockdack.history import market_time
 from dockdack.models import ExecutionHistoryRecord, Market, OrderSide, TradingMode
+from dockdack.performance import realized_performance
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
 from test_autotrade import FakeTradingService, NOW
 
@@ -71,6 +73,147 @@ class FillRecoveryTests(unittest.TestCase):
         for record in records:
             key = record.market, record.order_date
             self.service.records[key] = (*self.service.records.get(key, ()), record)
+
+    def period_record(self, row, *, zone="Asia/Seoul", **changes):
+        local = datetime.fromisoformat(row["started_at"]).astimezone(ZoneInfo(zone))
+        return self.record(row, source_api="ust21180", broker_order_date=local.date(),
+                           order_time=local.strftime("%H:%M:%S"), **changes)
+
+    def test_us_returned_date_time_recovers_in_seoul_and_new_york_across_midnight(self):
+        for zone in ("Asia/Seoul", "America/New_York"):
+            with self.subTest(zone=zone):
+                row = self.order(market=Market.US)
+                self.supply(self.period_record(row, zone=zone, exchange=""))
+                self.recovery.refresh_due(force=True)
+                actual = self.row(row["rule_id"])
+                self.assertEqual(actual["fill_price"], "101")
+                self.assertEqual(actual["recovery_status"], "enriched")
+                self.assertEqual(actual["status"], "filled")
+                self.now += timedelta(seconds=60)
+        self.assert_no_orders()
+
+    def test_us_returned_timestamp_uses_dst_and_rejects_wrong_hour(self):
+        for instant in (datetime.fromisoformat("2026-07-15T18:31:12+00:00"),
+                        datetime.fromisoformat("2026-12-15T18:31:12+00:00")):
+            row = self.order(market=Market.US, day=instant)
+            record = self.period_record(row, zone="America/New_York")
+            self.supply(replace(record, order_time="00:00:00"))
+            self.recovery.refresh_due(force=True)
+            self.assertEqual(self.row(row["rule_id"])["recovery_status"], "ambiguous")
+            self.service.records.clear()
+            self.supply(record)
+            self.now += timedelta(seconds=60)
+            self.recovery.refresh_due(force=True)
+            self.assertEqual(self.row(row["rule_id"])["fill_price"], "101")
+            self.now += timedelta(seconds=60)
+
+    def test_period_history_keeps_adjacent_recycled_order_number_separate(self):
+        first = self.order(market=Market.US, day=NOW, number="00042")
+        second = self.order(market=Market.US, day=NOW + timedelta(days=1), number="42")
+        a = self.period_record(first, exchange="", fill_price=D(111))
+        b = self.period_record(second, exchange="", fill_price=D(222))
+        # Both order numbers occur in each two-day query; returned timestamp
+        # must select the right one rather than summing/deduplicating the rows.
+        self.supply(a, replace(b, order_date=a.order_date), b, replace(a, order_date=b.order_date))
+        self.assertEqual(self.recovery.refresh_due()["enriched"], 2)
+        self.assertEqual(self.row(first["rule_id"])["fill_price"], "111")
+        self.assertEqual(self.row(second["rule_id"])["fill_price"], "222")
+
+    def test_partial_average_amount_is_bound_to_quantity_and_refreshes_after_more_fills(self):
+        row = self.order("accepted", market=Market.US, quantity=3)
+        record = self.period_record(row, filled_quantity=D(2), remaining_quantity=D(1),
+                                    fill_price=D("101.25"), fill_amount=D("202.50"),
+                                    reported_fill_price=D(102), price_basis="broker_average")
+        self.supply(record)
+        self.assertEqual(self.recovery.refresh_due()["enriched"], 1)
+        actual = self.row(row["rule_id"])
+        self.assertEqual((actual["price_basis_quantity"], actual["price_basis_price"]), ("2", "101.25"))
+        metric = realized_performance((actual,))["by_rule_id"][row["rule_id"]]
+        self.assertEqual(metric["effective_fill_price"], D("101.25"))
+        self.assertEqual(actual["status"], "accepted")  # evidence is not an order-state mutation
+        self.store.record_execution(row["rule_id"], filled_quantity=D(3), remaining_quantity=D(0),
+                                    fill_price=D(103), observed_at=self.now)
+        actual = self.row(row["rule_id"])
+        self.assertTrue(FillRecovery._candidate(actual))
+        self.assertIsNone(realized_performance((actual,))["by_rule_id"][row["rule_id"]]["effective_fill_price"])
+        self.service.records.clear()
+        self.supply(replace(record, filled_quantity=D(3), remaining_quantity=D(0),
+                            fill_amount=D("306"), fill_price=D("102")))
+        self.now += timedelta(seconds=60)
+        self.recovery.refresh_due(force=True)
+        actual = self.row(row["rule_id"])
+        self.assertEqual((actual["price_basis_quantity"], actual["price_basis_price"]), ("3", "102"))
+        self.assertFalse(FillRecovery._candidate(actual))
+        self.assert_no_orders()
+
+    def test_us_legacy_positive_multishare_price_is_still_candidate_without_average_provenance(self):
+        row = self.order(market=Market.US, quantity=2)
+        self.store.record_execution(row["rule_id"], filled_quantity=D(2), remaining_quantity=D(0),
+                                    fill_price=D(103), observed_at=self.now)
+        self.supply(self.period_record(row, fill_price=D(101), fill_amount=D(202), price_basis="broker_average"))
+        self.assertEqual(self.recovery.refresh_due()["enriched"], 1)
+        actual = self.row(row["rule_id"])
+        self.assertEqual(actual["fill_price"], "101")
+        self.assertEqual(actual["price_basis_quantity"], "2")
+
+    def test_mismatched_average_provenance_cannot_be_persisted(self):
+        row = self.order("accepted", quantity=3)
+        with self.assertRaisesRegex(ValueError, "평균가 근거"):
+            self.store.record_fill_recovery(row["rule_id"], status="enriched", message="not allowed",
+                checked_at=self.now, filled_quantity=D(2), remaining_quantity=D(1), fill_price=D(101),
+                price_basis="broker_average", price_basis_quantity=D(3), price_basis_price=D(101))
+        self.assertIsNone(self.row(row["rule_id"])["fill_price"])
+
+    def test_legacy_recovery_table_migration_preserves_existing_evidence(self):
+        row = self.order()
+        self.supply(self.record(row))
+        self.recovery.refresh_due()
+        with self.store.connection() as db:
+            db.execute("ALTER TABLE order_fill_recovery DROP COLUMN price_basis_quantity")
+            db.execute("ALTER TABLE order_fill_recovery DROP COLUMN price_basis_price")
+        migrated = WatchStore(self.store.path)
+        actual = migrated.order_history(limit=None)[0]
+        self.assertEqual(actual["fill_price"], "101")
+        self.assertEqual(actual["recovery_source_api"], "kt00007")
+        self.assertIsNone(actual["price_basis_quantity"])
+
+    def test_exact_dated_us_full_fill_settles_only_previously_accepted_order(self):
+        row = self.order("accepted", market=Market.US, day=NOW-timedelta(days=3))
+        self.supply(self.period_record(row, exchange=""))
+        self.recovery.refresh_due()
+        actual = self.row(row["rule_id"])
+        self.assertEqual(actual["status"], "filled")
+        self.assertEqual(actual["fill_price"], "101")
+        self.assertEqual(self.store.attempts(pending_only=True), ())
+        self.assert_no_orders()
+
+    def test_old_accepted_us_price_already_saved_still_recovers_terminal_status(self):
+        row = self.order("accepted", market=Market.US)
+        self.store.record_execution(row["rule_id"], filled_quantity=D(1), remaining_quantity=D(0),
+                                    fill_price=D(101), observed_at=self.now)
+        self.assertTrue(FillRecovery._candidate(self.row(row["rule_id"])))
+        self.supply(self.period_record(row))
+        self.recovery.refresh_due()
+        self.assertEqual(self.row(row["rule_id"])["status"], "filled")
+
+    def test_unknown_and_submitting_us_orders_never_auto_resolve_from_history(self):
+        for state, exchange in (("unknown", "ND"), ("submitting", "NY")):
+            row = self.order(state, market=Market.US, exchange=exchange)
+            self.supply(self.period_record(row))
+        self.recovery.refresh_due()
+        self.assertEqual(self.service.calls, [])
+        self.assertEqual({r["status"] for r in self.store.attempts(pending_only=True)}, {"unknown", "submitting"})
+        self.assert_no_orders()
+
+    def test_partial_us_fill_never_claims_filled_or_infers_cancelled_from_zero_remaining(self):
+        for remaining, exchange in ((D(0), "ND"), (D(1), "NY")):
+            row = self.order("accepted", market=Market.US, quantity=2, exchange=exchange)
+            self.supply(self.period_record(row, filled_quantity=D(1), remaining_quantity=remaining,
+                fill_price=D(101), fill_amount=D(101), price_basis="broker_average"))
+            self.recovery.refresh_due(force=True)
+            self.assertEqual(self.row(row["rule_id"])["status"], "accepted")
+            self.now += timedelta(seconds=60)
+        self.assert_no_orders()
 
     def assert_no_orders(self):
         self.assertEqual(self.service.submitted, [])

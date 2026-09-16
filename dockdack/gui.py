@@ -641,7 +641,10 @@ class TradingWindow(QMainWindow):
             elif key == "orders":
                 self._rows(widget, [(o.order_number, o.symbol, o.side, number(o.order_quantity, 0), number(o.filled_quantity, 0), number(o.remaining_quantity, 0), o.status) for o in data[key]])
             else:
-                self._rows(widget, [(o.order_number, o.side, number(o.order_quantity, 0), number(o.filled_quantity, 0), number(o.fill_price, 2) if o.filled_quantity else "—", o.status, o.order_time) for o in data[key]])
+                self._rows(widget, [(o.order_number, o.side, number(o.order_quantity, 0), number(o.filled_quantity, 0),
+                                    (number(o.fill_price, 4) + (' (응답 단가)' if o.filled_quantity > 1 else ''))
+                                    if o.filled_quantity and o.fill_price is not None and o.fill_price > 0 else '미확인' if o.filled_quantity else '—',
+                                    o.status, o.order_time) for o in data[key]])
         if errors:
             self.message.setText("일부 조회 실패: " + " / ".join(errors))
             self.log(self.message.text())

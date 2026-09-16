@@ -53,7 +53,7 @@ def inspect_signal_file(path: Path | str, policy: ExternalPolicy, *, now: dateti
         seen_watch, seen_signal = set(), set()
         for entry in entries:
             required = {"signal_id", "export_id", "market", "symbol", "exchange", "action", "generated_at", "expires_at"}
-            optional = {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct"}
+            optional = {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"}
             if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - optional:
                 raise ValueError("외부 신호의 필수/허용 필드를 확인하세요.")
             sid = identifier(entry["signal_id"], "signal_id")

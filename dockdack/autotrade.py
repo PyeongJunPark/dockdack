@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from threading import Event, Lock
 from typing import Callable
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid5, uuid4
 import json
+
+from requests.exceptions import ConnectionError as TransportConnectionError, Timeout as TransportTimeout
 
 from dockdack.exceptions import BrokerAPIError, OrderNotSent, OrderOutcomeUnknown
 from dockdack.gui_service import TradingService
-from dockdack.history import market_time, regular_session
+from dockdack.history import DailyHistory, market_time, regular_session
 from dockdack.history_cache import HistoryCache
-from dockdack.http import order_send_guard
-from dockdack.models import OrderSide, TradingMode
+from dockdack.http import _is_rate_limit, order_send_guard
+from dockdack.models import Market, OrderSide, TradingMode
+from dockdack.gui_service import Instrument
+from dockdack.execution_policy import allocation_quantity, holding_exit_targets
 from dockdack.order_prices import current_common_equity_limit_price
 from dockdack.signal_bridge import validate_external_rule
 from dockdack.watchlist import MarketSnapshot, TriggerKind, TriggerRule, WatchItem, WatchStore, positive, utc_now
@@ -26,6 +30,33 @@ class Signal:
     matched: bool
     reference: Decimal
     reason: str
+
+
+def _transient_poll_failure(error: Exception) -> bool:
+    """Recognize read/checkpoint outages, never infer recovery from arbitrary errors.
+
+    The caller aborts this sweep and leaves retries to its normal timer. This
+    does not retry an order, re-arm an already disabled engine, or forgive a
+    missing/corrupt journal, changed environment, or unknown order outcome.
+    """
+    if isinstance(error, (OrderNotSent, OrderOutcomeUnknown)):
+        return False
+    network_errors = (TimeoutError, ConnectionError, TransportTimeout, TransportConnectionError)
+    if isinstance(error, network_errors):
+        return True
+    if not isinstance(error, BrokerAPIError):
+        return False
+    status = error.status_code
+    if status in (401, 403):
+        return False
+    if type(status) is int and (status == 429 or 500 <= status < 600):
+        return True
+    if type(status) is int and _is_rate_limit(status, {
+        "return_code": error.return_code, "return_msg": str(error),
+    }):
+        return True
+    # The HTTP adapter wraps transport failures without a response/code.
+    return status is None and error.return_code is None and isinstance(error.__cause__, network_errors)
 
 
 def evaluate_trigger(rule: TriggerRule, snapshot: MarketSnapshot, now: datetime) -> Signal:
@@ -71,6 +102,44 @@ class AutoTrader:
         self.external_reader = None
         self.external_error = ""
         self.external_error_count = 0
+        self.external_sources = {}
+        self.external_source_errors = {}
+        self.session_only_poll = True
+        self.enable_holdings_exits = False
+        self.equity_buy_percent = None
+        self.isolated_symbol_errors = False
+        self.us_retry_attempts = 3
+        self.us_failure_cooldown_seconds = 300
+        self.holding_caps = {Market.DOMESTIC: Decimal("10000000"), Market.US: Decimal("10000")}
+
+    def configure_external_sources(self, sources):
+        """Replace extra readers while OFF; the legacy primary reader remains supported."""
+        if self.orders_enabled:
+            raise ValueError("외부 신호 연결 변경 전에 자동주문을 OFF 하세요.")
+        entries = {}
+        for policy, reader in sources:
+            if policy.source_id in entries or not callable(reader):
+                raise ValueError("신호 출처는 중복 없이 읽기 함수와 함께 등록하세요.")
+            if self._mode is TradingMode.REAL and self._demo_source(policy.source_id):
+                raise ValueError("내장 모의 신호를 실전에 연결할 수 없습니다.")
+            entries[policy.source_id] = (policy, reader)
+        self.external_sources = entries
+        self.external_source_errors = {}
+
+    def holding_exit_targets(self, position):
+        return holding_exit_targets(self.store, position)
+
+    def _policy_for(self, rule):
+        record = self.store.external_for_rule(rule.id)
+        if record and self.external_policy is not None and record["source_id"] == self.external_policy.source_id:
+            return self.external_policy
+        if record and record["source_id"] in self.external_sources:
+            return self.external_sources[record["source_id"]][0]
+        return self.external_policy
+
+    @staticmethod
+    def _holding_rule(rule):
+        return rule.id.startswith("holding-exit-") and rule.side is OrderSide.SELL
 
     @property
     def orders_enabled(self) -> bool:
@@ -83,15 +152,16 @@ class AutoTrader:
             raise ValueError("실전 자동주문 시작 확인이 필요합니다." if self._mode is TradingMode.REAL else "모의 자동주문 시작 확인이 필요합니다.")
         self._ensure_environment(orders=True)
         if self.external_only:
-            if self.external_policy is None or max(self.external_policy.max_krw, self.external_policy.max_usd) <= 0:
+            policies = [value[0] for value in self.external_sources.values()] + ([self.external_policy] if self.external_policy else [])
+            if not policies or not any(max(policy.max_krw, policy.max_usd) > 0 for policy in policies):
                 raise ValueError("외부 신호 출처와 시장별 주문 상한을 먼저 설정하세요.")
-        elif not any(rule.status == "ready" and rule.kind is not TriggerKind.EXTERNAL for rule in self.store.rules()):
+        elif not self.enable_holdings_exits and not any(rule.kind is not TriggerKind.EXTERNAL for rule in self.store.rules(statuses=("ready",))):
             raise ValueError("대기 중인 트리거 규칙이 없습니다.")
-        if any(a["status"] in {"submitting", "unknown"} for a in self.store.attempts(pending_only=True)):
+        if not self.isolated_symbol_errors and any(a["status"] in {"submitting", "unknown"} for a in self.store.attempts(pending_only=True)):
             raise ValueError("접수 여부가 불명확한 주문이 있습니다. 주문 내역을 확인하세요.")
         for item in self.store.items():
             self._ensure_environment(item.instrument, orders=True)
-        for rule in self.store.rules():
+        for rule in self.store.rules(statuses=("ready",)):
             if rule.status == "ready":
                 self._reject_demo_rule(rule)
         label = "실전" if self._mode is TradingMode.REAL else "모의"
@@ -160,6 +230,9 @@ class AutoTrader:
         if self._messages.get(key) != message:
             self.store.event(symbol, message, category=category)
             self._messages[key] = message
+            if len(self._messages) > 4096:
+                for stale in list(self._messages)[:512]:
+                    self._messages.pop(stale, None)
 
     def snapshot(self, item: WatchItem, rules: tuple[TriggerRule, ...] = ()) -> MarketSnapshot:
         inst, now = item.instrument, self.clock()
@@ -195,15 +268,17 @@ class AutoTrader:
     def _reconcile(self, item: WatchItem):
         pending = self.store.attempts(item.id, pending_only=True)
         if any(a["status"] in {"submitting", "unknown"} for a in pending):
-            self.disarm()
-            raise ValueError("접수 여부 확인 필요 · 자동주문을 껐습니다. 영웅문 주문 내역을 확인하세요.")
+            if not self.isolated_symbol_errors:
+                self.disarm()
+            raise ValueError("접수 여부 확인 필요 · 해당 종목 추가 주문 격리. 영웅문 주문 내역을 확인하세요.")
         if not pending:
             return
         executions = self.service.safety_executions(item.instrument)
-        from dockdack.manual_orders import MANUAL_PREFIX, reconcile_manual_executions
+        from dockdack.manual_orders import MANUAL_PREFIX, _side, reconcile_manual_executions
+        from dockdack.fill_recovery import normalized_order_number
         if any(a["rule_id"].startswith(MANUAL_PREFIX) for a in pending):
             reconcile_manual_executions(self.store, item.instrument, executions)
-        rules = {rule.id: rule for rule in self.store.rules(item.id)}
+        rules = {rule.id: rule for rule in self.store.rules(item.id, include_inactive=True, statuses=("accepted", "submitting", "unknown"))}
         for attempt in pending:
             if attempt["rule_id"].startswith(MANUAL_PREFIX):
                 continue
@@ -211,23 +286,33 @@ class AutoTrader:
             started = datetime.fromisoformat(attempt["started_at"])
             if market_time(item.instrument.market, started).date() != market_time(item.instrument.market, self.clock()).date():
                 continue
-            for execution in executions:
-                if execution.order_number != attempt["order_number"] or execution.symbol != item.instrument.symbol:
-                    continue
+            matches = [execution for execution in executions if execution.symbol == item.instrument.symbol
+                       and normalized_order_number(execution.order_number) == normalized_order_number(attempt["order_number"])]
+            if len(matches) > 1:
+                raise ValueError("동일 주문번호의 체결 응답이 여러 개여서 반영하지 않습니다.")
+            for execution in matches:
                 rule = rules[attempt["rule_id"]]
                 filled, remaining = execution.filled_quantity, execution.remaining_quantity
                 if not filled.is_finite() or not remaining.is_finite() or filled < 0 or remaining < 0:
                     raise ValueError("체결 수량을 확인할 수 없습니다.")
-                if execution.order_quantity != rule.quantity:
-                    raise ValueError("체결 내역의 원주문 수량이 저장된 주문과 다릅니다.")
+                if execution.order_quantity != rule.quantity or _side(execution.side) is not rule.side:
+                    raise ValueError("체결 내역의 원주문 수량·방향이 저장된 주문과 다릅니다.")
+                if filled + remaining > rule.quantity:
+                    raise ValueError("체결·미체결 합계가 원주문 수량을 넘습니다.")
                 self.store.record_execution(rule.id, filled_quantity=filled, remaining_quantity=remaining,
                                             fill_price=execution.fill_price, observed_at=self.clock())
                 if filled == rule.quantity and remaining == 0:
                     self.store.finish(rule.id, "filled", f"주문번호 {execution.order_number} · {filled}주 체결 확인")
                     break
-                if "취소" in execution.status and remaining == 0:
+                if str(execution.status).strip().lower() in {"취소", "취소완료", "취소확인", "취소확인완료", "cancelled", "canceled"} and remaining == 0:
                     self.store.finish(rule.id, "cancelled", f"주문번호 {execution.order_number} · 잔량 취소 확인")
                     break
+                self._message(attempt["rule_id"] + ":unfilled", item.id,
+                              f"{'부분체결' if filled > 0 else '미체결'} · 주문번호 {execution.order_number} · 체결 {filled}주 / 잔량 {remaining}주 · 중복 재주문하지 않음", category="order")
+                break
+            else:
+                self._message(attempt["rule_id"] + ":unfilled", item.id,
+                              f"접수 후 체결 확인 대기 · 주문번호 {attempt['order_number']} · 이번 조회에 주문 행 없음(체결 실패 확정 아님), 중복 재주문하지 않음", category="order")
 
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
         inst = item.instrument
@@ -260,9 +345,35 @@ class AutoTrader:
             raise ValueError("매도 가능 수량이 부족합니다. 공매도는 지원하지 않습니다.")
         # Account/open-order calls take time: recheck both the trigger and limit using a fresh quote.
         fresh = MarketSnapshot(self.service.quote(inst), snapshot.history, self.clock())
-        self._validate_snapshot(item, fresh)
+        if self._holding_rule(rule):
+            self._validate_quote(item, fresh.quote)
+        else:
+            self._validate_snapshot(item, fresh)
         if not evaluate_trigger(rule, fresh, self.clock()).matched:
             raise ValueError("주문 직전 재조회한 가격에서는 트리거 조건이 성립하지 않습니다.")
+        if (self.enable_holdings_exits and rule.side is OrderSide.SELL and
+                (rule.kind is TriggerKind.EXTERNAL or self._holding_rule(rule))):
+            held = [position for position in positions if position.quantity > 0]
+            total = sum((position.quantity for position in held), Decimal(0))
+            average = sum((position.average_price * position.quantity for position in held), Decimal(0)) / total
+            targets = self.holding_exit_targets(replace(held[0], average_price=average))
+            upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
+            if upper is None or lower is None:
+                raise ValueError("매도 직전 보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
+            if not (fresh.quote.price >= upper or fresh.quote.price <= lower):
+                raise ValueError("매도 직전 현재가가 보유종목 상방·하방 목표가격에 도달하지 않았습니다.")
+        metadata = validate_external_rule(self.store, rule, self._policy_for(rule), self.clock()) if rule.kind is TriggerKind.EXTERNAL else {}
+        kind = metadata.get("order_type", "limit")
+        price = None if kind == "market" else current_common_equity_limit_price(inst.market, rule.side, fresh.quote.price)
+        if rule.side is OrderSide.BUY and self.equity_buy_percent is not None:
+            policy = self._policy_for(rule) if rule.kind is TriggerKind.EXTERNAL else None
+            cap = min(rule.max_notional, policy.cap(inst.market)) if policy else rule.max_notional
+            quantity = allocation_quantity(account, price or fresh.quote.price, self.equity_buy_percent, cap,
+                                           policy.max_quantity if policy else 999_999_999)
+            rule = self.store.size_ready_rule(rule, quantity)
+            self.store.event(item.id, f"비중 매수 수량 산정 · 예수금+보유평가액의 {self.equity_buy_percent}% · {quantity}주 · 주문상한/가용액 1% 여유 적용", category="order")
+        if "take_profit_price" in metadata and not Decimal(metadata["stop_loss_price"]) < fresh.quote.price < Decimal(metadata["take_profit_price"]):
+            raise ValueError("매수 직전 현재가가 하방·상방 목표가격 사이에 있지 않습니다.")
         notional = fresh.quote.price * rule.quantity
         if notional > rule.max_notional:
             raise ValueError("예상 주문금액이 규칙의 상한을 넘습니다.")
@@ -271,7 +382,6 @@ class AutoTrader:
             # Leave 1% headroom for fees; the broker still makes the final funds check.
             if available is None or not available.is_finite() or available < notional * Decimal("1.01"):
                 raise ValueError("주문가능금액이 불명확하거나 부족합니다 (1% 여유 포함).")
-        metadata = validate_external_rule(self.store, rule, self.external_policy, self.clock()) if rule.kind is TriggerKind.EXTERNAL else {}
         if "min_sell_price" in metadata and fresh.quote.price < Decimal(metadata["min_sell_price"]):
             raise ValueError("매도 직전 현재가가 신호의 최소 매도가에 미달합니다.")
         if "cost_profit_pct" in metadata or "cost_loss_pct" in metadata:
@@ -284,19 +394,37 @@ class AutoTrader:
                 raise ValueError("매도 직전 실제 평균 매입가 대비 수익률 조건에 미달합니다.")
             if "cost_loss_pct" in metadata and fresh.quote.price > average*(1-Decimal(metadata["cost_loss_pct"])/100):
                 raise ValueError("매도 직전 실제 평균 매입가 대비 손절 조건이 성립하지 않습니다.")
-        kind = metadata.get("order_type", "limit")
-        price = None if kind == "market" else current_common_equity_limit_price(inst.market, rule.side, fresh.quote.price)
         if price is not None and price * rule.quantity > rule.max_notional:
             raise ValueError("가격 단위에 맞춘 지정가 주문금액이 규칙의 상한을 넘습니다.")
         request = self.service.prepare(inst, rule.side.value, rule.quantity, kind, price)
         if (request.market, request.symbol, request.exchange, request.side, request.quantity, request.price) != (
                 inst.market, inst.symbol, inst.exchange, rule.side, rule.quantity, price) or request.order_type not in ({"3"} if kind == "market" else {"0", "00"}):
             raise ValueError("주문 미리보기와 트리거의 종목·수량·가격이 다릅니다.")
-        return request, fresh
+        return request, fresh, rule
 
     def _execute(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot) -> bool:
+        if item.instrument.market is Market.US:
+            remaining = self.store.rejection_cooldown_remaining(item.id, rule.id, self.clock(), seconds=self.us_failure_cooldown_seconds)
+            if remaining:
+                self._message("rejection-cooldown:" + item.id, item.id,
+                              f"미국 주문 거절 후 해당 종목 재시도 대기 · 최대 {self.us_failure_cooldown_seconds}초 · 새 신호도 즉시 재주문하지 않음", category="order")
+                return False
+        attempted = False
+        for _ in range(self.us_retry_attempts if item.instrument.market is Market.US else 1):
+            if self._stop.is_set() or not self.orders_enabled:
+                break
+            attempted = self._execute_once(item, rule, snapshot) or attempted
+            if item.instrument.market is not Market.US or self._stop.is_set() or not self.orders_enabled:
+                break
+            next_rule = self.store.retry_rule(rule, maximum=self.us_retry_attempts)
+            if next_rule is None:
+                break  # accepted, partially filled, unknown and cancellation-pending never retry.
+            rule = next_rule
+        return attempted
+
+    def _execute_once(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot) -> bool:
         self._validate_rule(rule)
-        request, fresh = self._preflight(item, rule, snapshot)
+        request, fresh, rule = self._preflight(item, rule, snapshot)
         # A newer HOLD/SELL decision may have arrived during account/quote requests.
         self._read_external()
         self._validate_rule(rule)
@@ -336,7 +464,7 @@ class AutoTrader:
                                and type(exc.return_code) in (int, str) and str(exc.return_code).strip().isdigit()
                                and int(exc.return_code) != 0)
             status = "rejected" if known_rejection else "unknown"
-            if not known_rejection:
+            if not known_rejection and not self.isolated_symbol_errors:
                 self.disarm()
             try:
                 self.store.finish(rule.id, status, str(exc))
@@ -346,6 +474,14 @@ class AutoTrader:
         else:
             try:
                 self.store.finish(rule.id, "accepted", result.message, result.order_number)
+                if rule.side is OrderSide.BUY:
+                    record = self.store.external_for_rule(rule.id)
+                    metadata = json.loads(record["payload"]) if record else {}
+                    if "take_profit_price" in metadata:
+                        self.store.set_exit_targets(item.id, Decimal(metadata["take_profit_price"]), Decimal(metadata["stop_loss_price"]),
+                                                    source=record["source_id"], rule_id=rule.id, now=self.clock())
+                    else:
+                        self.store.clear_exit_targets(item.id)
             except Exception:
                 # Intent stays 'submitting' on disk; no second send after a journal failure.
                 self.disarm()
@@ -364,17 +500,18 @@ class AutoTrader:
                 claimed = db.execute("""SELECT r.status,w.active FROM rules r
                                         JOIN watchlist w ON w.id=r.watch_id WHERE r.id=?""",
                                      (rule.id,)).fetchone()
-                if not claimed or claimed["status"] != "submitting" or not claimed["active"]:
+                if not claimed or claimed["status"] != "submitting" or (not claimed["active"] and not self._holding_rule(rule)):
                     raise ValueError("주문 전송 의도 또는 관심종목 상태가 변경되어 전송하지 않음")
                 if rule.kind is TriggerKind.EXTERNAL:
                     # Ingestion supersedes only READY rules, not this already
                     # claimed SUBMITTING intent. A newer HOLD must still stop it.
+                    record = self.store.external_for_rule(rule.id)
                     latest = db.execute("""SELECT newer.rule_id FROM external_signals newer
                                            JOIN external_signals current
                                              ON newer.source_id=current.source_id AND newer.watch_id=current.watch_id
                                            WHERE current.rule_id=? AND newer.status!='expired'
-                                           ORDER BY newer.generated_at DESC LIMIT 1""", (rule.id,)).fetchone()
-                    if not latest or latest["rule_id"] != rule.id:
+                                           ORDER BY newer.generated_at DESC LIMIT 1""", (record["rule_id"] if record else rule.id,)).fetchone()
+                    if not latest or not record or latest["rule_id"] != record["rule_id"]:
                         raise ValueError("더 최근의 외부 매매/HOLD 신호가 도착하여 이전 주문을 전송하지 않음")
             now = self.clock()
             if not regular_session(item.instrument.market, now):
@@ -393,43 +530,172 @@ class AutoTrader:
         if rule.kind is TriggerKind.EXTERNAL:
             if not self.external_only:
                 raise ValueError("외부 신호 모드가 꺼져 있습니다.")
-            validate_external_rule(self.store, rule, self.external_policy, self.clock())
-        elif self.external_only:
+            record = self.store.external_for_rule(rule.id)
+            if record and record["source_id"] in self.external_source_errors:
+                raise ValueError("해당 신호 출처 오류가 해소될 때까지 해당 출처의 주문을 보류합니다.")
+            validate_external_rule(self.store, rule, self._policy_for(rule), self.clock())
+        elif self.external_only and not self._holding_rule(rule):
             raise ValueError("외부 신호 모드에서는 수동 트리거를 실행하지 않습니다.")
 
     def _read_external(self):
-        if self.external_only and self.external_reader is not None:
-            try:
-                self.external_reader()
-            except Exception as exc:
-                self.external_error_count += 1
-                self.external_error = str(exc) or type(exc).__name__
-                self.disarm()
-                self._message("external:file", "SYSTEM", f"외부 신호 읽기 실패 · 자동주문 OFF: {exc}")
-            else:
-                self.external_error = ""
-                self._messages.pop("external:file", None)
+        readers = dict(self.external_sources)
+        if self.external_reader is not None:
+            readers[self.external_policy.source_id if self.external_policy else "legacy-reader"] = (self.external_policy, self.external_reader)
+        if self.external_only:
+            for source, (_, reader) in readers.items():
+                message_key = "external:file" if source == "legacy-reader" else "external:file:" + source
+                try:
+                    reader()
+                except Exception as exc:
+                    self.external_error_count += 1
+                    self.external_error = str(exc) or type(exc).__name__
+                    self.external_source_errors[source] = self.external_error
+                    if not self.isolated_symbol_errors:
+                        self.disarm()
+                    self._message(message_key, "SYSTEM", f"외부 신호 읽기 실패 · {source} 격리: {exc}")
+                else:
+                    self.external_source_errors.pop(source, None)
+                    self._messages.pop(message_key, None)
+        self.external_error = " · ".join(error if source == "legacy-reader" else f"{source}: {error}"
+                                         for source, error in self.external_source_errors.items())
         self.store.expire_external(self.clock())
+
+    @staticmethod
+    def _validate_quote(item, quote):
+        inst = item.instrument
+        if (quote.market, quote.symbol, quote.exchange, quote.currency) != (inst.market, inst.symbol, inst.exchange, inst.currency):
+            raise ValueError("현재가의 종목·거래소·통화가 보유종목과 다릅니다.")
+        positive(quote.price, "보유종목 현재가")
+
+    def _holdings_pass(self, sent, *, checkpoint=None, progress=None):
+        """Account holdings are SELL candidates even when absent from the watchlist.
+
+        No chart/history calls; every position gets a fresh quote and preflight
+        rechecks both the price condition and actual sellable shares before send.
+        """
+        def report(phase, market=None, *, completed=0, total=0, position=None, error=None):
+            # Keep UI callback failures outside the per-position/broker guards.
+            # Progress is observational: it must never cause a silent retry.
+            if progress is not None:
+                payload = {"phase": phase, "market": market, "completed": completed, "total": total,
+                           "symbol": position.symbol if position is not None else "",
+                           "name": position.name if position is not None else ""}
+                if error is not None:
+                    payload["error"] = str(error) or type(error).__name__
+                progress(("holdings_progress", payload))
+
+        if progress is not None:
+            progress(("phase", "보유종목 매도 조건 점검"))
+        pass_completed = pass_total = 0
+        for market, symbol, exchange in ((Market.DOMESTIC, "005930", "KRX"), (Market.US, "AAPL", "ND")):
+            if self._stop.is_set():
+                return
+            if not regular_session(market, self.clock()):
+                report("market_closed", market)
+                continue
+            report("account", market)
+            account_error = None
+            try:
+                representative = Instrument(market, symbol, exchange)
+                self._ensure_environment(representative)
+                account = self.service.safety_account(representative)
+                if account.market is not market or account.currency != representative.currency:
+                    raise ValueError("보유종목 조회의 시장·통화가 다릅니다.")
+            except Exception as exc:
+                self._message("holdings:" + market.value, "SYSTEM", f"보유종목 매도 감시 조회 실패 · {market.value}: {exc}", category="monitor")
+                account_error = exc
+            if account_error is not None:
+                report("market_error", market, error=account_error)
+                continue
+            completed, total = 0, len(account.positions)
+            pass_total += total
+            for position in account.positions:
+                if self._stop.is_set():
+                    return
+                if checkpoint is not None:
+                    checkpoint()
+                report("checking", market, completed=completed, total=total, position=position)
+                rule = position_error = None
+                try:
+                    if (position.market is not market or position.currency != account.currency or
+                        not position.quantity.is_finite() or not position.sellable_quantity.is_finite() or
+                        not 0 <= position.sellable_quantity <= position.quantity):
+                        raise ValueError("보유종목 시장·수량을 확인할 수 없습니다.")
+                    if position.quantity <= 0:
+                        continue
+                    inst = Instrument(market, position.symbol, position.exchange)
+                    item = WatchItem(inst, position.name)
+                    quote = self.service.quote(inst)
+                    self._validate_quote(item, quote)
+                    # Empty history explicitly means quote-only, never fabricated OHLC.
+                    snapshot = MarketSnapshot(quote, DailyHistory(market, inst.symbol, inst.exchange, inst.currency, 0, ()), self.clock())
+                    targets = self.holding_exit_targets(position)
+                    upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
+                    if progress is not None:
+                        progress(("holding_quote", {"watch_id": item.id, "instrument": inst,
+                                                   "quote": quote, "position": position, "targets": targets}))
+                    self._reconcile(item)
+                    if upper is None or lower is None:
+                        raise ValueError("보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
+                    hit = TriggerKind.PRICE_GE if quote.price >= upper else TriggerKind.PRICE_LE if quote.price <= lower else None
+                    self._message("holding:" + item.id, item.id,
+                                  f"보유종목 매도 감시 · 현재가 {quote.price} · 상방 {upper} / 하방 {lower} · {'매도 조건 충족' if hit else '대기'}", category="monitor")
+                    if not hit or not self.orders_enabled or item.id in sent or self.store.attempts(item.id, pending_only=True):
+                        continue
+                    if market is Market.US and self.store.rejection_cooldown_remaining(item.id, "", self.clock(), seconds=self.us_failure_cooldown_seconds):
+                        self._message("rejection-cooldown:" + item.id, item.id,
+                                      f"미국 주문 거절 후 해당 종목 재시도 대기 · 최대 {self.us_failure_cooldown_seconds}초 · 새 신호도 즉시 재주문하지 않음", category="order")
+                        continue
+                    cap = self.holding_caps.get(market, Decimal(0))
+                    if not isinstance(cap, Decimal) or not cap.is_finite() or cap <= 0:
+                        continue
+                    unit = current_common_equity_limit_price(market, OrderSide.SELL, quote.price)
+                    quantity = min(int(position.sellable_quantity), int(cap / unit))
+                    if quantity < 1:
+                        raise ValueError("매도 가능 정수 수량/주문 상한이 1주에 미달합니다.")
+                    rule = TriggerRule("holding-exit-" + uuid4().hex, item.id, hit, OrderSide.SELL, quantity, cap,
+                                       upper if hit is TriggerKind.PRICE_GE else lower)
+                    self.store.save_holding_rule(item, rule)
+                    if self._execute(item, rule, snapshot):
+                        sent.add(item.id)
+                except Exception as exc:
+                    position_error = exc
+                    self._message("holding-error:" + position.symbol, position.symbol, f"보유종목 매도 보류: {exc}", category="signal")
+                finally:
+                    if rule is not None:
+                        self.store.pause_rule(rule.id)  # Failed preflight creates no lingering sell candidate.
+                    completed += 1
+                    pass_completed += 1
+                    report("checked", market, completed=completed, total=total, position=position, error=position_error)
+            if self._stop.is_set():
+                return
+            report("market_complete", market, completed=completed, total=total)
+        if not self._stop.is_set():
+            report("complete", completed=pass_completed, total=pass_total)
 
     def poll(self, progress=None, checkpoint=None, on_snapshot=None) -> dict[str, MarketSnapshot | Exception]:
         if not self._poll_lock.acquire(blocking=False):
             return {}
         results = {}
         try:
-            items = {item.id: item for item in self.store.items()}
+            items = {item.id: item for item in self.store.items()
+                     if not self.session_only_poll or regular_session(item.instrument.market, self.clock())}
+            deferred_sells = []
             remaining, seen_external, sent = list(items), set(), set()
             # Bounded even if a producer continuously publishes new decisions.
             for _ in range(len(items) + 500):
                 if self._stop.is_set():
                     break
                 if checkpoint is not None and checkpoint():
-                    items = {item.id: item for item in self.store.items()}
+                    items = {item.id: item for item in self.store.items()
+                             if not self.session_only_poll or regular_session(item.instrument.market, self.clock())}
                     results = {key: value for key, value in results.items() if key in items}
                     remaining = [key for key in items if key not in results]
                 self._read_external()
-                priority = next((r for r in self.store.rules() if self.external_only
+                priority = next((r for r in self.store.rules(statuses=("ready",)) if self.external_only
                                  and r.kind is TriggerKind.EXTERNAL and r.status == "ready"
-                                 and r.id not in seen_external and r.watch_id in items), None)
+                                 and r.id not in seen_external and r.watch_id in items
+                                 and (not self.enable_holdings_exits or r.watch_id in remaining)), None)
                 if priority:
                     item = items[priority.watch_id]
                     if item.id in remaining:
@@ -439,7 +705,13 @@ class AutoTrader:
                 else:
                     break
                 try:
-                    rules = self.store.rules(item.id)
+                    rules = self.store.rules(item.id, statuses=("ready",))
+                    if self.session_only_poll and not regular_session(item.instrument.market, self.clock()):
+                        continue
+                    if progress is not None:
+                        progress(("watch_progress", {"market": item.instrument.market,
+                                                     "symbol": item.instrument.symbol, "name": item.name,
+                                                     "completed": len(results), "total": len(items)}))
                     snapshot = self.snapshot(item, rules)
                     results[item.id] = snapshot
                     self._reconcile(item)
@@ -447,15 +719,19 @@ class AutoTrader:
                         try:
                             on_snapshot(item, snapshot)
                         except Exception:
-                            self.disarm()
+                            if not self.isolated_symbol_errors:
+                                self.disarm()
                             raise
                         self._read_external()
-                        rules = self.store.rules(item.id)
+                        rules = self.store.rules(item.id, statuses=("ready",))
                     seen_external.update(r.id for r in rules if r.kind is TriggerKind.EXTERNAL)
                     for rule in rules:
                         if rule.status != "ready" or self._stop.is_set():
                             continue
                         if (rule.kind is TriggerKind.EXTERNAL) != self.external_only:
+                            continue
+                        if self.enable_holdings_exits and rule.side is OrderSide.SELL:
+                            deferred_sells.append((item, rule, snapshot))
                             continue
                         try:
                             self._validate_rule(rule)
@@ -477,9 +753,24 @@ class AutoTrader:
                     self._message(item.id + ":error", item.id, f"조회/확인 실패: {exc}", category="monitor")
                 if progress is not None:
                     progress((item.id, results[item.id], len(results), len(items)))
+            for item, rule, snapshot in deferred_sells:
+                if self._stop.is_set() or not self.orders_enabled or item.id in sent:
+                    continue
+                try:
+                    if regular_session(item.instrument.market, self.clock()) and self._execute(item, rule, snapshot):
+                        sent.add(item.id)
+                except Exception as exc:
+                    self._message(rule.id + ":gate", item.id, f"자동매도 보류: {exc}", category="signal")
+            if self.enable_holdings_exits and not self._stop.is_set():
+                self._holdings_pass(sent, checkpoint=checkpoint, progress=progress)
             return results
-        except Exception:
-            self.disarm()
+        except Exception as exc:
+            # Auxiliary account/ranking/notification checkpoints run outside
+            # the per-symbol guard. A confirmed transient read outage must not
+            # silently revoke the user's ON state. Unexpected/data-integrity
+            # errors still fail closed; explicit earlier OFF is never undone.
+            if not self.isolated_symbol_errors or not _transient_poll_failure(exc):
+                self.disarm()
             raise
         finally:
             self._poll_lock.release()
