@@ -1,0 +1,87 @@
+{
+  "schema_version": "clean-daily-v1",
+  "as_of_exclusive": "2026-09-16",
+  "branch": "feat/data-collection",
+  "output_directory": "data/kiwoom_daily/clean-20260916-v1",
+  "original_databases_preserved": true,
+  "publication": "code_policy_and_manifest_in_git",
+  "database_distribution": "local_only_not_in_git_or_uploaded_as_release",
+  "policy": {
+    "lookback": 30,
+    "liquidity_window": 60,
+    "median_window": 20,
+    "min_median_volume": 10000,
+    "min_active_fraction": 0.95,
+    "max_zero_run": 2,
+    "min_domestic_turnover_krw": 1000000000,
+    "min_us_turnover_usd": 1000000,
+    "target": "next_scheduled_positive_volume_close_gte_input_close_times_1.01"
+  },
+  "domestic": {
+    "source_rows": 14772418,
+    "source_sha256": "6435141cec9fa5a3de7dbdc1700373caf3e5584a22e2f1d57afa038ded9ee171",
+    "database": "domestic_daily_clean.sqlite3",
+    "bytes": 2671337472,
+    "sha256": "9cc6e97466fe77237b53d188a82ce657d74586c1f4f2be25be7f8381ff6f73b8",
+    "retained_instruments": 2477,
+    "stored_rows": 4469008,
+    "approved_samples": 3544790,
+    "continuous_segments": 23729,
+    "stored_date_min": "1999-03-15",
+    "stored_date_max": "2026-08-21",
+    "row_decisions": {
+      "kept": 4469008,
+      "hard_invalid": 2096,
+      "not_in_approved_window": 6946756,
+      "instrument_excluded": 2693263,
+      "instrument_review": 661295
+    },
+    "loader_smoke": {"symbols": 32, "bars": 49844, "train_samples": 31150, "validation_samples": 6712, "test_samples": 4433}
+  },
+  "us": {
+    "source_rows": 26100170,
+    "source_sha256": "757762162dafe29ded5ae00f5e68a09761133e46b6960bce60678765bfdb4f68",
+    "database": "us_daily_clean.sqlite3",
+    "bytes": 4265664512,
+    "sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+    "retained_instruments": 4974,
+    "stored_rows": 12145737,
+    "approved_samples": 11508494,
+    "continuous_segments": 16046,
+    "stored_date_min": "1970-02-13",
+    "stored_date_max": "2026-09-11",
+    "row_decisions": {
+      "kept": 12145737,
+      "hard_invalid": 3092,
+      "not_in_approved_window": 4547572,
+      "instrument_excluded": 9032361,
+      "instrument_review": 371408
+    },
+    "loader_smoke": {"symbols": 32, "bars": 64503, "train_samples": 35339, "validation_samples": 13514, "test_samples": 11588}
+  },
+  "validation": {
+    "source_hashes_unchanged": true,
+    "sqlite_quick_check": "ok_both",
+    "foreign_key_check": "ok_both",
+    "row_accounting": "balanced_both",
+    "all_stored_ohlcv_violations": 0,
+    "all_approved_sample_calendar_span_reference_segment_violations": 0,
+    "all_stored_segment_calendar_gaps": 0,
+    "exact_source_copy_spotchecks_per_market": 128,
+    "independent_historical_liquidity_spotchecks_per_market": 128,
+    "baseline_regression_tests_passed": 910,
+    "final_changed_area_tests_passed": 98,
+    "pre_merge_full_regression_tests_passed": 927,
+    "pre_merge_full_regression_seconds": 309.725,
+    "test_counts_overlap": true,
+    "models_retrained_on_real_data": false
+  },
+  "limitations": [
+    "Historical free-float shares unavailable; filtering measured liquidity, not free float.",
+    "Current catalog survivorship and non-point-in-time subtype classification remain.",
+    "Positive-volume observable targets required; target availability/activity selection remains.",
+    "US turnover USD units empirically checked; historical units and adjusted-history consistency not exhaustively independently verified.",
+    "1971 domestic pre-1999 rows conflict with the exchange calendar on six dates and remain quarantined for review, not proven source corruption.",
+    "Stored instruments have at least one approved historical sample, not necessarily current liquidity."
+  ]
+}

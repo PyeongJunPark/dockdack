@@ -1,8 +1,9 @@
 """Train pooled-market 30-candle LSTMs from the existing read-only SQLite DB.
 
 Run from the repository root with ``python -m examples.train_lstm30 --help``.
-The label is the NEXT valid trading bar's close gain >= 1%, not an intraday
-barrier event. Profit/stop exits are deterministic execution rules, not labels.
+Legacy DB labels use the NEXT valid observed bar's close gain >= 1%; cleaned
+DBs use only approved next-scheduled-session targets and never bridge gaps.
+Neither is an intraday barrier label. Profit/stop exits are execution rules.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import numpy as np
@@ -42,12 +44,15 @@ def date_string(value: int) -> str:
     return str(np.datetime64(int(value), "D"))
 
 
-def clean_rows(rows: list[tuple]) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+def clean_rows(rows: list[tuple], *, allow_float32_rounding: bool = False
+              ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Keep valid, ordered bars; labels retain float64 closes before packing.
 
     Invalid and zero-price rows are removed. Therefore a target is the next
     VALID observed trading bar, which can cross a suspension or a data gap.
     No price/volume fill or interpolation is performed.
+    Cleaned DBs opt into their assessor's finite-positive float32 cast rule,
+    including representable subnormals; legacy numeric bounds stay unchanged.
     """
     dates, values, seen = [], [], set()
     counts = {"invalid_date": 0, "duplicate_date": 0, "invalid_ohlcv": 0}
@@ -72,9 +77,17 @@ def clean_rows(rows: list[tuple]) -> tuple[np.ndarray, np.ndarray, np.ndarray, d
         op, hi, lo, cl, vol = numbers
         if (not all(math.isfinite(value) for value in numbers)
                 or min(op, hi, lo, cl) <= 0 or vol < 0
-                or hi < max(op, lo, cl) or lo > min(op, hi, cl)
-                or max(numbers) > np.finfo(np.float32).max
-                or min(op, hi, lo, cl) < np.finfo(np.float32).tiny):
+                or hi < max(op, lo, cl) or lo > min(op, hi, cl)):
+            counts["invalid_ohlcv"] += 1
+            continue
+        if allow_float32_rounding:
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                packed = np.asarray(numbers, dtype=np.float32)
+            representable = np.isfinite(packed).all() and (packed[:4] > 0).all()
+        else:
+            representable = (max(numbers) <= np.finfo(np.float32).max
+                             and min(op, hi, lo, cl) >= np.finfo(np.float32).tiny)
+        if not representable:
             counts["invalid_ohlcv"] += 1
             continue
         dates.append(number)
@@ -139,6 +152,115 @@ class PackedDataset:
     manifest: dict
 
 
+def _clean_database_contract(connection, market):
+    """Recognise approved-index databases without silently treating them as raw."""
+    objects = dict(connection.execute("SELECT name,type FROM sqlite_master WHERE type IN ('table','view')"))
+    tables = {name for name, kind in objects.items() if kind == "table"}
+    try:
+        metadata = dict(connection.execute("SELECT key,value FROM metadata")) if "metadata" in objects else {}
+    except sqlite3.DatabaseError as exc:
+        raise ValueError("Malformed database metadata table") from exc
+    bar_columns = {row[1] for row in connection.execute("PRAGMA table_info(daily_bars)")}
+    cleaned = ("training_samples" in objects or "segment_id" in bar_columns
+               or "requires_training_samples" in metadata or "build_status" in metadata
+               or "clean-daily" in str(metadata.get("schema_version", "")))
+    if not cleaned:
+        return None
+    try:
+        decoded = {key: json.loads(value) for key, value in metadata.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Malformed cleaned database JSON metadata") from exc
+    policy = decoded.get("policy")
+    if (decoded.get("schema_version") != "clean-daily-v1"
+            or decoded.get("requires_training_samples") is not True
+            or decoded.get("build_status") != "complete" or decoded.get("market") != market
+            or not isinstance(policy, dict) or type(policy.get("lookback")) is not int
+            or policy["lookback"] != LOOKBACK):
+        raise ValueError("Incomplete or incompatible cleaned database metadata")
+    try:
+        date_number(decoded.get("as_of_exclusive"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Cleaned database requires a canonical as_of_exclusive date") from exc
+    required = {
+        "metadata": {"key", "value"},
+        "instruments": {"symbol", "exchange"},
+        "daily_bars": {"symbol", "exchange", "trade_date", "open", "high", "low", "close", "volume", "segment_id", "currency"},
+        "training_samples": {"symbol", "exchange", "input_start_date", "input_end_date", "target_date", "target_up", "segment_id"},
+        "sessions": {"session_date", "ordinal"},
+    }
+    for table, columns in required.items():
+        actual = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if table not in tables or not columns <= actual:
+            raise ValueError(f"Malformed cleaned database: missing {table} columns")
+    session_rows = connection.execute("SELECT session_date,ordinal FROM sessions ORDER BY ordinal").fetchall()
+    sessions, previous = {}, None
+    for expected, (day, ordinal) in enumerate(session_rows):
+        try:
+            current = date_number(day)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Malformed cleaned database session date") from exc
+        if type(ordinal) is not int or ordinal != expected or (previous is not None and current <= previous):
+            raise ValueError("Malformed cleaned database session ordinals")
+        sessions[day], previous = ordinal, current
+    if not sessions:
+        raise ValueError("Cleaned database has no session calendar")
+    if connection.execute("""SELECT 1 FROM training_samples s LEFT JOIN instruments i
+            ON i.symbol=s.symbol AND i.exchange=s.exchange WHERE i.symbol IS NULL LIMIT 1""").fetchone():
+        raise ValueError("Cleaned sample references an unknown instrument")
+    return decoded, sessions
+
+
+def _approved_sample_indices(rows, samples, sessions, market, train_end, validation_end, as_of):
+    """Check 30+1 exact rows and calendar/segment continuity; never infer windows."""
+    dates, bars, closes, dropped = clean_rows([row[:6] for row in rows], allow_float32_rounding=True)
+    if any(dropped.values()) or len(rows) != len(dates):
+        raise ValueError("Cleaned database contains invalid bars; refusing to drop and reconnect them")
+    positions, ordinals, segments = {}, [], []
+    currency = "KRW" if market == "domestic" else "USD"
+    for index, row in enumerate(rows):
+        day, volume, segment, stored_currency = row[0], row[5], row[6], row[7]
+        if (day not in sessions or day >= as_of or type(segment) is not int or segment < 1
+                or type(volume) is not int or volume < 0 or stored_currency != currency):
+            raise ValueError("Cleaned bar calendar, segment, volume or currency is invalid")
+        ordinal = sessions[day]
+        if ordinals and ((ordinal == ordinals[-1] + 1) != (segment == segments[-1])):
+            raise ValueError("Cleaned bar segment does not match session continuity")
+        positions[day] = index
+        ordinals.append(ordinal)
+        segments.append(segment)
+    labels = np.zeros(len(bars), dtype=np.float32)
+    starts = {name: [] for name in SPLIT_NAMES}
+    training_coverage = np.zeros(len(bars) + 1, dtype=np.int64)
+    seen_targets = set()
+    for first, endpoint, target, label, segment in samples:
+        try:
+            for day in (first, endpoint, target):
+                date_number(day)
+            begin, end, outcome = positions[first], positions[endpoint], positions[target]
+        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("Cleaned sample references missing or invalid dates") from exc
+        if (end != begin + LOOKBACK - 1 or outcome != begin + LOOKBACK
+                or type(segment) is not int or segment < 1
+                or any(value != segment for value in segments[begin:outcome + 1])
+                or ordinals[outcome] - ordinals[begin] != LOOKBACK
+                or rows[outcome][5] <= 0
+                or type(label) is not int or label not in (0, 1) or outcome in seen_targets):
+            raise ValueError("Cleaned sample is not a unique contiguous 30+1 window in one segment")
+        expected = int(Decimal(str(float(closes[outcome])))
+                       >= Decimal(str(float(closes[end]))) * Decimal("1.01"))
+        if label != expected:
+            raise ValueError("Cleaned sample target label does not match its endpoint and target closes")
+        seen_targets.add(outcome)
+        labels[outcome] = label
+        split = "train" if target <= train_end else "validation" if target <= validation_end else "test"
+        starts[split].append(begin)
+        if split == "train":
+            training_coverage[begin] += 1
+            training_coverage[outcome + 1] -= 1
+    return (dates, bars, labels, {name: np.asarray(values, dtype=np.int64) for name, values in starts.items()},
+            int(np.count_nonzero(np.cumsum(training_coverage[:-1]))), dropped)
+
+
 def load_dataset(database: Path, market: str, *, start: str = "2015-01-01",
                  train_end: str = "2022-12-31", validation_end: str = "2024-12-31",
                  max_symbols: int = 512, min_train_bars: int = 300,
@@ -157,11 +279,21 @@ def load_dataset(database: Path, market: str, *, start: str = "2015-01-01",
     bars_parts, label_parts, date_parts, id_parts = [], [], [], []
     split_parts = {name: [] for name in SPLIT_NAMES}
     entries, offset, selected, last_progress = [], 0, 0, time.monotonic()
+    cleaned_contract = None
     try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        cleaned_contract = _clean_database_contract(connection, market)
         placeholders = ",".join("?" for _ in exchanges)
         has_catalog = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instruments'").fetchone()
-        if has_catalog:
+        if cleaned_contract:
+            universe_filter = "clean-daily-v1 approved training_samples; no inferred adjacency"
+            candidates = connection.execute(
+                "SELECT symbol,exchange,COUNT(*),SUM(CASE WHEN target_date <= ? THEN 1 ELSE 0 END) "
+                f"FROM training_samples WHERE input_start_date >= ? AND exchange IN ({placeholders}) "
+                "GROUP BY symbol,exchange", (train_end, start, *exchanges)).fetchall()
+        elif has_catalog:
             universe_filter = ("catalog_market_code IN ('0','10') (KOSPI/KOSDAQ)"
                                if market == "domestic" else "is_etf = 0")
             condition = ("i.catalog_market_code IN ('0','10')" if market == "domestic"
@@ -187,27 +319,42 @@ def load_dataset(database: Path, market: str, *, start: str = "2015-01-01",
         candidates.sort(key=lambda row: symbol_rank(seed, str(row[0]), str(row[1])))
         for rank, (symbol, exchange, raw_count, train_raw_count) in enumerate(candidates):
             entry = {"symbol": symbol, "exchange": exchange, "hash_rank": rank,
-                     "raw_bars_in_date_range": raw_count,
-                     "raw_training_bars": train_raw_count, "selected": False}
+                     "selected": False}
+            if cleaned_contract:
+                entry.update(approved_samples_in_date_range=raw_count, approved_training_samples=train_raw_count)
+            else:
+                entry.update(raw_bars_in_date_range=raw_count, raw_training_bars=train_raw_count)
             entries.append(entry)
-            if train_raw_count < min_train_bars:
-                entry["exclusion_reason"] = "insufficient_training_history"
+            if train_raw_count < (1 if cleaned_contract else min_train_bars):
+                entry["exclusion_reason"] = "no_approved_training_samples" if cleaned_contract else "insufficient_training_history"
                 continue
             if selected >= max_symbols:
                 entry["exclusion_reason"] = "deterministic_symbol_cap"
                 continue
-            rows = connection.execute(
-                "SELECT trade_date, open, high, low, close, volume FROM daily_bars "
-                "WHERE symbol = ? AND exchange = ? AND trade_date >= ? ORDER BY trade_date",
+            columns = "trade_date,open,high,low,close,volume" + (",segment_id,currency" if cleaned_contract else "")
+            rows = connection.execute(f"SELECT {columns} FROM daily_bars "
+                "WHERE symbol=? AND exchange=? AND trade_date>=? ORDER BY trade_date",
                 (symbol, exchange, start)).fetchall()
-            dates, bars, closes, dropped = clean_rows(rows)
+            if cleaned_contract:
+                samples = connection.execute("SELECT input_start_date,input_end_date,target_date,target_up,segment_id "
+                    "FROM training_samples WHERE symbol=? AND exchange=? AND input_start_date>=? ORDER BY target_date",
+                    (symbol, exchange, start)).fetchall()
+                dates, bars, labels, local_splits, valid_training_bars, dropped = _approved_sample_indices(
+                    rows, samples, cleaned_contract[1], market, train_end, validation_end,
+                    cleaned_contract[0]["as_of_exclusive"])
+                entry["raw_bars_in_date_range"] = len(rows)
+                entry["raw_training_bars"] = int((dates <= date_number(train_end)).sum())
+                entry["approved_training_bars"] = valid_training_bars
+            else:
+                dates, bars, closes, dropped = clean_rows(rows)
+                valid_training_bars = int((dates <= date_number(train_end)).sum())
             entry.update({"valid_bars": len(bars), "dropped_rows": dropped})
-            valid_training_bars = int((dates <= date_number(train_end)).sum())
             entry["valid_training_bars"] = valid_training_bars
             if valid_training_bars < min_train_bars:
                 entry["exclusion_reason"] = "insufficient_valid_training_history"
                 continue
-            local_splits, labels = make_sample_indices(dates, closes, train_end, validation_end)
+            if not cleaned_contract:
+                local_splits, labels = make_sample_indices(dates, closes, train_end, validation_end)
             entry.update({"selected": True, "symbol_id": selected,
                           "first_valid_date": date_string(dates[0]),
                           "last_valid_date": date_string(dates[-1]),
@@ -258,12 +405,19 @@ def load_dataset(database: Path, market: str, *, start: str = "2015-01-01",
                    for name, indices in splits.items()},
         "symbols": entries,
         "limitations": ["Available downloaded universe can have survivorship bias",
-                        "Basic catalog stock filter, not verified common equity; preferred shares, REITs or SPACs may remain",
-                        "Invalid bars are dropped; next valid target may cross a gap",
+                        ("Cleaned classification and liquidity policy applied; historical point-in-time universe is not verified"
+                         if cleaned_contract else "Basic catalog stock filter, not verified common equity; preferred shares, REITs or SPACs may remain"),
+                        ("Only explicit approved 30+1 sample windows are used; session/segment gaps are never bridged"
+                         if cleaned_contract else "Invalid bars are dropped; next valid target may cross a gap"),
                         "Validation/test inputs can use earlier observed bars, never future bars",
                         "Current DB tail may lag the current market date",
                         "No fees, slippage or realized strategy profitability in these labels"],
     }
+    if cleaned_contract:
+        manifest["cleaned_dataset"] = {"schema_version": cleaned_contract[0]["schema_version"],
+                                       "policy": cleaned_contract[0]["policy"],
+                                       "as_of_exclusive": cleaned_contract[0].get("as_of_exclusive"),
+                                       "requires_training_samples": True}
     return PackedDataset(packed_bars, packed_labels, packed_dates, packed_ids, splits, manifest)
 
 

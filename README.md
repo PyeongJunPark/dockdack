@@ -57,6 +57,8 @@
 
 국내·미국 전 종목의 최장 일봉 OHLCV 수집 방법과 수집된 DB 다운로드는 [키움 전 종목 일봉 데이터셋 문서](docs/daily-dataset.md)를 참고한다.
 
+원본을 보존하면서 저유동성·오류 구간을 거르고 30봉 학습 표본을 만드는 방법은 [딥러닝용 일봉 정제](docs/dataset-cleaning.md)를 참고한다.
+
 수집한 일봉으로 다음 거래일 상승 여부를 학습하는 [PyTorch LSTM 예제](docs/lstm-example.md):
 
 ```powershell

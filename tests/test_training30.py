@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import tempfile
 import unittest
 import io
@@ -34,6 +35,245 @@ class Training30Tests(unittest.TestCase):
             for number, symbol in enumerate(symbols):
                 connection.executemany("INSERT INTO daily_bars VALUES (?,?,?,?,?,?,?,?)",
                                        [(symbol, "KRX", *bar) for bar in self.bars("2022-10-01", 180, 100 + number * 100)])
+
+    def cleaned_database(self, path, approved=None, *, market="domestic", all_bars=False):
+        """Use the production schema; the synthetic session calendar is explicit."""
+        from dockdack.clean_daily_dataset import create_schema, write_metadata
+        approved = {"AAA": (0, 70, 130)} if approved is None else approved
+        exchange, currency = ("KRX", "KRW") if market == "domestic" else ("ND", "USD")
+        bars = self.bars("2022-10-01", 180)
+        with closing(sqlite3.connect(path)) as connection, connection:
+            create_schema(connection)
+            write_metadata(connection, {"schema_version": "clean-daily-v1", "build_status": "complete",
+                                       "requires_training_samples": True, "market": market,
+                                       "policy": {"lookback": 30}, "as_of_exclusive": "2023-04-01"})
+            connection.executemany("INSERT INTO sessions VALUES(?,?)", [(bar[0], i) for i, bar in enumerate(bars)])
+            for symbol, starts in approved.items():
+                connection.execute("INSERT INTO instruments VALUES(?,?,?,?,?,?,?,?,?)",
+                                   (symbol, exchange, symbol, symbol, exchange, "0", 0, "{}", "2023-04-01"))
+                selected = (range(len(bars)) if all_bars else
+                            sorted({index for start in starts for index in range(start, start + 31)}))
+                segment, previous, segments = 0, None, {}
+                for index in selected:
+                    if previous is None or index != previous + 1:
+                        segment += 1
+                    segments[index], previous = segment, index
+                    connection.execute("INSERT INTO daily_bars VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                       (symbol, exchange, *bars[index], "100000", None, None, None, None,
+                                        currency, "2023-04-01", segment, index + 1, "[]"))
+                connection.executemany("INSERT INTO training_samples VALUES(?,?,?,?,?,?,?)",
+                                       [(symbol, exchange, bars[start][0], bars[start + 29][0],
+                                         bars[start + 30][0], 0, segments[start]) for start in starts])
+        return bars
+
+    def load_cleaned(self, path, *, market="domestic", **overrides):
+        arguments = dict(start="2022-01-01", train_end="2022-12-31", validation_end="2023-01-31",
+                         max_symbols=5, min_train_bars=31)
+        arguments.update(overrides)
+        return load_dataset(path, market, **arguments)
+
+    def test_cleaned_disjoint_windows_never_bridge_deleted_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            bars = self.cleaned_database(path)
+            before = path.read_bytes()
+            with patch("examples.train_lstm30.make_sample_indices", side_effect=AssertionError("legacy fallback")):
+                data = self.load_cleaned(path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(len(data.bars), 93)
+            for split, expected_start, source_start in (("train", 0, 0), ("validation", 31, 70), ("test", 62, 130)):
+                np.testing.assert_array_equal(data.splits[split], [expected_start])
+                self.assertEqual(data.dates[expected_start], date_number(bars[source_start][0]))
+                self.assertEqual(data.dates[expected_start + 30], date_number(bars[source_start + 30][0]))
+            self.assertEqual(data.manifest["cleaned_dataset"]["schema_version"], "clean-daily-v1")
+            self.assertIn("never bridged", " ".join(data.manifest["limitations"]))
+
+    def test_cleaned_contiguous_union_still_uses_only_explicit_approvals(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path, all_bars=True)
+            data = self.load_cleaned(path)
+            self.assertEqual(len(data.bars), 180)
+            self.assertEqual({key: values.tolist() for key, values in data.splits.items()},
+                             {"train": [0], "validation": [70], "test": [130]})
+            self.assertEqual(data.manifest["symbols"][0]["valid_training_bars"], 31)
+
+    def test_cleaned_start_date_requires_entire_approved_input_and_target_splits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            bars = self.cleaned_database(path, {"AAA": (0, 10, 70, 130)}, all_bars=True)
+            data = self.load_cleaned(path, start=bars[5][0])
+            self.assertEqual(data.splits["train"].tolist(), [5])
+            self.assertEqual(data.dates[data.splits["train"][0] + 30], date_number(bars[40][0]))
+            self.assertEqual(len(data.splits["validation"]), 1)
+            self.assertEqual(len(data.splits["test"]), 1)
+
+    def test_cleaned_future_approvals_cannot_make_symbol_training_eligible(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path, {"AAA": (0, 70, 130), "FUTURE": (70, 130)}, all_bars=True)
+            data = self.load_cleaned(path, max_symbols=1)
+            entries = {entry["symbol"]: entry for entry in data.manifest["symbols"]}
+            self.assertTrue(entries["AAA"]["selected"])
+            self.assertEqual(entries["FUTURE"]["exclusion_reason"], "no_approved_training_samples")
+
+    def test_cleaned_minimum_history_counts_only_approved_training_coverage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path, {"AAA": (0, 70, 130), "ENOUGH": (0, 1, 70, 130)}, all_bars=True)
+            data = self.load_cleaned(path, min_train_bars=32)
+            entries = {entry["symbol"]: entry for entry in data.manifest["symbols"]}
+            self.assertEqual(entries["AAA"]["valid_training_bars"], 31)
+            self.assertEqual(entries["AAA"]["exclusion_reason"], "insufficient_valid_training_history")
+            self.assertTrue(entries["ENOUGH"]["selected"])
+            self.assertEqual(entries["ENOUGH"]["valid_training_bars"], 32)
+
+    def test_cleaned_incomplete_or_invalid_metadata_never_falls_back(self):
+        variants = [("build_status", "building"), ("requires_training_samples", False),
+                    ("requires_training_samples", 1), ("policy", {"lookback": 31}),
+                    ("policy", {"lookback": 30.0}), ("market", "us"),
+                    ("schema_version", "clean-daily-v2")]
+        for key, value in variants:
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("UPDATE metadata SET value=? WHERE key=?", (json.dumps(value), key))
+                with self.assertRaisesRegex(ValueError, "metadata"):
+                    self.load_cleaned(path)
+
+    def test_cleaned_missing_or_malformed_markers_never_fall_back(self):
+        variants = ["DELETE FROM metadata", "UPDATE metadata SET value='not-json' WHERE key='policy'",
+                    "DROP TABLE training_samples", "DROP TABLE metadata",
+                    "ALTER TABLE metadata RENAME COLUMN value TO invalid"]
+        for statement in variants:
+            with self.subTest(statement=statement), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute(statement)
+                with self.assertRaises(ValueError):
+                    self.load_cleaned(path)
+
+    def test_training_sample_view_is_a_cleaned_marker_not_raw_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "marked.sqlite3"
+            self.database(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE VIEW training_samples AS SELECT symbol FROM daily_bars")
+            with self.assertRaisesRegex(ValueError, "metadata"):
+                self.load_cleaned(path)
+
+    def test_cleaned_sample_dates_segments_labels_and_target_volume_must_match(self):
+        variants = ["UPDATE training_samples SET input_start_date='2022-10-02' WHERE input_start_date='2022-10-01'",
+                    "UPDATE training_samples SET input_end_date='2022-10-29' WHERE input_start_date='2022-10-01'",
+                    "UPDATE training_samples SET target_date='2022-11-01' WHERE input_start_date='2022-10-01'",
+                    "UPDATE training_samples SET segment_id=99 WHERE input_start_date='2022-10-01'",
+                    "UPDATE training_samples SET target_up=1 WHERE input_start_date='2022-10-01'",
+                    "UPDATE daily_bars SET volume=0 WHERE trade_date='2022-10-31'",
+                    "UPDATE daily_bars SET segment_id=99 WHERE trade_date='2022-10-15'",
+                    "UPDATE daily_bars SET high=90 WHERE trade_date='2022-10-15'",
+                    "UPDATE daily_bars SET currency='USD' WHERE trade_date='2022-10-15'",
+                    "UPDATE training_samples SET symbol='UNKNOWN'"]
+        for statement in variants:
+            with self.subTest(statement=statement), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute(statement)
+                with self.assertRaises(ValueError):
+                    self.load_cleaned(path)
+
+    def test_cleaned_calendar_gap_cannot_hide_inside_a_segment(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE daily_bars SET trade_date='2022-11-01' WHERE trade_date='2022-10-15'")
+            with self.assertRaisesRegex(ValueError, "segment"):
+                self.load_cleaned(path)
+
+    def test_cleaned_session_calendar_ordinals_are_validated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path)
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE sessions SET ordinal=999 WHERE ordinal=15")
+            with self.assertRaisesRegex(ValueError, "session ordinals"):
+                self.load_cleaned(path)
+
+    def test_cleaned_cutoff_is_canonical_and_excludes_same_day_bars_and_targets(self):
+        for cutoff in (None, "20230401", "bad", "2022-10-31", "2023-03-10"):
+            with self.subTest(cutoff=cutoff), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("UPDATE metadata SET value=? WHERE key='as_of_exclusive'",
+                                       (json.dumps(cutoff),))
+                with self.assertRaises(ValueError):
+                    self.load_cleaned(path)
+
+    def test_cleaned_float32_cast_matches_assessor_without_changing_legacy_bounds(self):
+        from dockdack.dataset_quality import _price
+        for value in ("1e-40", "3.4028235e38"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                self.assertIsNotNone(_price(value))
+                row = ("2022-10-01", value, value, value, value, 1000)
+                if value == "1e-40":
+                    self.assertEqual(len(clean_rows([row])[0]), 0)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("UPDATE daily_bars SET open=?,high=?,low=?,close=?", (value,) * 4)
+                data = self.load_cleaned(path)
+                self.assertTrue(np.isfinite(data.bars).all())
+                self.assertTrue((data.bars[:, :4] > 0).all())
+                self.assertEqual(sum(len(starts) for starts in data.splits.values()), 3)
+
+    def test_cleaned_prices_cannot_underflow_to_zero_or_overflow_float32(self):
+        for value in ("1e-50", "3.4028236e38"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "clean.sqlite3"
+                self.cleaned_database(path)
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("UPDATE daily_bars SET open=?,high=?,low=?,close=?", (value,) * 4)
+                with self.assertRaisesRegex(ValueError, "invalid bars"):
+                    self.load_cleaned(path)
+
+    def test_cleaned_us_schema_and_exact_one_percent_label(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path, market="us")
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("UPDATE daily_bars SET close='101' WHERE trade_date='2022-10-31'")
+                connection.execute("UPDATE training_samples SET target_up=1 WHERE target_date='2022-10-31'")
+            data = self.load_cleaned(path, market="us")
+            self.assertEqual(data.labels[data.splits["train"][0] + 30], 1)
+            self.assertEqual(data.manifest["symbols"][0]["exchange"], "ND")
+
+    def test_loader_reads_contract_and_rows_in_one_query_only_snapshot(self):
+        from examples.train_lstm30 import _clean_database_contract
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "clean.sqlite3"
+            self.cleaned_database(path)
+            def verify(connection, market):
+                self.assertTrue(connection.in_transaction)
+                self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+                return _clean_database_contract(connection, market)
+            with patch("examples.train_lstm30._clean_database_contract", side_effect=verify):
+                self.load_cleaned(path)
+
+    def test_legacy_metadata_and_adjacent_bar_behavior_are_preserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "raw.sqlite3"
+            self.database(path, ("AAA",))
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT)")
+                connection.executemany("INSERT INTO metadata VALUES(?,?)", [("schema_version", "1"), ("market", "domestic")])
+            data = self.load_cleaned(path)
+            self.assertNotIn("cleaned_dataset", data.manifest)
+            self.assertEqual(sum(len(starts) for starts in data.splits.values()), 150)
+            self.assertIn("next valid target may cross a gap", " ".join(data.manifest["limitations"]))
 
     def test_exact_thirty_raw_bars_exclude_target(self):
         dates = np.arange(date_number("2022-01-01"), date_number("2022-01-01") + 31)
