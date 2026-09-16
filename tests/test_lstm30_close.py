@@ -101,6 +101,17 @@ class CloseLiquidatorTests(unittest.TestCase):
     def close_attempts(self):
         return tuple(attempt for attempt in self.store.attempts() if attempt["rule_id"].startswith("close-"))
 
+    def seed_confirmed_rejection(self, item, *, at=None):
+        """Simulate a durable rejection arriving from another order path."""
+        rule = TriggerRule.create(item, "price_ge", "sell", 1, Decimal(1000), Decimal(100))
+        self.store.add_rule(rule)
+        with self.store.connection() as db:
+            db.execute("UPDATE rules SET status='rejected' WHERE id=?", (rule.id,))
+            db.execute("""INSERT INTO attempts(rule_id,watch_id,status,price,started_at,message)
+                           VALUES(?,?,'rejected','500',?,'confirmed business rejection')""",
+                       (rule.id, item.id, (at or self.now).isoformat()))
+        return rule
+
     def test_exact_five_minute_boundary_is_inclusive_but_exchange_close_is_exclusive(self):
         liquidator = self.liquidator()
         for market in Market:
@@ -408,6 +419,7 @@ class CloseLiquidatorTests(unittest.TestCase):
         self.arm()
         self.liquidator().tick()
         self.assertEqual(self.close_attempts()[0]["status"], "rejected")
+        self.assertTrue(self.engine.orders_enabled)
         self.service.submit_error = None
         self.arm()
         self.liquidator().tick()
@@ -428,7 +440,133 @@ class CloseLiquidatorTests(unittest.TestCase):
                 first.tick()
                 self.liquidator().tick()
                 self.assertEqual(len(self.service.submitted), before + 1)
-                self.assertFalse(self.engine.orders_enabled)
+                self.assertEqual(self.engine.orders_enabled, symbol == "REJECT")
+
+    def test_confirmed_rejection_keeps_on_and_continues_next_account_holding(self):
+        self.add_holding(symbol="REJECT", quantity=3)
+        self.add_holding(symbol="CONTINUE", quantity=4)
+        original_submit = self.service.submit
+
+        def reject_first(request):
+            self.service.submit_error = (BrokerAPIError("fake rejection", return_code=2000, status_code=200)
+                                         if request.symbol == "REJECT" else None)
+            return original_submit(request)
+
+        self.arm()
+        with patch.object(self.service, "submit", reject_first):
+            liquidator = self.liquidator()
+            liquidator.tick()
+            liquidator.tick()
+            self.liquidator().tick()
+        self.assertTrue(self.engine.orders_enabled)
+        self.assertEqual([(order.symbol, order.quantity) for order in self.service.submitted],
+                         [("REJECT", 3), ("CONTINUE", 4)])
+        self.assertEqual({row["watch_id"]: row["status"] for row in self.close_attempts()},
+                         {"us:ND:REJECT": "rejected", "us:ND:CONTINUE": "accepted"})
+        self.assertEqual(self.engine.external_policy, self.policy)
+
+    def test_unknown_result_still_stops_later_account_holdings(self):
+        self.add_holding(symbol="UNKNOWN", quantity=3)
+        self.add_holding(symbol="LATER", quantity=4)
+        self.service.submit_error = OrderOutcomeUnknown("fake uncertain transport result")
+        self.arm()
+        status = self.liquidator().tick()
+        self.assertFalse(self.engine.orders_enabled)
+        self.assertEqual([order.symbol for order in self.service.submitted], ["UNKNOWN"])
+        self.assertEqual(self.close_attempts()[0]["status"], "unknown")
+        self.assertEqual(next(row["reason"] for row in status["unsold"] if row["symbol"] == "LATER"),
+                         "ORDERS_OFF_OR_STOPPED")
+
+    def test_ordinary_rejection_quarantines_close_across_restart_without_quote_or_order_queries(self):
+        self.add_holding(symbol="AAPL")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        self.seed_confirmed_rejection(item)
+        self.arm()
+        with patch.object(self.service, "quote", wraps=self.service.quote) as quote, \
+                patch.object(self.service, "safety_orders", wraps=self.service.safety_orders) as orders:
+            for _ in range(2):
+                status = self.liquidator().tick()
+                self.assertEqual(status["unsold"][0]["reason"], "REJECTED_TODAY")
+            quote.assert_not_called()
+            orders.assert_not_called()
+        self.assertTrue(self.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.close_attempts(), ())
+
+    def test_previous_market_day_rejection_does_not_quarantine_new_day_close(self):
+        self.add_holding(symbol="AAPL")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        self.seed_confirmed_rejection(item, at=self.now - timedelta(days=1))
+        self.arm()
+        self.liquidator().tick()
+        self.assertTrue(self.engine.orders_enabled)
+        self.assertEqual([order.symbol for order in self.service.submitted], ["AAPL"])
+        self.assertEqual(self.close_attempts()[0]["status"], "accepted")
+
+    def test_rejection_arriving_during_pacer_blocks_final_close_send_without_global_off(self):
+        self.add_holding(symbol="AAPL")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        self.arm()
+        self.service.before_send = lambda: self.seed_confirmed_rejection(item)
+        self.liquidator().tick()
+        self.assertTrue(self.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.close_attempts()[0]["status"], "not_sent")
+        self.assertTrue(any(row["status"] == "rejected" for row in self.store.attempts(item.id)))
+
+    def test_malformed_rejection_during_pacer_disarms_before_later_holding(self):
+        self.add_holding(symbol="AAPL")
+        self.add_holding(symbol="LATER")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        self.arm()
+
+        def malformed_rejection():
+            rule = self.seed_confirmed_rejection(item)
+            with self.store.connection() as db:
+                db.execute("UPDATE attempts SET started_at='malformed' WHERE rule_id=?", (rule.id,))
+
+        self.service.before_send = malformed_rejection
+        status = self.liquidator().tick()
+        self.assertFalse(self.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(len(self.close_attempts()), 1)
+        self.assertEqual(self.close_attempts()[0]["status"], "not_sent")
+        self.assertEqual(next(row["reason"] for row in status["unsold"] if row["symbol"] == "LATER"),
+                         "ORDERS_OFF_OR_STOPPED")
+
+    def test_malformed_rejection_before_preflight_disarms_without_close_intent(self):
+        self.add_holding(symbol="AAPL")
+        self.add_holding(symbol="LATER")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        rule = self.seed_confirmed_rejection(item)
+        with self.store.connection() as db:
+            db.execute("UPDATE attempts SET started_at='malformed' WHERE rule_id=?", (rule.id,))
+        self.arm()
+        status = self.liquidator().tick()
+        self.assertFalse(self.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.close_attempts(), ())
+        self.assertTrue(status["errors"])
+
+    def test_rejected_quarantine_does_not_mask_new_unknown_order(self):
+        self.add_holding(symbol="AAPL")
+        item = WatchItem(Instrument(Market.US, "AAPL", "ND"), "Apple", 31)
+        self.store.save_item(item)
+        self.seed_confirmed_rejection(item)
+        self.arm()
+        rule = TriggerRule.create(item, "price_ge", "sell", 1, Decimal(1000), Decimal(100))
+        self.store.add_rule(rule)
+        self.assertTrue(self.store.claim(rule, Decimal(500), self.now))
+        self.store.finish(rule.id, "unknown", "uncertain prior order")
+        self.liquidator().tick()
+        self.assertFalse(self.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.close_attempts(), ())
 
     def test_off_or_stop_during_final_pacer_hook_prevents_send(self):
         for action in (self.engine.disarm, self.engine.stop):

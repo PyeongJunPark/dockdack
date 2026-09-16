@@ -1,8 +1,9 @@
-"""US order-price precision, kept separate from unrounded market quotes.
+"""Order-price precision, kept separate from unrounded market quotes.
 
 Kiwoom's US order endpoint accepts cents at $1 or above and four decimal
 places below $1. A current-price BUY never raises the quoted limit; a SELL
 never lowers it. Explicit user prices are validated, never rounded.
+KRX common-equity ticks apply only through the separately scoped helper.
 """
 
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, localcontext
@@ -58,3 +59,48 @@ def current_limit_price(market: Market | str, side: OrderSide | str,
     # A sub-dollar SELL can round up to exactly $1: validate against its new
     # bracket. A sub-tick BUY can round down to zero and must not be sent.
     return validate_us_order_price(quote_price if price == quote_price else price)
+
+
+def _common_equity_tick(price: Decimal) -> Decimal:
+    """KRX common-equity tick grid; not an ETF/ETN or generic instrument rule."""
+    for ceiling, tick in ((2000, 1), (5000, 5), (20000, 10), (50000, 50),
+                          (200000, 100), (500000, 500)):
+        if price < ceiling:
+            return Decimal(tick)
+    return Decimal(1000)
+
+
+def _tick_multiple(price: Decimal, tick: Decimal, rounding: str) -> Decimal:
+    try:
+        with localcontext() as context:
+            # Quantizing to Decimal('500') only removes fractional digits;
+            # division into tick units is required for an actual multiple.
+            # Include integer places for positive-exponent Decimal inputs.
+            context.prec = max(28, len(price.as_tuple().digits) + 4, price.adjusted() + 4)
+            return (price / tick).to_integral_value(rounding=rounding) * tick
+    except InvalidOperation as exc:
+        raise ValueError("국내 보통주 주문 가격을 호가 단위로 계산할 수 없습니다.") from exc
+
+
+def current_common_equity_limit_price(market: Market | str, side: OrderSide | str,
+                                      quote_price: Decimal) -> Decimal:
+    """Side-conservative limit after the caller verified a common equity.
+
+    This deliberately does not change generic/current manual-price handling.
+    Korean ETFs, ETNs and other instruments must not use this stock tick grid.
+    """
+    selected_market, selected_side = Market(market), OrderSide(side)
+    if selected_market is Market.US:
+        return current_limit_price(selected_market, selected_side, quote_price)
+    price = _positive(quote_price, "현재가")
+    rounding = ROUND_FLOOR if selected_side is OrderSide.BUY else ROUND_CEILING
+    tick = _common_equity_tick(price)
+    # A SELL can cross into the next price band. Re-evaluate the resulting
+    # price's tick rather than assuming the original band is still valid.
+    for _ in range(7):
+        price = _positive(_tick_multiple(price, tick, rounding), "국내 보통주 주문 가격")
+        new_tick = _common_equity_tick(price)
+        if new_tick == tick:
+            return price
+        tick = new_tick
+    raise ValueError("국내 보통주 주문 가격의 호가 단위를 확인할 수 없습니다.")
