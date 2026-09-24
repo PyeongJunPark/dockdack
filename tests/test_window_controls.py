@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import tempfile
+import time
 import unittest
 from contextlib import ExitStack
 from decimal import Decimal
@@ -21,6 +22,7 @@ if HAS_QT:
     from dockdack.watch_gui import WatchlistDialog
 
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
+from dockdack.models import Market
 from test_autotrade import FakeTradingService
 from test_gui import FakeService
 
@@ -29,6 +31,9 @@ from test_gui import FakeService
 class WindowControlsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from dockdack.market_schedule import calendar_for
+        for market in Market:
+            calendar_for(market, 2026)
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
@@ -52,6 +57,13 @@ class WindowControlsTests(unittest.TestCase):
             window.deleteLater()
         self.window.stop_monitoring()
         self.assertIsNone(self.window.worker, "Window controls must never start a broker worker")
+        self.window.health_timer.stop()
+        self.window.order_status_timer.stop()
+        deadline = time.monotonic() + 10
+        while self.window._activity_worker or self.window._schedule_probe:
+            self.window.activity_pool.waitForDone(100)
+            self.app.processEvents()
+            self.assertLess(time.monotonic(), deadline, "Display worker did not finish")
         self.window.close()
         self.window.deleteLater()
         self.app.processEvents()
@@ -117,7 +129,7 @@ class WindowControlsTests(unittest.TestCase):
         self.assertFalse(self.window.isMaximized())
         self.assertEqual(self.window.geometry(), geometry)
 
-    def test_fullscreen_returns_to_prior_maximized_state(self):
+    def test_fullscreen_from_maximized_restores_resizable_normal_window(self):
         controls = self.window.window_controls
         normal_geometry = self.window.geometry()
         self.window.showMaximized()
@@ -129,10 +141,40 @@ class WindowControlsTests(unittest.TestCase):
         controls.leave_fullscreen()
         self.process()
         self.assertFalse(self.window.isFullScreen())
-        self.assertTrue(self.window.isMaximized())
-        self.window.showNormal()
-        self.process()
+        self.assertFalse(self.window.isMaximized())
         self.assertEqual(self.window.geometry(), normal_geometry)
+        self.window.resize(1120, 800)
+        self.process()
+        self.assertEqual(self.window.width(), 1120)
+        self.assertEqual(self.window.height(), 800)
+
+    def test_escape_restores_native_maximized_window_without_stopping_session(self):
+        geometry = self.window.geometry()
+        self.simulate_running_session()
+        self.window.showMaximized()
+        self.process()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.process()
+        self.assertFalse(self.window.isMaximized())
+        self.assertFalse(self.window.isFullScreen())
+        self.assertEqual(self.window.geometry(), geometry)
+        self.assert_session_untouched()
+
+    def test_external_fullscreen_entry_captures_latest_normal_size(self):
+        controls = self.window.window_controls
+        controls.toggle_fullscreen()
+        controls.leave_fullscreen()
+        self.window.resize(1120, 800)
+        self.process()
+        geometry = self.window.geometry()
+        self.window.showMaximized()
+        self.window.showFullScreen()
+        self.process()
+        controls.leave_fullscreen()
+        self.process()
+        self.assertFalse(self.window.isMaximized())
+        self.assertFalse(self.window.isFullScreen())
+        self.assertEqual(self.window.geometry(), geometry)
 
     def test_native_titlebar_state_changes_refresh_toolbar_labels(self):
         controls = self.window.window_controls
@@ -154,6 +196,7 @@ class WindowControlsTests(unittest.TestCase):
     def test_minimize_and_taskbar_restore_preserve_fullscreen_return_state(self):
         self.simulate_running_session()
         controls = self.window.window_controls
+        geometry = self.window.geometry()
         self.window.showMaximized()
         controls.toggle_fullscreen()
         self.process()
@@ -171,7 +214,9 @@ class WindowControlsTests(unittest.TestCase):
         self.assertTrue(self.window.isFullScreen())
         controls.leave_fullscreen()
         self.process()
-        self.assertTrue(self.window.isMaximized())
+        self.assertFalse(self.window.isMaximized())
+        self.assertFalse(self.window.isFullScreen())
+        self.assertEqual(self.window.geometry(), geometry)
         self.assert_session_untouched()
 
     def test_f11_toggles_fullscreen_from_focused_input_and_escape_only_leaves_fullscreen(self):
@@ -269,6 +314,7 @@ class WindowControlsTests(unittest.TestCase):
         window.activateWindow()
         self.process()
         self.assert_native_controls_without_duplicate_buttons(window)
+        geometry = window.geometry()
         window.showMaximized()
         self.process()
         self.assertTrue(window.isMaximized())
@@ -278,7 +324,8 @@ class WindowControlsTests(unittest.TestCase):
         QTest.keyClick(window, Qt.Key.Key_Escape)
         self.process()
         self.assertFalse(window.isFullScreen())
-        self.assertTrue(window.isMaximized())
+        self.assertFalse(window.isMaximized())
+        self.assertEqual(window.geometry(), geometry)
         self.assertTrue(window.isVisible())
         self.assertIsNone(window._worker)
         self.assertEqual(service.submitted, [])

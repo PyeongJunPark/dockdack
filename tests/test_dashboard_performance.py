@@ -36,7 +36,8 @@ class DashboardPerformanceTests(unittest.TestCase):
         for item in self.items:
             self.store.save_item(item)
         self.window = WatchlistDialog(self.service, self.store)
-        # The fake broker's candles are dated at NOW, not the wall-clock day.
+        # The fake chart ends on NOW; wall-clock dates eventually make this
+        # UI-only fixture stale even though the production freshness check is correct.
         self.window.engine.clock = lambda: NOW
         self.window.health_timer.stop()
         self.window.order_status_timer.stop()
