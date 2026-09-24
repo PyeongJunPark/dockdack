@@ -16,6 +16,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
+from dockdack.local_data_paths import default_clean_database_dir
 from examples.preview_mark1_prototype_gui import historical_input
 from examples.run_desktop_gui import ROOT, configure_local_dependencies
 
@@ -25,7 +26,7 @@ def main(argv=None):
     parser.add_argument('--mark1-bundle', type=Path, default=ROOT / 'models/mark1_prototype')
     parser.add_argument('--mark11-bundle', type=Path, default=ROOT / 'models/mark1_1_prototype')
     parser.add_argument('--database-dir', type=Path,
-                        default=ROOT.parent / 'dockdack-data-collection/data/kiwoom_daily/clean-20260916-v1')
+                        default=default_clean_database_dir(ROOT))
     parser.add_argument('--day', type=date.fromisoformat, default=date(2024, 7, 15))
     parser.add_argument('--model', action='append', choices=('mark1-prototype', 'mark1-1-prototype'),
                         help='Optional single-model compatibility preview; default runs both together')

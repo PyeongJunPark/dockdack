@@ -18,6 +18,7 @@ import time
 
 import numpy as np
 
+from dockdack.local_data_paths import default_clean_database_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 REPRESENTATIVES = ('AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA')
@@ -81,7 +82,7 @@ def prevalence(take, stop, mask):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--clean', type=Path, default=Path('C:/Users/user/Desktop/dockdack-data-collection/data/kiwoom_daily/clean-20260916-v1/us_daily_clean.sqlite3'))
+    parser.add_argument('--clean', type=Path, default=default_clean_database_dir(ROOT) / 'us_daily_clean.sqlite3')
     parser.add_argument('--cache', type=Path, default=ROOT / 'outputs/mark1/cache/us-7bc645867ce3c050.npz')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/mark1/us-diagnostic-20260916/data-audit.json')
     args = parser.parse_args(argv)
