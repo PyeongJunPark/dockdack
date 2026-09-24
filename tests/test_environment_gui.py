@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
-    from PySide6.QtCore import QDate, QPoint
+    from PySide6.QtCore import QDate, QPoint, QTimer
     from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
     from dockdack.demo_session import SessionController
     from dockdack.environment_gui import confirm_environment
@@ -62,14 +62,28 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.config = self._config_patch.start()
         self.addCleanup(self._config_patch.stop)
         self.window = WatchlistDialog(self.service, self.store)
+        for timer in self.window.findChildren(QTimer):
+            timer.stop()
         self.window.hourly_ranking.setChecked(False)
         self.window.engine.clock = lambda: NOW
         self.candidate = OfflineRealService()
+        self.drain_activity()
+
+    def drain_activity(self):
+        for _ in range(20):
+            self.window.activity_pool.waitForDone(1000)
+            self.app.processEvents()
+            if self.window._activity_worker is None and self.window._schedule_probe is None:
+                return
+        self.fail("offline activity work did not drain")
 
     def tearDown(self):
         self.window.worker = None
         self.window._inspection_worker = None
+        self.drain_activity()
         self.window.close()
+        self.window.activity_pool.waitForDone(5000)
+        self.app.processEvents()
         self.window.deleteLater()
         self.app.processEvents()
         self._config_patch.stop()
@@ -80,6 +94,7 @@ class EnvironmentGuiTests(unittest.TestCase):
         with patch("dockdack.watch_gui.confirm_environment", return_value=True), \
              patch("dockdack.watch_gui.TradingService", return_value=candidate or self.candidate) as factory:
             self.window.request_environment(TradingMode.REAL)
+        self.drain_activity()
         factory.assert_called_once_with(mode=TradingMode.REAL)
 
     def add_ready_rule(self):
@@ -206,6 +221,7 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertFalse(self.window.monitoring)
         self.assertIn("전환 대기", self.window.environment_selector.badge.text())
         self.window._completed({self.item.id: snapshot}, None)
+        self.drain_activity()
         self.assertIs(self.window.service, self.candidate)
         self.assertIs(self.window.store.mode, TradingMode.REAL)
         self.assertIsNone(self.window._pending_environment)
@@ -224,6 +240,7 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertIs(self.window.service, self.service)
         self.window._inspection_worker = None
         self.window._finish_environment_switch()
+        self.drain_activity()
         self.assertIs(self.window.service, self.candidate)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assert_real_not_called()
@@ -266,6 +283,54 @@ class EnvironmentGuiTests(unittest.TestCase):
             self.assertFalse(any("모의계좌" in text for text in texts), texts)
             self.assertTrue(any("실전" in text or "실제투자" in text for text in texts), texts)
         self.assertIn("REAL", self.window.trade_journal_panel.mode_badge.text())
+
+    def seed_displayed_demo_logs(self):
+        views = {**self.window.operations_panel.logs, "order": self.window.order_history_panel.audit}
+        with patch("dockdack.watchlist.utc_now", return_value=NOW):
+            for category in views:
+                self.store.event("SYSTEM", f"DEMO-only {category}", category=category)
+        heads = self.store.event_heads()
+        for category, view in views.items():
+            view.reload(self.store, head=heads[category], force=True)
+            self.assertEqual(view.table.rowCount(), 1)
+            self.assertIn("DEMO-only", view.table.item(0, 2).text())
+        return views, heads
+
+    def test_real_switch_clears_demo_logs_even_when_new_background_query_fails(self):
+        views, _ = self.seed_displayed_demo_logs()
+        with patch("dockdack.watch_gui.collect_event_logs", side_effect=RuntimeError("offline REAL log failure")) as collect:
+            self.switch()
+        self.assertGreaterEqual(collect.call_count, 1)
+        self.assertIs(self.window.service, self.candidate)
+        self.assertIs(self.window.store.mode, TradingMode.REAL)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        self.assertIn("offline REAL log failure", self.window._last_log_error)
+        for view in views.values():
+            self.assertEqual(view.table.rowCount(), 0)
+            self.assertIsNone(view.latest)
+            self.assertIsNone(view._head)
+        self.assertEqual(self.window.operations_panel.flow.text(), "최근 감시 기록 — · 최근 신호 수신 —")
+        self.assert_real_not_called()
+
+    def test_real_switch_reloads_new_logs_when_category_heads_match_demo(self):
+        views, demo_heads = self.seed_displayed_demo_logs()
+        real_store = WatchStore(Path(self.temp.name) / "same-head-real.sqlite3",
+                                mode=TradingMode.REAL, storage_scope="unconfigured")
+        with patch("dockdack.watchlist.utc_now", return_value=NOW):
+            for category in views:
+                real_store.event("SYSTEM", f"REAL-only {category}", category=category)
+        self.assertEqual(real_store.event_heads(), demo_heads)
+        self.window._environment_stores[(TradingMode.REAL, "unconfigured")] = real_store
+        self.switch()
+        self.assertIs(self.window.store, real_store)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        for category, view in views.items():
+            self.assertEqual(view.table.rowCount(), 1)
+            self.assertEqual(view.table.item(0, 2).text(), f"REAL-only {category}")
+            self.assertEqual(view._head, demo_heads[category])
+        self.assert_real_not_called()
 
     def test_progress_identifies_quote_sweep_and_journal_is_third_primary_tab(self):
         progress = self.window.sweep_progress
@@ -310,6 +375,7 @@ class EnvironmentGuiTests(unittest.TestCase):
         with patch("dockdack.watch_gui.confirm_environment", return_value=True), \
              patch("dockdack.watch_gui.TradingService", return_value=new_demo):
             self.window.request_environment(TradingMode.DEMO)
+        self.drain_activity()
         self.assertIs(self.window.store, self.store)
         self.assertEqual(self.window.store.path.name, "custom-demo.sqlite3")
         self.assertEqual(len(self.window.store.rules()), 1)
@@ -339,6 +405,7 @@ class EnvironmentGuiTests(unittest.TestCase):
     def test_integrated_journal_keeps_readable_rows_at_desktop_and_small_window_sizes(self):
         panel = self.window.trade_journal_panel
         self.window.workspace_tabs.setCurrentWidget(panel)
+        self.drain_activity()
         panel.dates["domestic"].setDate(QDate(2026, 9, 15))
         panel.refresh(records=[order(1), order(2, "sell", "110"), order(3, "sell", "100", symbol="000001")])
         self.window.show()

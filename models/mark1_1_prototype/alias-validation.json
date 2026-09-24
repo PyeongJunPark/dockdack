@@ -1,0 +1,209 @@
+{
+  "identity_only_alias": true,
+  "passed": true,
+  "prediction_comparisons": 24,
+  "risk_flags": {
+    "deployment_allowed": false,
+    "intraday_path_verified": false,
+    "known_data_quality_issues": true,
+    "research_only": true,
+    "research_qualified": false
+  },
+  "rows": [
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 0,
+      "market": "domestic",
+      "probability_stop": 0.7210641215466759,
+      "probability_success": 0.2731348177352199
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 0,
+      "market": "domestic",
+      "probability_stop": 0.8197754309622896,
+      "probability_success": 0.1766005765709555
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 0,
+      "market": "domestic",
+      "probability_stop": 0.8909114741105426,
+      "probability_success": 0.10800805199852646
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 1,
+      "market": "domestic",
+      "probability_stop": 0.7060515645634307,
+      "probability_success": 0.2885230065454638
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 1,
+      "market": "domestic",
+      "probability_stop": 0.812721273244626,
+      "probability_success": 0.18393776809498874
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 1,
+      "market": "domestic",
+      "probability_stop": 0.880524848831845,
+      "probability_success": 0.11755684826359566
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 2,
+      "market": "domestic",
+      "probability_stop": 0.7333819836612322,
+      "probability_success": 0.26188766028708266
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 2,
+      "market": "domestic",
+      "probability_stop": 0.8043135733483411,
+      "probability_success": 0.19274906876107595
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 2,
+      "market": "domestic",
+      "probability_stop": 0.8847981659779987,
+      "probability_success": 0.11408496200585089
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 3,
+      "market": "domestic",
+      "probability_stop": 0.6961761470290172,
+      "probability_success": 0.2492393918988055
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 3,
+      "market": "domestic",
+      "probability_stop": 0.828644899477325,
+      "probability_success": 0.11305413550335339
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 3,
+      "market": "domestic",
+      "probability_stop": 0.8669618617707456,
+      "probability_success": 0.10416571717883627
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 0,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.3142005373899621
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 0,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.25160693057473155
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 0,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.19715416061768265
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 1,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.30592579444189666
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 1,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.23304910553212738
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 1,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.17387211024652674
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 2,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.36692584660075667
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 2,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.3176706937072703
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 2,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.2579041854033591
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 0.9975,
+      "history": 3,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.11078231425648659
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0,
+      "history": 3,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.06531114686648307
+    },
+    {
+      "absolute_error": 0.0,
+      "candidate_factor": 1.0025,
+      "history": 3,
+      "market": "us",
+      "probability_stop": null,
+      "probability_success": 0.04715655006762152
+    }
+  ],
+  "scope": "CPU numerical equality on four deterministic synthetic histories and three prices per market; not a profitability or deployment test",
+  "source_bundle_manifest_sha256": "570ce10050b912dfd9f790ef4f5e393cfcb9ea5f73e49c3819b3396fff12a5fb",
+  "source_files_unchanged": true
+}

@@ -1,14 +1,17 @@
 """Bounded, read-only broker history recovery for the existing local order ledger.
 
-Runs inside the GUI's single broker worker. It never changes order permission,
-attempt status, or submits/cancels an order. Unknown fill prices stay unknown.
+Runs inside the GUI's single broker worker. It never changes order permission
+or submits/cancels an order. Exact dated US evidence may settle an already
+accepted order as fully filled; unknown/submitting orders are never unlocked.
+Unknown fill prices stay unknown.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from dockdack.history import market_time
 from dockdack.models import ExecutionHistoryRecord, Market, OrderSide, TradingMode
@@ -48,6 +51,31 @@ def _local_key(row):
     market, day = _scope(row)
     return (market, day, normalized_order_number(row["order_number"]), row["symbol"],
             OrderSide(row["side"]), Decimal(row["quantity"]))
+
+
+def _us_timestamp_matches(row, record):
+    """Corroborate a returned broker date/time, without assuming its timezone.
+
+    Official ust21180 labels the date and time but not their timezone. A row
+    is usable only if interpreting BOTH in Seoul or New York independently
+    matches our recorded send intent (small server/pacing allowance). Merely
+    receiving an order number in a date-range response is not sufficient.
+    """
+    if record.source_api != "ust21180" or type(record.broker_order_date) is not date:
+        return False
+    try:
+        parsed = datetime.strptime(record.order_time, "%H:%M:%S" if ":" in record.order_time else "%H%M%S").time()
+        reported = datetime.combine(record.broker_order_date, parsed)
+        started = datetime.fromisoformat(row["started_at"])
+        if started.tzinfo is None:
+            return False
+    except (TypeError, ValueError):
+        return False
+    matches = []
+    for zone in ("America/New_York", "Asia/Seoul"):
+        local = started.astimezone(ZoneInfo(zone)).replace(tzinfo=None)
+        matches.append(-5 <= (reported - local).total_seconds() <= 180)
+    return sum(matches) == 1
 
 
 class FillRecovery:
@@ -90,8 +118,21 @@ class FillRecovery:
 
     @staticmethod
     def _candidate(row):
+        # Today's reconciliation cannot resolve an older US order. Recheck
+        # accepted history even if a previous pass already saved its price;
+        # this also survives a crash between evidence persistence and settling.
+        if row["market"] == Market.US.value and row["status"] == "accepted":
+            return True
         if _positive(row["fill_price"]):
-            return False
+            filled = row["filled_quantity"] or (row["quantity"] if row["status"] == "filled" else None)
+            if _positive(filled):
+                if Decimal(row["quantity"]) == Decimal(filled) == 1:
+                    return False
+                if (row.get("recovery_price_basis") in {"broker_average", "weighted_fills"}
+                        and _positive(row.get("price_basis_quantity")) and _positive(row.get("price_basis_price"))
+                        and Decimal(row["price_basis_quantity"]) == Decimal(filled)
+                        and Decimal(row["price_basis_price"]) == Decimal(row["fill_price"])):
+                    return False
         return (row["status"] in {"filled", "accepted"}
                 or row["status"] == "cancelled" and _positive(row["filled_quantity"]))
 
@@ -127,6 +168,10 @@ class FillRecovery:
         if not matching:
             self._save(row, "not_found", "조회일의 주문번호·종목·방향·수량이 일치하는 체결 내역 없음")
             return False
+        if key[0] is Market.US:
+            corroborated = [record for record in matching if _us_timestamp_matches(row, record)]
+            if corroborated:
+                matching = corroborated
         if len(matching) != 1:
             self._save(row, "ambiguous", "동일 주문의 복수/상충 내역으로 체결가 미확인")
             return False
@@ -137,20 +182,15 @@ class FillRecovery:
             self._save(row, "ambiguous", "동일 주문번호의 로컬 후보가 여러 개여서 거래소/주문 일치 미확인")
             return False
         metadata = {"source_api": record.source_api, "price_basis": record.price_basis,
-                    "order_date": record.order_date.isoformat(), "order_time": record.order_time,
+                    "order_date": (record.broker_order_date or record.order_date).isoformat(), "order_time": record.order_time,
                     "fill_time": record.fill_time, "reported_fill_price": record.reported_fill_price}
         if record.original_order_number.strip("0 "):
             self._save(row, "ambiguous", "정정·취소 원주문 연결이 있는 내역은 자동 체결가 보완하지 않음", **metadata)
             return False
-        if record.market is Market.US:
-            # ust21150 does not return an independently identified order date,
-            # and its query date timezone is undocumented. order_date is only
-            # our query scope: equality cannot prove that a recycled order
-            # number belongs to the local New York trading date. Even a known
-            # venue / single-share price cannot bridge that missing evidence.
+        if record.market is Market.US and not _us_timestamp_matches(row, record):
             metadata["price_basis"] = "date_scope_unverified"
             self._save(row, "ambiguous",
-                       "미국 주문일자의 시간대 근거 미확인 · 조회 날짜만으로 실제 주문일을 확정할 수 없어 "
+                       "미국 주문일자의 시간대 근거 미확인 · 반환 주문일·시각과 로컬 주문시각을 대조할 수 없어 "
                        "체결가·체결수량을 기존 주문에 반영하지 않음", **metadata)
             return False
         previous_qty = (Decimal(row["filled_quantity"]) if row["filled_quantity"] is not None
@@ -158,15 +198,28 @@ class FillRecovery:
         if record.filled_quantity < previous_qty:
             self._save(row, "quantity_conflict", "기존 확인 체결 수량보다 적은 응답 · 기존 기록 유지", **metadata)
             return False
-        # The dated APIs expose an execution price without proven multi-fill
-        # VWAP semantics. Only a single filled share proves its unit cost.
-        usable = (record.price_basis == "single_share" and record.order_quantity == record.filled_quantity == 1
-                  and isinstance(record.fill_price, Decimal) and _positive(record.fill_price))
+        single_share = record.price_basis == "single_share" and record.order_quantity == record.filled_quantity == 1
+        broker_average = (record.source_api == "ust21180" and record.price_basis == "broker_average"
+                          and _positive(record.filled_quantity) and _positive(record.fill_amount)
+                          and record.fill_price == record.fill_amount / record.filled_quantity)
+        usable = (single_share or broker_average) and isinstance(record.fill_price, Decimal) and _positive(record.fill_price)
+        if usable and broker_average:
+            metadata.update(price_basis_quantity=record.filled_quantity, price_basis_price=record.fill_price)
         status = "enriched" if usable else "price_unknown"
-        message = (f"주문번호 {row['order_number']} · 1주 체결가 {record.fill_price} {record.currency} 확인"
+        message = (f"주문번호 {row['order_number']} · {record.filled_quantity}주 "
+                   f"{'평균 체결가' if broker_average else '체결가'} {record.fill_price} {record.currency} 확인"
                    if usable else "체결 수량 조회 완료 · 유효 체결가/다수 체결 평균가 근거 미확인")
         self._save(row, status, message, **metadata, filled_quantity=record.filled_quantity,
                    remaining_quantity=record.remaining_quantity, fill_price=record.fill_price if usable else None)
+        if (record.market is Market.US and row["status"] == "accepted"
+                and record.filled_quantity == record.order_quantity and record.remaining_quantity == 0):
+            # All identity/date/time/quantity checks above have succeeded.
+            # In particular this is NOT absence from an open-order list and
+            # never applies to unknown/submitting or a partial cancellation.
+            self._check_environment()
+            self.store.finish(row["rule_id"], "filled",
+                              f"주문번호 {row['order_number']} · 미국 기간내역 주문일시 대조 · "
+                              f"{record.filled_quantity}주 전체 체결 확인")
         return usable
 
     def refresh_due(self, force=False, stopped=lambda: False):

@@ -1,16 +1,16 @@
 """Explicit-market TOP100 ownership for the DEMO LSTM dashboard.
 
-The broker's top_turnover contract already verifies common-equity classification
+The broker's top_volume contract already verifies common-equity classification
 and refuses a short result. Ranking refreshes preserve the existing WatchStore
-ledger, manual interests, held names and pending/unresolved orders.
+ledger, manual interests and pending/unresolved orders. Holdings outside the
+ranking are monitored by the independent exit scan, not retained as buy interests.
 """
 
-from datetime import datetime, timezone
 from decimal import Decimal
+from time import monotonic
 
 from dockdack.gui_service import Instrument
-from dockdack.history import market_time
-from dockdack.market_schedule import RankingScheduler, is_open, session_on
+from dockdack.market_schedule import RankingScheduler, is_open, ranking_allowed
 from dockdack.models import Market, TradingMode
 from dockdack.universe import RankedStock
 from dockdack.watchlist import WatchItem, utc_now
@@ -32,6 +32,7 @@ class LSTM30Universe:
         self._ranked_ids = {}
         self.updated_at = {}
         self.errors = {}
+        self._validated_at = float("-inf")
         self._check_demo()
         # The exact baseline was explicitly accepted above; upgrade its legacy
         # lookback without changing managed/manual ownership or order history.
@@ -46,13 +47,21 @@ class LSTM30Universe:
     def items(self):
         return self.store.items()
 
-    def validate_active(self):
+    def validate_active(self, *, force=True):
         self._check_demo()
+        if not force and monotonic() - self._validated_at < 1:
+            return
         actual = self.items()
         if frozenset(item.id for item in actual) != self.approved_ids:
             raise ValueError("검증된 LSTM30 순위 갱신 이외의 관심종목 변경을 차단했습니다.")
         if any(item.days < 31 for item in actual):
             raise ValueError("LSTM30 관심종목은 최소 31개 일봉을 요청해야 합니다.")
+        self._validated_at = monotonic()
+
+    def ready_for_open_markets(self):
+        """A closed US session must not block an independently ready KR session."""
+        now = self.clock()
+        return all(market in self._ready_markets for market in self.ranked_markets if is_open(market, now))
 
     @staticmethod
     def _validate_rankings(market, rankings):
@@ -65,15 +74,16 @@ class LSTM30Universe:
                 raise ValueError("해당 시장의 검증된 보통주 순위 응답이 필요합니다.")
             item = WatchItem(Instrument(row.market, row.symbol, row.exchange), row.name, 31)
             if (row.currency != item.instrument.currency or not isinstance(row.turnover, Decimal)
-                    or not row.turnover.is_finite() or row.turnover < 0 or type(row.rank) is not int):
-                raise ValueError("순위의 통화·거래대금·순번을 확인할 수 없습니다.")
+                    or not row.turnover.is_finite() or row.turnover < 0 or type(row.rank) is not int
+                    or row.ranking_basis != "volume" or type(row.volume) is not int or row.volume < 0):
+                raise ValueError("순위의 통화·거래량·순번을 확인할 수 없습니다.")
             keys.add(item.id)
             ranks.add(row.rank)
         if len(keys) != 100 or ranks != set(range(1, 101)):
             raise ValueError("서로 다른 보통주 100개와 1~100 순번이 필요합니다.")
         return rows, frozenset(keys)
 
-    def refresh(self, market, *, require_open=False):
+    def refresh(self, market, *, require_open=False, guard=None):
         market = Market(market)
         if market not in self.ranked_markets:
             raise ValueError("이 시장의 TOP100 재선정은 승인되지 않았습니다.")
@@ -81,20 +91,24 @@ class LSTM30Universe:
         if self.stopped():
             raise InterruptedError("감시 중지로 순위 갱신을 하지 않습니다.")
         try:
+            if not ranking_allowed(market, self.clock()) or (require_open and not is_open(market, self.clock())):
+                raise InterruptedError("개장 10분 전 준비/정규장 시간이 아니어서 순위를 조회하지 않습니다.")
             # Classification and pagination are fail-closed in the service's
-            # top_turnover implementation; never make up the missing names.
-            rankings, incoming = self._validate_rankings(market, self.service.top_turnover(market, 100))
+            # top_volume implementation; never make up the missing names.
+            rankings, incoming = self._validate_rankings(market, self.service.top_volume(market, 100))
             protected = self.service.protected_symbols(market)
             if (not isinstance(protected, (set, frozenset))
                     or any(not isinstance(symbol, str) or not symbol for symbol in protected)):
                 raise ValueError("전체 보유/미체결 보호 종목을 확인할 수 없습니다.")
             if self.stopped():
                 raise InterruptedError("중지 요청으로 순위 결과를 적용하지 않습니다.")
-            if require_open and not is_open(market, self.clock()):
+            if not ranking_allowed(market, self.clock()) or (require_open and not is_open(market, self.clock())):
                 raise InterruptedError("정규장이 종료되어 순위 결과를 적용하지 않습니다.")
+            if guard is not None:
+                guard()
             self.validate_active()
             allowed = self.approved_ids | incoming
-            self.store.replace_ranked(market, rankings, set(protected), days=31)
+            self.store.replace_ranked(market, rankings, set(protected), days=31, separate_holdings=True)
             current = self.items()
             if not {item.id for item in current} <= allowed:
                 raise ValueError("순위 교체 중 승인되지 않은 종목이 추가되었습니다.")
@@ -118,10 +132,31 @@ class LSTM30Universe:
             raise
 
     def bootstrap(self):
+        """Prepare only eligible markets, using the same durable slots as refresh.
+
+        Closed markets are deferred, not queried or treated as an error. A
+        restart can adopt a persisted, classified volume list without issuing a
+        second request for an already completed slot.
+        """
         self.validate_active()
-        for market in sorted(self.ranked_markets, key=lambda value: value.value):
-            self.refresh(market)
+        self._restore_ranked_state()
+        scheduler = ScopedRankingScheduler(self.service, self.store, universe=self,
+                                           clock=self.clock, stopped=self.stopped)
+        scheduler.start()
+        scheduler.tick()
         return self.items()
+
+    def _restore_ranked_state(self):
+        rows = self.store.rankings()
+        active = {item.id for item in self.items()}
+        for market in self.ranked_markets:
+            current = [row for row in rows if row["market"] == market.value
+                       and row.get("ranking_basis") == "volume" and row["watch_id"] in active]
+            if len(current) == 100 and {row["rank"] for row in current} == set(range(1, 101)):
+                self._ranked_ids[market] = frozenset(row["watch_id"] for row in current)
+                self._ready_markets.add(market)
+                self.updated_at[market] = max(row["fetched_at"] for row in current)
+        self.initialized = self._ready_markets == self.ranked_markets
 
     def status(self):
         items = self.items()
@@ -134,6 +169,7 @@ class LSTM30Universe:
                     "active_count": sum(item.instrument.market is market for item in items),
                     "retained_extra_count": sum(item.instrument.market is market and item.id not in self._ranked_ids.get(market, ()) for item in items),
                     "updated_at": self.updated_at.get(market), "error": self.errors.get(market, ""),
+                    "ranking_basis": "volume", "ranking_allowed": ranking_allowed(market, self.clock()),
                 } for market in Market
             },
         }
@@ -146,17 +182,12 @@ class ScopedRankingScheduler(RankingScheduler):
         super().__init__(service, store, clock=clock, stopped=stopped)
         self.universe, self.on_error = universe, on_error
 
-    def _slot(self, market, now):
-        session = session_on(market, market_time(market, now).date())
-        if not session or not session.opened <= now < session.closed:
-            return None
-        slots = [slot for slot in session.slots() if self.started <= slot <= now]
-        if not slots or (now - slots[-1]).total_seconds() > 300:
-            return None
-        return slots[-1].astimezone(timezone.utc).isoformat()
+    @property
+    def markets(self):
+        return tuple(sorted(self.universe.ranked_markets, key=lambda value: value.value))
 
     def _error(self, market, exc):
-        message = f"{market.value} TOP100 갱신 실패 · 기존 목록 유지 · 자동주문 OFF: {exc}"
+        message = f"{market.value} 거래량 TOP100 갱신 실패 · 기존 목록 유지 · 다음 재시도 대기: {exc}"
         if self.errors.get(market) != message:
             self.store.event("SYSTEM", message, category="system")
             self.errors[market] = message
@@ -164,53 +195,8 @@ class ScopedRankingScheduler(RankingScheduler):
             self.on_error(market, exc)
 
     def record_bootstrap(self):
-        """A successful initial fetch also satisfies this session's current slot."""
-        if self.started is None or self.stopped() or not self.universe.initialized:
-            return
-        now = self.clock()
-        for market in sorted(self.universe.ranked_markets, key=lambda value: value.value):
-            slot = self._slot(market, now)
-            if slot is not None and self.store.claim_ranking_run(market, slot, now):
-                self.store.finish_ranking_run(market, slot, "done", "초기 LSTM30 TOP100 확정으로 현재 개장/정시 슬롯 처리 완료")
+        """Compatibility hook: bootstrap now owns/finishes its durable claims."""
+        return None
 
-    def due(self):
-        if self.started is None or self.stopped() or not self.universe.initialized:
-            return False
-        now = self.clock()
-        for market in sorted(self.universe.ranked_markets, key=lambda value: value.value):
-            try:
-                slot = self._slot(market, now)
-                if slot is None:
-                    continue
-                with self.store.connection() as db:
-                    row = db.execute("SELECT * FROM ranking_runs WHERE market=? AND slot=?", (market.value, slot)).fetchone()
-                if row is None or (row["status"] == "failed" and row["attempts"] < 3
-                                   and (now-datetime.fromisoformat(row["attempted_at"])).total_seconds() >= 60):
-                    return True
-            except Exception as exc:
-                self._error(market, exc)
-        return False
-
-    def tick(self):
-        changed = False
-        if self.started is None or self.stopped() or not self.universe.initialized:
-            return changed
-        for market in sorted(self.universe.ranked_markets, key=lambda value: value.value):
-            try:
-                now = self.clock()
-                slot = self._slot(market, now)
-                if slot is None or not self.store.claim_ranking_run(market, slot, now):
-                    continue
-                try:
-                    if not is_open(market, self.clock()):
-                        raise InterruptedError("정규장이 종료되어 순위 결과를 적용하지 않습니다.")
-                    self.universe.refresh(market, require_open=True)
-                    self.store.finish_ranking_run(market, slot, "done", "LSTM30 보통주 TOP100 · 31개 일봉 갱신 완료")
-                    changed = True
-                except Exception as exc:
-                    self.store.finish_ranking_run(market, slot, "failed", str(exc))
-                    raise
-                self.errors.pop(market, None)
-            except Exception as exc:
-                self._error(market, exc)
-        return changed
+    def _refresh_market(self, market, guard):
+        self.universe.refresh(market, guard=guard)

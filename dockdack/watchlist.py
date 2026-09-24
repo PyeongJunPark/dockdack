@@ -191,6 +191,10 @@ class WatchStore:
                     rule_id TEXT PRIMARY KEY REFERENCES rules(id), watch_id TEXT NOT NULL,
                     status TEXT NOT NULL, price TEXT NOT NULL, started_at TEXT NOT NULL,
                     order_number TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS rules_by_status_watch ON rules(status,watch_id);
+                CREATE INDEX IF NOT EXISTS rules_by_watch_status ON rules(watch_id,status);
+                CREATE INDEX IF NOT EXISTS attempts_by_watch_status ON attempts(watch_id,status);
+                CREATE INDEX IF NOT EXISTS attempts_by_status ON attempts(status);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, symbol TEXT NOT NULL, message TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS event_categories (
@@ -212,6 +216,19 @@ class WatchStore:
                     fill_time TEXT NOT NULL DEFAULT '', reported_fill_price TEXT);
                 CREATE TABLE IF NOT EXISTS snapshots (watch_id TEXT PRIMARY KEY, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS position_exit_targets (
+                    watch_id TEXT PRIMARY KEY REFERENCES watchlist(id),
+                    take_profit_price TEXT NOT NULL, stop_loss_price TEXT NOT NULL,
+                    source TEXT NOT NULL, rule_id TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS order_retries (
+                    rule_id TEXT PRIMARY KEY REFERENCES rules(id), root_rule_id TEXT NOT NULL REFERENCES rules(id),
+                    sequence INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS prototype_sell_allocations (
+                    rule_id TEXT PRIMARY KEY REFERENCES rules(id),
+                    lot_id TEXT NOT NULL REFERENCES attempts(rule_id),
+                    quantity TEXT NOT NULL, created_at TEXT NOT NULL,
+                    buy_filled_quantity TEXT, buy_average_price TEXT);
+                CREATE INDEX IF NOT EXISTS prototype_sells_by_lot ON prototype_sell_allocations(lot_id);
                 CREATE TABLE IF NOT EXISTS turnover_ranks (
                     market TEXT NOT NULL, rank INTEGER NOT NULL, watch_id TEXT NOT NULL,
                     turnover TEXT NOT NULL, currency TEXT NOT NULL, fetched_at TEXT NOT NULL,
@@ -229,6 +246,9 @@ class WatchStore:
                     received_at TEXT NOT NULL, decision TEXT NOT NULL, status TEXT NOT NULL,
                     PRIMARY KEY(source_id, signal_id));
                 CREATE INDEX IF NOT EXISTS external_by_watch ON external_signals(watch_id, source_id);
+                CREATE INDEX IF NOT EXISTS external_latest ON external_signals(source_id,watch_id,generated_at DESC);
+                CREATE INDEX IF NOT EXISTS external_by_rule ON external_signals(rule_id);
+                CREATE INDEX IF NOT EXISTS retries_by_root ON order_retries(root_rule_id,sequence);
                 CREATE TABLE IF NOT EXISTS managed_watchlist (watch_id TEXT PRIMARY KEY REFERENCES watchlist(id));
                 CREATE TABLE IF NOT EXISTS history_cache (watch_id TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS test_decisions (export_id TEXT NOT NULL, watch_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(export_id,watch_id));
@@ -250,6 +270,35 @@ class WatchStore:
                                ON CONFLICT(event_id) DO UPDATE SET category=excluded.category;
                            END""")
             db.execute("BEGIN IMMEDIATE")
+            rank_columns = {row[1] for row in db.execute("PRAGMA table_info(turnover_ranks)")}
+            if "volume" not in rank_columns:
+                db.execute("ALTER TABLE turnover_ranks ADD COLUMN volume TEXT")
+            if "ranking_basis" not in rank_columns:
+                db.execute("ALTER TABLE turnover_ranks ADD COLUMN ranking_basis TEXT NOT NULL DEFAULT 'turnover'")
+            recovery_columns = {row[1] for row in db.execute("PRAGMA table_info(order_fill_recovery)")}
+            for column in ("price_basis_quantity", "price_basis_price"):
+                if column not in recovery_columns:
+                    db.execute(f"ALTER TABLE order_fill_recovery ADD COLUMN {column} TEXT")
+            lot_columns = {row[1] for row in db.execute("PRAGMA table_info(prototype_sell_allocations)")}
+            for column in ("buy_filled_quantity", "buy_average_price"):
+                if column not in lot_columns:
+                    db.execute(f"ALTER TABLE prototype_sell_allocations ADD COLUMN {column} TEXT")
+            db.execute("CREATE TABLE IF NOT EXISTS ledger_revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)")
+            db.execute("INSERT OR IGNORE INTO ledger_revision VALUES(1,0)")
+            for table_name in ("attempts", "order_execution_snapshots", "order_fill_recovery", "rules", "watchlist", "prototype_sell_allocations"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    ref = "OLD" if operation == "DELETE" else "NEW"
+                    condition = ""
+                    if table_name == "rules":
+                        condition = f"WHEN EXISTS(SELECT 1 FROM attempts WHERE rule_id={ref}.id)"
+                    elif table_name == "watchlist":
+                        # Membership-only changes do not affect the order ledger.
+                        condition = f"WHEN EXISTS(SELECT 1 FROM attempts WHERE watch_id={ref}.id)"
+                        if operation == "UPDATE":
+                            condition += " AND (OLD.name IS NOT NEW.name OR OLD.symbol IS NOT NEW.symbol OR OLD.market IS NOT NEW.market OR OLD.exchange IS NOT NEW.exchange)"
+                    db.execute(f"""CREATE TRIGGER IF NOT EXISTS ledger_revision_{table_name}_{operation.lower()}
+                        AFTER {operation} ON {table_name} {condition} BEGIN
+                        UPDATE ledger_revision SET version=version+1 WHERE singleton=1; END""")
             if not db.execute("SELECT 1 FROM settings WHERE key='event_category_index_v1'").fetchone():
                 # Add only missing metadata; keep all original rows and explicit categories.
                 db.execute(f"""INSERT OR IGNORE INTO event_category_index(event_id,category)
@@ -303,7 +352,7 @@ class WatchStore:
             if not watch_ids:
                 return ()
         sql = """SELECT w.*,s.data AS snapshot_data,h.fetched_at AS history_fetched_at,
-                        t.rank AS turnover_rank,t.turnover,t.fetched_at AS ranking_fetched_at
+                        t.rank AS turnover_rank,t.turnover,t.volume,t.ranking_basis,t.fetched_at AS ranking_fetched_at
                  FROM watchlist w LEFT JOIN snapshots s ON s.watch_id=w.id
                  LEFT JOIN history_cache h ON h.watch_id=w.id
                  LEFT JOIN turnover_ranks t ON t.watch_id=w.id AND t.market=w.market
@@ -349,12 +398,14 @@ class WatchStore:
                            (item.id, item.instrument.market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
                 if new:
                     db.execute("INSERT INTO managed_watchlist VALUES (?)", (item.id,))
-                db.execute("INSERT INTO turnover_ranks VALUES (?, ?, ?, ?, ?, ?)",
-                           (rank.market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now))
-            self._insert_event(db, "SYSTEM", f"시장별 거래대금 상위 {len(items)}종목 추가/갱신 · 기존 관심종목 유지",
+                db.execute("INSERT INTO turnover_ranks(market,rank,watch_id,turnover,currency,fetched_at,volume,ranking_basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (rank.market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now,
+                            str(rank.volume) if getattr(rank, "volume", None) is not None else None, getattr(rank, "ranking_basis", "turnover")))
+            ranking_label = "거래량" if all(getattr(rank, "ranking_basis", "turnover") == "volume" for _, rank in items) else "거래대금"
+            self._insert_event(db, "SYSTEM", f"시장별 {ranking_label} 상위 {len(items)}종목 추가/갱신 · 기존 관심종목 유지",
                                category="system", at=datetime.fromisoformat(now))
 
-    def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30):
+    def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30, *, separate_holdings=False):
         pairs = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r) for r in rankings]
         if len(pairs) != 100 or len({i.id for i, _ in pairs}) != 100 or any(r.market is not market for _, r in pairs):
             raise ValueError("해당 시장의 서로 다른 100종목이 필요합니다.")
@@ -364,7 +415,7 @@ class WatchStore:
             db.execute("BEGIN IMMEDIATE")
             removable = []
             for row in db.execute("SELECT w.* FROM watchlist w JOIN managed_watchlist m ON m.watch_id=w.id WHERE w.active=1 AND w.market=?", (market.value,)):
-                if row["id"] in incoming or row["symbol"] in protected_symbols:
+                if row["id"] in incoming or (row["symbol"] in protected_symbols and not separate_holdings):
                     continue
                 if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','unknown','accepted')", (row["id"],)).fetchone():
                     continue
@@ -386,8 +437,9 @@ class WatchStore:
                            (item.id, market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
                 if new:
                     db.execute("INSERT INTO managed_watchlist VALUES (?)", (item.id,))
-                db.execute("INSERT INTO turnover_ranks VALUES (?, ?, ?, ?, ?, ?)",
-                           (market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now))
+                db.execute("INSERT INTO turnover_ranks(market,rank,watch_id,turnover,currency,fetched_at,volume,ranking_basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now,
+                            str(rank.volume) if getattr(rank, "volume", None) is not None else None, getattr(rank, "ranking_basis", "turnover")))
             self._insert_event(db, "SYSTEM",
                                f"{market.value} 정시 TOP100 재선정 · 자동등록 순위이탈 {len(removable)}개 비활성 · 수동/보호 종목 유지",
                                category="system", at=datetime.fromisoformat(now))
@@ -483,12 +535,186 @@ class WatchStore:
 
     def external_for_rule(self, rule_id: str):
         with self.connection() as db:
-            row = db.execute("SELECT * FROM external_signals WHERE rule_id=?", (rule_id,)).fetchone()
+            row = db.execute("""SELECT * FROM external_signals WHERE rule_id=COALESCE(
+                (SELECT root_rule_id FROM order_retries WHERE rule_id=?),?)""", (rule_id, rule_id)).fetchone()
             return dict(row) if row else None
+
+    @staticmethod
+    def _prototype_allocations(db):
+        rows = db.execute("""SELECT p.rule_id,p.lot_id,p.quantity,p.created_at,p.buy_filled_quantity,p.buy_average_price,
+                    r.watch_id,r.side,r.status AS rule_status
+                FROM prototype_sell_allocations p JOIN rules r ON r.id=p.rule_id
+                UNION ALL
+                SELECT retry.rule_id,p.lot_id,CAST(r.quantity AS TEXT),p.created_at,p.buy_filled_quantity,p.buy_average_price,
+                    r.watch_id,r.side,r.status AS rule_status
+                FROM order_retries retry JOIN prototype_sell_allocations p ON p.rule_id=retry.root_rule_id
+                JOIN rules r ON r.id=retry.rule_id
+                WHERE NOT EXISTS(SELECT 1 FROM prototype_sell_allocations own WHERE own.rule_id=retry.rule_id)""")
+        return tuple(dict(row) for row in rows)
+
+    def _prototype_inventory(self, db, watch_id=None):
+        from dockdack.strategy_lots import project_prototype_inventory
+        rows = self._order_history(db, None)
+        allocations = self._prototype_allocations(db)
+        if watch_id is not None:
+            rows = tuple(row for row in rows if row["watch_id"] == watch_id)
+            allocations = tuple(row for row in allocations if row["watch_id"] == watch_id)
+        return project_prototype_inventory(rows, allocations, mode=self.mode.value, scope=self.storage_scope)
+
+    def prototype_lots(self, watch_id=None):
+        """Confirmed virtual lots; a pending acknowledgement has zero shares."""
+        with self.connection() as db:
+            db.execute("BEGIN")
+            return self._prototype_inventory(db, watch_id)["lots"]
+
+    def prototype_inventory(self, watch_id, broker_quantity=None, broker_sellable=None):
+        from dockdack.strategy_lots import reconcile_inventory
+        with self.connection() as db:
+            db.execute("BEGIN")
+            result = self._prototype_inventory(db, watch_id)
+        return reconcile_inventory(result, broker_quantity=broker_quantity, broker_sellable=broker_sellable)
+
+    def prototype_pending_buys(self, watch_id, strategy_id=None):
+        from dockdack.strategy_lots import row_family
+        result = []
+        for row in self.order_history(limit=None):
+            if row["watch_id"] != watch_id or row["side"] != "buy" or row["status"] not in PENDING:
+                continue
+            family = row_family(row)
+            if family and (strategy_id is None or family.id == strategy_id):
+                result.append(row)
+        return tuple(result)
+
+    def prototype_rule_source(self, rule_id):
+        from dockdack.signal_bridge import prototype_record_family
+        allocation = self.prototype_sell_allocation(rule_id)
+        record = self.external_for_rule(allocation["lot_id"] if allocation else rule_id)
+        return record["source_id"] if prototype_record_family(record, action="buy") else None
+
+    def prototype_sell_allocation(self, rule_id):
+        with self.connection() as db:
+            allocation = next((row for row in self._prototype_allocations(db) if row["rule_id"] == rule_id), None)
+            if allocation is None:
+                return None
+            lot = next((row for row in self._prototype_inventory(db, allocation["watch_id"])["lots"]
+                        if row["lot_id"] == allocation["lot_id"]), None)
+            if lot is None:
+                raise ValueError("매도 배분의 원매수 모델 체결 기록이 없습니다.")
+            return {**allocation, "quantity": Decimal(allocation["quantity"]),
+                    **{key: lot[key] for key in ("source_id", "strategy_id", "model_title", "buy_rule_id")}}
+
+    def reserve_prototype_sell(self, rule_id, lot_id, quantity, *, now=None):
+        """Persist immutable lot allocation before claim; never reserve broker shares."""
+        from dockdack.strategy_lots import number
+        quantity = number(quantity)
+        if quantity is None or quantity <= 0 or quantity != quantity.to_integral_value():
+            raise ValueError("모델별 매도 배분은 양의 정수 수량이어야 합니다.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = next((row for row in self._prototype_allocations(db) if row["rule_id"] == rule_id), None)
+            if previous:
+                if previous["lot_id"] != lot_id or Decimal(previous["quantity"]) != quantity:
+                    raise ValueError("이미 저장한 매도 로트/수량 배분은 변경할 수 없습니다.")
+                return
+            rule = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+            if (not rule or rule["side"] != "sell" or rule["status"] != "ready"
+                    or Decimal(rule["quantity"]) != quantity):
+                raise ValueError("대기 중인 매도 규칙과 배분 수량이 일치해야 합니다.")
+            inventory = self._prototype_inventory(db, rule["watch_id"])
+            lot = next((row for row in inventory["lots"] if row["lot_id"] == lot_id), None)
+            if (self.mode is not TradingMode.DEMO or inventory["issues"] or lot is None
+                    or quantity > lot["available_quantity"]):
+                raise ValueError("원매수 모델의 확인된 가용 보유량을 초과하거나 체결 기록 확인이 필요합니다.")
+            db.execute("INSERT INTO prototype_sell_allocations VALUES(?,?,?,?,?,?)",
+                       (rule_id, lot_id, str(quantity), (now or utc_now()).isoformat(),
+                        str(lot["filled_quantity"]), str(lot["average_price"])))
+
+    def exit_targets(self, watch_id: str):
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM position_exit_targets WHERE watch_id=?", (watch_id,)).fetchone()
+        if row is None:
+            return None
+        return {**dict(row), "take_profit_price": Decimal(row["take_profit_price"]),
+                "stop_loss_price": Decimal(row["stop_loss_price"])}
+
+    def set_exit_targets(self, watch_id, take_profit_price, stop_loss_price, *, source, rule_id, now=None):
+        positive(take_profit_price, "상방 목표가격")
+        positive(stop_loss_price, "하방 목표가격")
+        if stop_loss_price >= take_profit_price:
+            raise ValueError("하방 목표가격은 상방 목표가격보다 낮아야 합니다.")
+        with self.connection() as db:
+            db.execute("""INSERT INTO position_exit_targets VALUES(?,?,?,?,?,?)
+                ON CONFLICT(watch_id) DO UPDATE SET take_profit_price=excluded.take_profit_price,
+                stop_loss_price=excluded.stop_loss_price,source=excluded.source,rule_id=excluded.rule_id,updated_at=excluded.updated_at""",
+                (watch_id, str(take_profit_price), str(stop_loss_price), source, rule_id, (now or utc_now()).isoformat()))
+
+    def clear_exit_targets(self, watch_id):
+        with self.connection() as db:
+            db.execute("DELETE FROM position_exit_targets WHERE watch_id=?", (watch_id,))
+
+    def save_holding_rule(self, item: WatchItem, rule: TriggerRule):
+        """Persist a SELL intent without adding a position to the buy watchlist."""
+        if not rule.id.startswith("holding-exit-") or rule.side is not OrderSide.SELL or rule.watch_id != item.id:
+            raise ValueError("보유종목 매도 규칙만 독립 등록할 수 있습니다.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT OR IGNORE INTO watchlist VALUES(?,?,?,?,?,?,0)",
+                       (item.id, item.instrument.market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
+            db.execute("INSERT INTO rules VALUES(?,?,?,?,?,?,?,?,?)", (rule.id, item.id, rule.kind.value, rule.side.value,
+                       rule.quantity, str(rule.max_notional), str(rule.threshold), rule.period, rule.status))
+
+    def size_ready_rule(self, rule: TriggerRule, quantity: int):
+        """Capture the computed actual quantity before durable claim; no sent intent changes."""
+        from dataclasses import replace
+        sized = replace(rule, quantity=quantity)
+        with self.connection() as db:
+            changed = db.execute("UPDATE rules SET quantity=? WHERE id=? AND status='ready' AND quantity=?",
+                                 (quantity, rule.id, rule.quantity)).rowcount
+        if changed != 1:
+            raise ValueError("수량 산정 중 신호 상태가 변경되었습니다.")
+        return sized
+
+    def retry_rule(self, rule: TriggerRule, *, maximum=3):
+        """A new auditable intent only after an explicitly broker-rejected predecessor.
+
+        A local not_sent safety denial is terminal for that candidate, not a
+        broker rejection that may be automatically bypassed by another send.
+        """
+        from dataclasses import replace
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT status FROM attempts WHERE rule_id=?", (rule.id,)).fetchone()
+            if previous is None or previous[0] != "rejected":
+                return None
+            retry = db.execute("SELECT root_rule_id,sequence FROM order_retries WHERE rule_id=?", (rule.id,)).fetchone()
+            root, sequence = (retry[0], retry[1] + 1) if retry else (rule.id, 2)
+            if sequence > maximum or db.execute("SELECT 1 FROM order_retries WHERE root_rule_id=? AND sequence=?", (root, sequence)).fetchone():
+                return None
+            new_id = ("holding-exit-" if rule.id.startswith("holding-exit-") else "retry-") + uuid4().hex
+            fresh = replace(rule, id=new_id, status="ready")
+            db.execute("INSERT INTO rules VALUES(?,?,?,?,?,?,?,?,?)", (fresh.id, fresh.watch_id, fresh.kind.value,
+                       fresh.side.value, fresh.quantity, str(fresh.max_notional),
+                       str(fresh.threshold) if fresh.threshold is not None else None, fresh.period, fresh.status))
+            db.execute("INSERT INTO order_retries VALUES(?,?,?)", (fresh.id, root, sequence))
+            self._insert_event(db, rule.watch_id, f"미국 주문 재시도 {sequence}/{maximum} · 증권사 거절 확인 후 조건·잔고·현재가 재검증 예정", category="order")
+            return fresh
+
+    def rejection_cooldown_remaining(self, watch_id, rule_id, now, *, seconds=300):
+        """A new US signal cannot evade a recently rejected chain by changing its ID."""
+        with self.connection() as db:
+            if db.execute("SELECT 1 FROM order_retries WHERE rule_id=?", (rule_id,)).fetchone():
+                return 0  # The caller separately bounds the existing chain.
+            row = db.execute("SELECT started_at FROM attempts WHERE watch_id=? AND status='rejected' ORDER BY rowid DESC LIMIT 1", (watch_id,)).fetchone()
+        if row is None:
+            return 0
+        elapsed = (now - datetime.fromisoformat(row[0])).total_seconds()
+        return max(0, int(seconds - elapsed + 0.999))
 
     def expire_external(self, now: datetime):
         with self.connection() as db:
-            rows = db.execute("""SELECT e.rule_id,e.expires_at FROM external_signals e JOIN rules r ON r.id=e.rule_id
+            rows = db.execute("""SELECT r.id AS rule_id,e.expires_at FROM rules r
+                               LEFT JOIN order_retries retry ON retry.rule_id=r.id
+                               JOIN external_signals e ON e.rule_id=COALESCE(retry.root_rule_id,r.id)
                                WHERE r.status='ready'""").fetchall()
             for row in rows:
                 if datetime.fromisoformat(row["expires_at"]) <= now:
@@ -512,11 +738,28 @@ class WatchStore:
                            Decimal(row["threshold"]) if row["threshold"] is not None else None,
                            row["period"], row["status"])
 
-    def rules(self, watch_id: str | None = None) -> tuple[TriggerRule, ...]:
+    def rules(self, watch_id: str | None = None, *, include_inactive=False, statuses=None, limit=None) -> tuple[TriggerRule, ...]:
+        if statuses is not None:
+            if isinstance(statuses, str):
+                raise ValueError("규칙 상태 필터는 알려진 상태의 비어 있지 않은 목록이어야 합니다.")
+            statuses = tuple(statuses)
+            if not statuses or any(value not in STATUS_LABELS for value in statuses):
+                raise ValueError("규칙 상태 필터는 알려진 상태의 비어 있지 않은 목록이어야 합니다.")
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise ValueError("규칙 개수는 양의 정수 또는 None이어야 합니다.")
         with self.connection() as db:
-            sql = "SELECT r.* FROM rules r JOIN watchlist w ON r.watch_id=w.id WHERE w.active=1"
-            params = () if watch_id is None else (watch_id,)
-            return tuple(self._rule(row) for row in db.execute(sql + (" AND watch_id=?" if params else "") + " ORDER BY r.rowid", params))
+            sql = "SELECT r.* FROM rules r JOIN watchlist w ON r.watch_id=w.id WHERE " + ("1=1" if include_inactive else "w.active=1")
+            params = []
+            if watch_id is not None:
+                sql += " AND r.watch_id=?"
+                params.append(watch_id)
+            if statuses is not None:
+                sql += " AND r.status IN (" + ",".join("?" for _ in statuses) + ")"
+                params.extend(statuses)
+            sql += " ORDER BY r.rowid" + (" DESC LIMIT ?" if limit is not None else "")
+            if limit is not None:
+                params.append(limit)
+            return tuple(self._rule(row) for row in db.execute(sql, params))
 
     def add_rule(self, rule: TriggerRule):
         if rule.status != "ready":
@@ -552,16 +795,20 @@ class WatchStore:
                 sql += " AND status IN ('submitting', 'accepted', 'unknown')"
             return tuple(dict(row) for row in db.execute(sql + " ORDER BY rowid", params))
 
-    def claim(self, rule: TriggerRule, price: Decimal, now: datetime) -> bool:
+    def claim(self, rule: TriggerRule, price: Decimal, now: datetime, *, prototype_lots=False) -> bool:
         positive(price, "주문 단가")
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM rules WHERE id=? AND status='ready'", (rule.id,)).fetchone()
             if not row or self._rule(row) != rule:
                 return False
-            if not db.execute("SELECT 1 FROM watchlist WHERE id=? AND active=1", (rule.watch_id,)).fetchone():
+            if not db.execute("SELECT 1 FROM watchlist WHERE id=? AND (active=1 OR ?)",
+                              (rule.watch_id, rule.id.startswith("holding-exit-") and rule.side is OrderSide.SELL)).fetchone():
                 return False
-            if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (rule.watch_id,)).fetchone():
+            if prototype_lots:
+                if not self._prototype_claim_allowed(db, rule):
+                    return False
+            elif db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (rule.watch_id,)).fetchone():
                 return False
             db.execute("INSERT INTO attempts (rule_id, watch_id, status, price, started_at) VALUES (?, ?, 'submitting', ?, ?)",
                        (rule.id, rule.watch_id, str(price), now.isoformat()))
@@ -570,6 +817,55 @@ class WatchStore:
             self._insert_event(db, rule.watch_id,
                                f"주문 전송 의도 기록 · {rule.id} · {rule.side.value} {rule.quantity}주 · 참조 현재가 {price} (체결가 아님)",
                                category="order", at=now)
+        return True
+
+    def _prototype_claim_allowed(self, db, rule):
+        """Atomic per-model exception; all ambiguous/manual pending intents still block."""
+        from dockdack.signal_bridge import prototype_record_family
+        from dockdack.strategy_lots import row_family
+        if self.mode is not TradingMode.DEMO:
+            return False
+        inventory = self._prototype_inventory(db, rule.watch_id)
+        if inventory["issues"]:
+            return False
+        allocations = {row["rule_id"]: row for row in self._prototype_allocations(db)}
+        lots = {row["lot_id"]: row for row in inventory["lots"]}
+        if rule.side is OrderSide.BUY:
+            record = db.execute("""SELECT * FROM external_signals WHERE rule_id=COALESCE(
+                (SELECT root_rule_id FROM order_retries WHERE rule_id=?),?)""", (rule.id, rule.id)).fetchone()
+            try:
+                family = prototype_record_family(dict(record) if record else None,
+                                                  watch_id=rule.watch_id, action="buy")
+            except ValueError:
+                return False
+            if family is None or any(lot["strategy_id"] == family.id and lot["quantity_remaining"] > 0
+                                     for lot in lots.values()):
+                return False
+            strategy_id = family.id
+        else:
+            allocation = allocations.get(rule.id)
+            lot = lots.get(allocation["lot_id"]) if allocation else None
+            if (lot is None or lot["issues"] or lot["buy_pending"] or Decimal(allocation["quantity"]) != rule.quantity
+                    or lot["quantity_remaining"] < rule.quantity):
+                return False
+            strategy_id = lot["strategy_id"]
+        for pending in self._order_history(db, None):
+            if pending["watch_id"] != rule.watch_id or pending["status"] not in PENDING:
+                continue
+            if pending["status"] != "accepted":
+                return False
+            if pending["side"] == "buy":
+                try:
+                    other = row_family(pending)
+                except ValueError:
+                    return False
+                other_id = other.id if other else None
+            else:
+                other_allocation = allocations.get(pending["rule_id"])
+                other_lot = lots.get(other_allocation["lot_id"]) if other_allocation else None
+                other_id = other_lot["strategy_id"] if other_lot else None
+            if other_id is None or other_id == strategy_id:
+                return False
         return True
 
     def finish(self, rule_id: str, status: str, message: str, order_number: str = ""):
@@ -633,6 +929,11 @@ class WatchStore:
                 result[category] = dict(row) if row else {"id": 0, "time": None}
             return result
 
+    def ledger_revision(self) -> int:
+        """O(1) durable revision including executions, not signal/event traffic."""
+        with self.connection() as db:
+            return db.execute("SELECT version FROM ledger_revision WHERE singleton=1").fetchone()[0]
+
     def order_history(self, limit=500) -> tuple[dict, ...]:
         """Durable order intents/results, never inferred from monitoring messages.
 
@@ -647,21 +948,47 @@ class WatchStore:
         if limit is not None and (type(limit) is not int or limit < 1):
             raise ValueError("주문 내역 개수는 양의 정수 또는 None이어야 합니다.")
         with self.connection() as db:
-            sql = """
-                SELECT a.rule_id,a.watch_id,a.started_at,a.status,a.order_number,a.message,
-                       a.price AS reference_price,w.symbol,w.name,w.market,w.exchange,
-                       CASE w.market WHEN 'domestic' THEN 'KRW' WHEN 'us' THEN 'USD' END AS currency,
-                       r.side,r.quantity,x.filled_quantity,x.remaining_quantity,x.fill_price,x.observed_at,
-                       f.status AS recovery_status,f.message AS recovery_message,f.checked_at AS recovery_checked_at,
-                       f.source_api AS recovery_source_api,f.price_basis AS recovery_price_basis,
-                       f.order_date AS recovery_order_date,f.order_time AS recovery_order_time,
-                       f.fill_time AS recovery_fill_time,f.reported_fill_price AS recovery_reported_fill_price
-                FROM attempts a JOIN rules r ON r.id=a.rule_id JOIN watchlist w ON w.id=a.watch_id
-                LEFT JOIN order_execution_snapshots x ON x.rule_id=a.rule_id
-                LEFT JOIN order_fill_recovery f ON f.rule_id=a.rule_id
-            """
-            sql += " ORDER BY a.started_at,a.rowid" if limit is None else " ORDER BY a.started_at DESC,a.rowid DESC LIMIT ?"
-            return tuple(dict(row) for row in db.execute(sql, () if limit is None else (limit,)))
+            return self._order_history(db, limit)
+
+    @staticmethod
+    def _order_history(db, limit):
+        sql = """
+            SELECT a.rule_id,a.watch_id,a.started_at,a.status,a.order_number,a.message,
+                   a.price AS reference_price,w.symbol,w.name,w.market,w.exchange,
+                   CASE w.market WHEN 'domestic' THEN 'KRW' WHEN 'us' THEN 'USD' END AS currency,
+                   r.side,r.quantity,x.filled_quantity,x.remaining_quantity,x.fill_price,x.observed_at,
+                   f.status AS recovery_status,f.message AS recovery_message,f.checked_at AS recovery_checked_at,
+                   f.source_api AS recovery_source_api,f.price_basis AS recovery_price_basis,
+                   f.order_date AS recovery_order_date,f.order_time AS recovery_order_time,
+                   f.fill_time AS recovery_fill_time,f.reported_fill_price AS recovery_reported_fill_price,
+                   f.price_basis_quantity,f.price_basis_price,
+                   e.source_id AS external_source_id,e.signal_id AS external_signal_id,
+                   e.payload AS external_payload,e.decision AS external_decision,
+                   e.watch_id AS external_watch_id,
+                   p.lot_id AS prototype_lot_id,p.lot_id AS prototype_buy_rule_id
+            FROM attempts a JOIN rules r ON r.id=a.rule_id JOIN watchlist w ON w.id=a.watch_id
+            LEFT JOIN order_execution_snapshots x ON x.rule_id=a.rule_id
+            LEFT JOIN order_fill_recovery f ON f.rule_id=a.rule_id
+            LEFT JOIN order_retries retry ON retry.rule_id=a.rule_id
+            LEFT JOIN prototype_sell_allocations p ON p.rule_id=COALESCE(retry.root_rule_id,a.rule_id)
+            LEFT JOIN order_retries buy_retry ON buy_retry.rule_id=p.lot_id
+            LEFT JOIN external_signals e ON e.rule_id=COALESCE(buy_retry.root_rule_id,p.lot_id,retry.root_rule_id,a.rule_id)
+        """
+        sql += " ORDER BY a.started_at,a.rowid" if limit is None else " ORDER BY a.started_at DESC,a.rowid DESC LIMIT ?"
+        result = []
+        for row in db.execute(sql, () if limit is None else (limit,)):
+            item = dict(row)
+            item["prototype_strategy_id"] = item["prototype_model_title"] = None
+            if item["prototype_lot_id"]:
+                from dockdack.strategy_lots import row_family
+                try:
+                    family = row_family(item)
+                except ValueError:
+                    family = None
+                if family:
+                    item["prototype_strategy_id"], item["prototype_model_title"] = family.id, family.title
+            result.append(item)
+        return tuple(result)
 
     def record_execution(self, rule_id: str, *, filled_quantity: Decimal,
                          remaining_quantity: Decimal, fill_price: Decimal | None,
@@ -704,7 +1031,8 @@ class WatchStore:
 
     def record_fill_recovery(self, rule_id: str, *, status: str, message: str, checked_at: datetime,
                              source_api="", price_basis="", order_date="", order_time="", fill_time="",
-                             reported_fill_price=None, filled_quantity=None, remaining_quantity=None, fill_price=None):
+                             reported_fill_price=None, filled_quantity=None, remaining_quantity=None, fill_price=None,
+                             price_basis_quantity=None, price_basis_price=None):
         """Atomically enrich evidence/provenance only; never alters attempts or rules."""
         if status not in {"enriched", "not_found", "ambiguous", "price_unknown", "quantity_conflict", "error"}:
             raise ValueError("체결가 보완 상태가 올바르지 않습니다.")
@@ -712,19 +1040,33 @@ class WatchStore:
             raise ValueError("체결가 보완 시각에 시간대가 필요합니다.")
         reported = (str(reported_fill_price) if isinstance(reported_fill_price, Decimal)
                     and reported_fill_price.is_finite() and reported_fill_price > 0 else None)
+        basis_quantity = basis_price = None
+        if price_basis_quantity is not None or price_basis_price is not None:
+            if (price_basis not in {"broker_average", "weighted_fills"}
+                    or not isinstance(price_basis_quantity, Decimal) or not price_basis_quantity.is_finite()
+                    or not isinstance(price_basis_price, Decimal) or not price_basis_price.is_finite()
+                    or price_basis_quantity <= 0 or price_basis_price <= 0
+                    or price_basis_quantity != filled_quantity or price_basis_price != fill_price):
+                raise ValueError("체결 평균가 근거가 현재 수량·가격과 일치하지 않습니다.")
+            basis_quantity, basis_price = str(price_basis_quantity), str(price_basis_price)
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT status,message FROM order_fill_recovery WHERE rule_id=?", (rule_id,)).fetchone()
             if filled_quantity is not None or remaining_quantity is not None:
                 self._record_execution(db, rule_id, filled_quantity=filled_quantity, remaining_quantity=remaining_quantity,
                                        fill_price=fill_price, observed_at=checked_at)
-            db.execute("""INSERT INTO order_fill_recovery VALUES (?,?,?,?,?,?,?,?,?,?)
+            db.execute("""INSERT INTO order_fill_recovery
+                         (rule_id,status,message,checked_at,source_api,price_basis,order_date,order_time,
+                          fill_time,reported_fill_price,price_basis_quantity,price_basis_price)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(rule_id) DO UPDATE SET status=excluded.status,message=excluded.message,
                          checked_at=excluded.checked_at,source_api=excluded.source_api,price_basis=excluded.price_basis,
                          order_date=excluded.order_date,order_time=excluded.order_time,fill_time=excluded.fill_time,
-                         reported_fill_price=excluded.reported_fill_price""",
+                         reported_fill_price=excluded.reported_fill_price,
+                         price_basis_quantity=excluded.price_basis_quantity,
+                         price_basis_price=excluded.price_basis_price""",
                        (rule_id, status, message, checked_at.isoformat(), source_api, price_basis,
-                        order_date, order_time, fill_time, reported))
+                        order_date, order_time, fill_time, reported, basis_quantity, basis_price))
             if not old or (old["status"], old["message"]) != (status, message):
                 watch = db.execute("SELECT watch_id FROM attempts WHERE rule_id=?", (rule_id,)).fetchone()
                 self._insert_event(db, watch[0], f"체결가 보완 · {message}", category="order", at=checked_at)

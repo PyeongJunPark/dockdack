@@ -40,6 +40,9 @@ class _LSTM30AutoTrader(AutoTrader):
 
     def __init__(self, service, store, *, items, clock):
         super().__init__(service, store, clock=clock)
+        # This legacy dedicated launcher retains its same-day rejection latch.
+        # The v0.0 dashboard uses plain AutoTrader with bounded retries enabled.
+        self.us_retry_attempts = 1
         self.allowed_items = {item.id for item in items}
         self.initial_attempts = {row["rule_id"] for row in store.attempts()}
         self.safety_reason = ""
@@ -56,7 +59,7 @@ class _LSTM30AutoTrader(AutoTrader):
             raise ValueError("LSTM30 GUI는 모의투자 전용입니다. 실전 전환은 허용하지 않습니다.")
         if self.universe is not None:
             try:
-                self.universe.validate_active()
+                self.universe.validate_active(force=orders)
             except Exception:
                 self.disarm()
                 raise
@@ -77,7 +80,7 @@ class _LSTM30AutoTrader(AutoTrader):
         if self._critical_attempts():
             self.disarm()
             raise ValueError("이 세션의 접수 불명확/전송 중 주문을 확인한 후 실행기를 다시 시작하세요.")
-        if self.universe is not None and not self.universe.initialized:
+        if self.universe is not None and not self.universe.ready_for_open_markets():
             self.disarm()
             raise ValueError("승인된 시장의 보통주 TOP100 확정·전체 조회가 필요합니다.")
         super().enable_orders(confirmation)
@@ -127,6 +130,21 @@ class _LSTM30AutoTrader(AutoTrader):
     def _before_order_send(self, item, rule, fresh):
         def reject_quarantined_instrument():
             try:
+                if item.instrument.market is Market.US:
+                    with self.store.connection() as db:
+                        retry = db.execute("""SELECT retry.root_rule_id,retry.sequence,a.status
+                            FROM order_retries retry JOIN attempts a ON a.rule_id=retry.root_rule_id
+                            WHERE retry.rule_id=?""", (rule.id,)).fetchone()
+                        if retry and 2 <= retry["sequence"] <= self.us_retry_attempts and retry["status"] in {"rejected", "not_sent"}:
+                            # Only this bounded, durable chain may pass. A prior
+                            # unrelated rejected signal still quarantines the stock.
+                            other = db.execute("""SELECT 1 FROM attempts a WHERE a.watch_id=?
+                                AND a.status IN ('unknown','submitting','rejected') AND a.rule_id!=?
+                                AND a.rule_id!=? AND a.rule_id NOT IN
+                                  (SELECT rule_id FROM order_retries WHERE root_rule_id=?) LIMIT 1""",
+                                (item.id, rule.id, retry["root_rule_id"], retry["root_rule_id"])).fetchone()
+                            if other is None:
+                                return
                 if rejected_today(self.store, item.instrument, self.clock()):
                     raise OrderNotSent("당일 확정 거절 이력이 있어 이 종목의 추가 자동주문을 차단했습니다.")
             except OrderNotSent:
@@ -155,7 +173,7 @@ class LSTM30GUIBridge:
 
     def __init__(self, window, predictors, position_provider):
         self.window, self.diagnostics = window, {}
-        self.producer = LSTM30SignalProducer(
+        self.producer = window.producer_class(
             predictors, position_provider=position_provider, quantity=window.lstm_policy.max_quantity,
             max_krw=window.lstm_policy.max_krw, max_usd=window.lstm_policy.max_usd,
             state_path=window.runtime_dir / "exchange/decisions.json", clock=window.engine.clock)
@@ -219,7 +237,7 @@ class LSTM30GUIBridge:
             updated[item.id] = detail
         self.diagnostics = updated
         atomic_json(window.runtime_dir / "exchange/diagnostics.json", {
-            "updated_at": window.engine.clock().isoformat(), "strategy": "lstm30", "diagnostics": updated})
+            "updated_at": window.engine.clock().isoformat(), "strategy": window.strategy_id, "diagnostics": updated})
         bad = [row["reason"] for row in diagnostics if row["reason"] in _BAD_DIAGNOSTICS]
         if bad:
             window.engine.safety_reason = "LSTM30_INPUT_UNAVAILABLE"
@@ -275,7 +293,7 @@ class LSTM30SessionController(SessionController):
         state = json.loads(status_path.read_text(encoding="utf-8"))
         window = self.window
         state.update(
-            strategy="lstm30", source_id=SOURCE_ID, checkpoints=window.checkpoint_paths,
+            strategy=window.strategy_id, source_id=window.source_id, checkpoints=window.checkpoint_paths,
             buy_thresholds=window.lstm_buy_thresholds,
             checkpoint_buy_thresholds=window.lstm_checkpoint_buy_thresholds,
             close_liquidation=window.close_liquidator.status(),
@@ -284,7 +302,7 @@ class LSTM30SessionController(SessionController):
             store_path=str(window.store.path),
             universe=window.lstm_universe.status(),
         )
-        state["dashboard"]["connection"]["strategy"] = "lstm30"
+        state["dashboard"]["connection"]["strategy"] = window.strategy_id
         atomic_json(status_path, state)
         # Keep the headless runtime's existing status/stop interface useful after
         # handoff, with this GUI's current session identity and actual permission.
@@ -297,6 +315,31 @@ class LSTM30SessionController(SessionController):
 
 class LSTM30WatchlistDialog(WatchlistDialog):
     """Trained LSTM signals inside the normal dashboard's real ON/OFF controls."""
+
+    source_id = SOURCE_ID
+    strategy_id = "lstm30"
+    producer_class = LSTM30SignalProducer
+    engine_class = _LSTM30AutoTrader
+
+    def _apply_execution_preferences(self):
+        """Keep the dedicated strategy contract when using main's new shell.
+
+        Main v0.0's portfolio-percentage sizing and independent holding exits
+        are separate strategies. They must not silently replace this launcher's
+        approved fixed quantity or its model-specific loss barrier.
+        """
+        self.percent_sizing.setChecked(False)
+        self.percent_sizing.setEnabled(False)
+        self.buy_percent.setEnabled(False)
+        self.additional_sources.setEnabled(False)
+        self.engine.session_only_poll = True
+        self.engine.enable_holdings_exits = False
+        self.engine.equity_buy_percent = None
+        self.engine.isolated_symbol_errors = True
+        self.engine.us_retry_attempts = 1
+        self.engine.holding_caps = {Market.DOMESTIC: Decimal(str(self.external_krw.value())),
+                                    Market.US: Decimal(str(self.external_usd.value()))}
+        self.source_status.setText("전용 모델 단일 신호원 · 고정 수량 · 별도 보유종목 자동매도 사용 안 함")
 
     def __init__(self, service=None, *, runtime_dir=DEFAULT_RUNTIME_DIR, predictors,
                  quantity=1, max_krw="500000", max_usd="1000", items=None,
@@ -317,7 +360,7 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         if (not self.lstm_items or len({item.id for item in self.lstm_items}) != len(self.lstm_items)
                 or any(item.days < 31 for item in self.lstm_items)):
             raise ValueError("중복 없는 관심종목과 최소 31개 일봉이 필요합니다.")
-        self.lstm_policy = ExternalPolicy(SOURCE_ID, quantity, Decimal(str(max_krw)), Decimal(str(max_usd)))
+        self.lstm_policy = ExternalPolicy(self.source_id, quantity, Decimal(str(max_krw)), Decimal(str(max_usd)))
         for market in {item.instrument.market.value for item in self.lstm_items} | {market.value for market in self.ranked_markets}:
             if market not in predictors or getattr(predictors[market], "metadata", {}).get("market") != market:
                 raise ValueError(f"시장에 맞는 {market} 학습 모델이 필요합니다.")
@@ -347,9 +390,9 @@ class LSTM30WatchlistDialog(WatchlistDialog):
                 if rule.status == "ready":
                     store.pause_rule(rule.id)
             atomic_json(self.runtime_dir / "exchange/signals.json", {
-                "schema_version": 1, "source_id": SOURCE_ID, "trading_mode": "demo", "signals": []})
+                "schema_version": 1, "source_id": self.source_id, "trading_mode": "demo", "signals": []})
             super().__init__(service, store, parent)
-            self.engine = _LSTM30AutoTrader(service, store, items=self.lstm_items, clock=clock)
+            self.engine = self.engine_class(service, store, items=self.lstm_items, clock=clock)
             self.lstm_universe = LSTM30Universe(
                 service, store, ranked_markets=self.ranked_markets, baseline_items=self.lstm_items,
                 clock=clock, stopped=lambda: self.engine._stop.is_set(), on_change=self._universe_changed)
@@ -372,7 +415,7 @@ class LSTM30WatchlistDialog(WatchlistDialog):
             if self.ranked_markets:
                 labels = "/".join("한국" if market is Market.DOMESTIC else "미국" for market in sorted(self.ranked_markets, key=lambda value: value.value))
                 self.hourly_ranking.setText(f"{labels} 보통주 TOP100 · 개장/매 정시 갱신 (31개 일봉)")
-            self.external_source.setText(SOURCE_ID)
+            self.external_source.setText(self.source_id)
             self.external_quantity.setValue(quantity)
             self.external_krw.setValue(float(self.lstm_policy.max_krw))
             self.external_usd.setValue(float(self.lstm_policy.max_usd))
@@ -451,11 +494,14 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         actual = (self.external_mode.isChecked(), self.random_demo.isChecked(), self.external_source.text().strip(),
                   self.external_quantity.value(), Decimal(str(self.external_krw.value())), Decimal(str(self.external_usd.value())),
                   self.hourly_ranking.isChecked(), Path(self.signal_path.text()).resolve(), Path(self.chart_path.text()).resolve())
-        expected = (True, False, SOURCE_ID, self.lstm_policy.max_quantity, self.lstm_policy.max_krw, self.lstm_policy.max_usd,
+        expected = (True, False, self.source_id, self.lstm_policy.max_quantity, self.lstm_policy.max_krw, self.lstm_policy.max_usd,
                     bool(self.ranked_markets), self.runtime_dir / "exchange/signals.json", self.runtime_dir / "exchange/charts.json")
         if actual != expected:
             self.engine.disarm()
             raise ValueError("승인된 LSTM30 출처·종목·수량·상한 설정을 변경할 수 없습니다.")
+        if self.percent_sizing.isChecked() or self.additional_sources.raw_sources():
+            self.engine.disarm()
+            raise ValueError("전용 모델 실행기는 고정 수량·단일 신호원만 허용합니다.")
         self.lstm_universe.validate_active()
 
     def configure_external(self):
@@ -474,7 +520,7 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         base = super().activation_failure(results, error, external_error_baseline=external_error_baseline)
         if base:
             return base
-        if not self.lstm_universe.initialized:
+        if not self.lstm_universe.ready_for_open_markets():
             return "승인된 시장의 보통주 TOP100이 확정되지 않았습니다."
         diagnostics = self.lstm_bridge.diagnostics
         if {item.id for item in self.lstm_items} - set(diagnostics):
@@ -524,14 +570,14 @@ class LSTM30WatchlistDialog(WatchlistDialog):
 
     def connection_status(self):
         status = super().connection_status()
-        status["strategy"] = "lstm30"
+        status["strategy"] = self.strategy_id
         return status
 
     def _update_connection(self):
         super()._update_connection()
         if not getattr(self, "_lstm_configured", False):
             return
-        self.signal_connection_panel.source_label.setText(f"학습된 LSTM30 · 같은 실행기에서 추론 · source_id: {SOURCE_ID}")
+        self.signal_connection_panel.source_label.setText(f"학습된 LSTM30 · 같은 실행기에서 추론 · source_id: {self.source_id}")
         state = "연결 활성" if self.monitoring and self.engine.external_reader else "연결 설정됨 · 감시 중지"
         self.connection_summary.setText(f"LSTM30 학습 모델 · {state} | {self._market_summary}")
 
@@ -546,15 +592,22 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         return self.session_controller
 
     def shutdown(self):
+        # The main dashboard also runs ledger/schedule tasks on activity_pool.
+        # Prevent replacement tasks and retain the session lock until every
+        # worker's queued completion has returned to the Qt thread.
+        self._close_when_idle = True
+        self._pending_environment = None
         self.stop_monitoring()
-        if self.worker is not None or self._inspection_worker is not None:
+        for timer in (self.timer, self.schedule_timer, self.environment_timer, self.order_status_timer,
+                      self.health_timer, self.close_timer):
+            timer.stop()
+        if (self.worker is not None or self._inspection_worker is not None
+                or getattr(self, "_activity_worker", None) is not None
+                or getattr(self, "_schedule_probe", None) is not None):
             return False
         if self.session_controller is not None:
             self.session_controller.report()
             self.session_controller.close()
-        for timer in (self.timer, self.schedule_timer, self.environment_timer, self.order_status_timer,
-                      self.health_timer, self.close_timer):
-            timer.stop()
         if not self._lstm_released:
             self.session_lock.release()
             self._lstm_released = True
@@ -630,9 +683,11 @@ def main(argv=None):
         return app.exec()
     finally:
         # An ordinary close is accepted only after the GUI worker has drained.
+        window._close_when_idle = True
         window.stop_monitoring()
         window.pool.waitForDone()
         window.inspection_pool.waitForDone()
+        window.activity_pool.waitForDone()
         app.processEvents()
         window.shutdown()
         for sig, handler in previous.items():

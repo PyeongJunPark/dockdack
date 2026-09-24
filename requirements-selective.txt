@@ -1,0 +1,5 @@
+# Optional research-only dependencies; install alongside requirements-ml.txt.
+# Local execution kept these in outputs/mark1/selective-deps, not the broker env.
+catboost==1.2.10
+lightgbm==4.6.0
+scipy==1.17.1

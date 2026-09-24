@@ -101,10 +101,10 @@ class PortfolioPanelTests(unittest.TestCase):
         item = self.panel.table.item(0, 1)
         self.panel.apply(payload, now=NOW + timedelta(seconds=1))
         self.assertIs(self.panel.table.item(0, 1), item)
-        self.assertEqual(len(self.panel.table.selectedItems()), 8)
+        self.assertEqual(len(self.panel.table.selectedItems()), 11)
         newer = {Market.DOMESTIC: replace(payload[Market.DOMESTIC], fetched_at=NOW + timedelta(seconds=60))}
         self.panel.apply(newer, now=NOW + timedelta(seconds=60))
-        self.assertEqual(len(self.panel.table.selectedItems()), 8)
+        self.assertEqual(len(self.panel.table.selectedItems()), 11)
 
     def test_market_tabs_only_show_the_selected_markets_card_and_holdings(self):
         payload = {market: PortfolioMarketState(market, account(market), NOW, NOW) for market in Market}
@@ -156,13 +156,13 @@ class PortfolioPanelTests(unittest.TestCase):
             table = self.panel.tables[market]
             self.assertIs(table.item(15 + index, 1), saved[market][0])
             self.assertEqual(table.verticalScrollBar().value(), saved[market][1])
-            self.assertEqual(len(table.selectedItems()), 8)
+            self.assertEqual(len(table.selectedItems()), 11)
         newer = {market: replace(state, fetched_at=NOW + timedelta(seconds=60)) for market, state in payload.items()}
         self.panel.apply(newer, now=NOW + timedelta(seconds=60))
         self.assertEqual(self.panel.current_market, Market.US)
         for market, table in self.panel.tables.items():
             self.assertEqual(table.verticalScrollBar().value(), saved[market][1])
-            self.assertEqual(len(table.selectedItems()), 8)
+            self.assertEqual(len(table.selectedItems()), 11)
 
     def test_market_error_unknown_and_stale_are_not_combined_with_other_market(self):
         self.panel.apply({

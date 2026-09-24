@@ -38,6 +38,7 @@ _REASONS = {
     "invalid_instrument": "시장·거래소·종목·통화 정보가 불완전합니다.",
     "invalid_side": "매수·매도 구분을 확인할 수 없습니다.",
     "unverified_average_price": "다주 주문의 누적 평균 체결가 근거가 확인되지 않았습니다.",
+    "invalid_lot_allocation": "모델별 매도와 원매수 연결이 올바르지 않습니다.",
 }
 
 
@@ -191,12 +192,15 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
                 issues.append("invalid_time")
             if quantity_error:
                 issues.append(quantity_error)
+            if side == 'sell' and record.get('prototype_lot_id') and record.get('prototype_buy_rule_id') and record['prototype_lot_id'] != record['prototype_buy_rule_id']:
+                issues.append('invalid_lot_allocation')
         if issues:
             poisoned.setdefault(key, issues[0])
             warnings.append({"rule_id": rule_id, "reason_codes": tuple(issues)})
         rows.append({"id": rule_id, "key": key, "side": side, "quantity": quantity,
                      "inferred": inferred, "price": price, "price_reason": price_reason,
                      "time": moment, "index": index, "issues": issues,
+                     "allocation": _text(record.get('prototype_buy_rule_id') or record.get('prototype_lot_id')) if side == 'sell' else '',
                      "duplicate": bool(original_id and ids[original_id] > 1)})
 
     # A partially identified historical buy might belong to an otherwise
@@ -223,7 +227,7 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
             continue
         if row["side"] == "buy":
             if not row["duplicate"] and quantity > ZERO:
-                lots[key].append([quantity, row["price"]])
+                lots[key].append([quantity, row["price"], row['id']])
             if row["issues"]:
                 metric.update(status="unknown", reason_code=row["issues"][0],
                               reason=_REASONS[row["issues"][0]])
@@ -235,9 +239,14 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
             continue
 
         remaining, known_cost, missing_price = quantity, ZERO, False
+        if row['allocation']:
+            metric['basis'] = 'strategy_lot'
         if not row["duplicate"]:
-            while remaining > ZERO and lots[key]:
-                lot = lots[key][0]
+            candidates = ([lot for lot in lots[key] if lot[2] == row['allocation']]
+                          if row['allocation'] else list(lots[key]))
+            for lot in candidates:
+                if remaining <= ZERO:
+                    break
                 used = min(remaining, lot[0])
                 if lot[1] is None:
                     missing_price = True
@@ -246,7 +255,7 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
                 lot[0] -= used
                 remaining -= used
                 if lot[0] == ZERO:
-                    lots[key].popleft()
+                    lots[key].remove(lot)
         metric["matched_quantity"] = quantity - remaining
         metric["unmatched_quantity"] = remaining
         if row["price"] is not None and quantity > ZERO:
@@ -278,6 +287,8 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
             "known_proceeds": None, "known_return_pct": None,
             "realized_profit": None, "return_pct": None, "complete": True,
         })
+        if row['allocation']:
+            summary['basis'] = 'local_fifo_or_strategy_lot'
         if metric["status"] == "known":
             summary["known_sell_count"] += 1
             summary["known_quantity"] += quantity
@@ -297,7 +308,7 @@ def realized_performance(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]
             summary["return_pct"] = summary["known_return_pct"]
     return {
         "by_rule_id": by_rule_id, "summaries": summaries, "warnings": tuple(warnings),
-        "basis": "local_fifo", "gross": True,
-        "description": "전체 로컬 주문 기록 기준 FIFO 실현손익 · 수수료·세금 제외 · 계좌 전체 수익률 아님",
+        "basis": "local_fifo_or_strategy_lot" if any(row['allocation'] for row in rows) else "local_fifo", "gross": True,
+        "description": "전체 로컬 주문 기록 · 모델 매도는 지정 매수분, 일반 매도는 FIFO · 수수료·세금 제외 · 계좌 전체 수익률 아님",
         "complete": not warnings and all(summary["complete"] for summary in summaries.values()),
     }

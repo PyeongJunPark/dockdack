@@ -1,0 +1,305 @@
+{
+  "calibration": {
+    "stop": null,
+    "success": {
+      "bias": -0.02389074867668617,
+      "fit_log_loss": 0.46218434375225265,
+      "fit_samples": 233802,
+      "iterations": 4,
+      "method": "platt_monotone",
+      "regularization": 1e-06,
+      "slope": 1.4762757276090936,
+      "weighted": false
+    }
+  },
+  "fold": "walk_2024",
+  "market": "us",
+  "members": [
+    {
+      "best_iteration": 497,
+      "path": "us/seed42.cbm",
+      "seed": 42,
+      "sha256": "a1053af7b8023e0873373480a011be732fc5ce45e996607787328d628d4cb582",
+      "sidecar_path": "us/seed42.cbm.json",
+      "sidecar_sha256": "a2c812331a3ad2604140c5d0f310306cf1a939b13a610508e015fa27dde0a183",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 1,
+      "path": "us/seed43.cbm",
+      "seed": 43,
+      "sha256": "5e08338c8d2d227a8f04968d8073c8009ff6246b48abed95c2f421c01d03daa4",
+      "sidecar_path": "us/seed43.cbm.json",
+      "sidecar_sha256": "367850c6262fe379fbb3d0c84fabaa0bb61b79cffb725552c44a1c7de013f6dc",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 977,
+      "path": "us/seed44.cbm",
+      "seed": 44,
+      "sha256": "a95ec40f24847e6b60c60822aa0d003ec0a9f28941f49fb312bf89ebbc7a4e66",
+      "sidecar_path": "us/seed44.cbm.json",
+      "sidecar_sha256": "26b116124f47e8b02884b7c3231c49b114d7be00d6274d34d62dfad3435b0e12",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    }
+  ],
+  "model_name": "cat_binary8",
+  "policy": {
+    "stop_probability_cap": 1.0,
+    "threshold": 0.5
+  },
+  "provenance": {
+    "source_ensemble_sha256": "6b378212c4db3e02d4e8e9bca24b9553b68a0464aa47c40911041c245e5e92ca",
+    "source_summary_sha256": "e5a2e0be2540b618a57b5ba512b3bbc48562414958b32ea5d6b0ce0340092871"
+  },
+  "research_results": {
+    "walk_2022": {
+      "audit": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 221,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": -0.0021188641913055606,
+          "net_mean_upper": -0.00020622264658803633,
+          "precision_lower": 0.3939223697650664,
+          "precision_upper": 0.6236895161290321,
+          "reason": null,
+          "seed": 42,
+          "signal_count": 84,
+          "signal_days": 58,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 24,
+          "valid_replicates": 2000
+        },
+        "cost_bps": 20.0,
+        "count": 486722,
+        "coverage": 0.00017258311726200994,
+        "gross_mean_return": 0.00073165808621684,
+        "net_mean_return": -0.00126834191378316,
+        "precision": 0.5,
+        "signal_count": 84,
+        "signal_days": 58,
+        "symbol_count": 24
+      },
+      "qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      },
+      "validation": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 98,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": null,
+          "net_mean_upper": null,
+          "precision_lower": null,
+          "precision_upper": null,
+          "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+          "seed": 42,
+          "signal_count": 19,
+          "signal_days": 14,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 14,
+          "valid_replicates": 0
+        },
+        "cost_bps": 20.0,
+        "count": 219686,
+        "coverage": 8.648707700991415e-05,
+        "gross_mean_return": 0.00026315789473684215,
+        "net_mean_return": -0.001736842105263158,
+        "precision": 0.47368421052631576,
+        "signal_count": 19,
+        "signal_days": 14,
+        "symbol_count": 14
+      },
+      "validation_qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "insufficient_signal_count",
+          "insufficient_signal_days",
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      }
+    },
+    "walk_2024": {
+      "audit": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 222,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": -0.0006220541916570808,
+          "net_mean_upper": 0.001722285116520401,
+          "precision_lower": 0.5535714285714286,
+          "precision_upper": 0.8269642857142855,
+          "reason": null,
+          "seed": 42,
+          "signal_count": 57,
+          "signal_days": 48,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 20,
+          "valid_replicates": 2000
+        },
+        "cost_bps": 20.0,
+        "count": 587581,
+        "coverage": 9.700790188927144e-05,
+        "gross_mean_return": 0.0027082592041000873,
+        "net_mean_return": 0.0007082592041000872,
+        "precision": 0.7017543859649122,
+        "signal_count": 57,
+        "signal_days": 48,
+        "symbol_count": 20
+      },
+      "qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      },
+      "validation": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 96,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": -0.0016890377686993566,
+          "net_mean_upper": 0.0011222063217483278,
+          "precision_lower": 0.4594594594594595,
+          "precision_upper": 0.7666747572815534,
+          "reason": null,
+          "seed": 42,
+          "signal_count": 88,
+          "signal_days": 49,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 31,
+          "valid_replicates": 2000
+        },
+        "cost_bps": 20.0,
+        "count": 239448,
+        "coverage": 0.0003675119441381845,
+        "gross_mean_return": 0.0019680425205510555,
+        "net_mean_return": -3.1957479448944514e-05,
+        "precision": 0.625,
+        "signal_count": 88,
+        "signal_days": 49,
+        "symbol_count": 31
+      },
+      "validation_qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      }
+    }
+  },
+  "risk_flags": {
+    "deployment_allowed": false,
+    "intraday_path_verified": false,
+    "known_data_quality_issues": true,
+    "research_only": true,
+    "research_qualified": false
+  },
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "source": {
+    "new_target_experiment": {
+      "eligible_samples": 8079553,
+      "eligible_symbol_count": 3447,
+      "original_indices_sha256": "ada0d471346a702be3e0891b6d9224e8d8d2ecc6a394c07b28bcdc248059b49d",
+      "quarantine": [
+        {
+          "excluded_samples": 3341,
+          "symbol": "BBSI",
+          "symbol_id": 299
+        },
+        {
+          "excluded_samples": 3586,
+          "symbol": "FCEL",
+          "symbol_id": 661
+        },
+        {
+          "excluded_samples": 2064,
+          "symbol": "BNED",
+          "symbol_id": 2038
+        }
+      ],
+      "raw_bar_count": 8869839,
+      "raw_cache_target_is_not_used_for_labels": true,
+      "raw_samples": 8088544,
+      "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative",
+      "warnings": [
+        "known price-basis discontinuities quarantined, not corrected",
+        "other corporate-action issues may remain; SONY flagged",
+        "no intraday first-touch ordering",
+        "survivorship and observed-universe limitations remain"
+      ]
+    },
+    "raw_cache_provenance": {
+      "database_path": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1\\us_daily_clean.sqlite3",
+      "database_sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+      "market": "us",
+      "max_eval_samples": 60000,
+      "max_train_samples": 200000,
+      "purge_sessions": 30,
+      "seed": 42,
+      "start": "2010-01-01",
+      "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative",
+      "version": 2
+    }
+  }
+}

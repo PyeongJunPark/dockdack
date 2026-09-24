@@ -17,7 +17,7 @@ dependencies = [
 
 [project.scripts]
 dockdack = "dockdack.cli:main"
-dockdack-gui = "dockdack.gui:main"
+dockdack-gui = "dockdack.v00_app:main"
 
 [project.optional-dependencies]
 ml = [
@@ -27,6 +27,10 @@ ml = [
 ]
 gui = [
     "PySide6>=6.10,<7",
+]
+prototype = [
+    "numpy>=2.0,<3",
+    "catboost==1.2.10",
 ]
 conditions = [
     "websockets>=15,<16",

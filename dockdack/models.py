@@ -112,6 +112,12 @@ class AccountSnapshot:
     total_profit_loss: Decimal | None = None
     profit_rate: Decimal | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+    # Signed broker values, not a replacement for cash or available_to_order.
+    # Appended for backwards-compatible positional construction of snapshots.
+    cash_d1: Decimal | None = None
+    cash_d2: Decimal | None = None
+    cash_receivable: Decimal | None = None
+    cash_settlement_source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,10 +194,11 @@ class OrderExecution:
 class ExecutionHistoryRecord:
     """A dated broker order snapshot, not individual fill events.
 
-    ``order_date`` is the explicit query date, not a date returned by the API;
-    the US API does not document the query date's timezone. History retention
-    and multi-share VWAP semantics are not assumed. ``fill_price`` is usable
-    only for a verified one-share fill. An empty exchange means unknown venue.
+    ``order_date`` is the local-market query scope. US ust21180 additionally
+    returns ``broker_order_date`` and a cumulative ``fill_amount``. Recovery
+    correlates the returned timestamp with the local order before using it;
+    the query date alone is never proof of identity. An empty exchange means
+    unknown venue. A multi-share price is derived only from amount / quantity.
     """
 
     market: Market
@@ -213,6 +220,8 @@ class ExecutionHistoryRecord:
     currency: str
     source_api: str
     original_order_number: str = ""
+    broker_order_date: date | None = None
+    fill_amount: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

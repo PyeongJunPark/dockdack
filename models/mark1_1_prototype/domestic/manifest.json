@@ -1,0 +1,301 @@
+{
+  "calibration": {
+    "stop": {
+      "bias": 0.3689946727191147,
+      "fit_log_loss": 0.3815568140312102,
+      "fit_samples": 78595,
+      "iterations": 5,
+      "method": "platt_monotone",
+      "regularization": 1e-06,
+      "slope": 0.8196705538681636,
+      "weighted": false
+    },
+    "success": {
+      "bias": -0.39447918789263836,
+      "fit_log_loss": 0.38031909253282536,
+      "fit_samples": 78595,
+      "iterations": 5,
+      "method": "platt_monotone",
+      "regularization": 1e-06,
+      "slope": 0.8069979069409126,
+      "weighted": false
+    }
+  },
+  "fold": "walk_2024",
+  "market": "domestic",
+  "members": [
+    {
+      "best_iteration": 2951,
+      "path": "domestic/seed42.cbm",
+      "seed": 42,
+      "sha256": "0b053c26ab9b2b99b7d0b44a9df90c1ef95ed2638cfc884176a6b4acc2d125f8",
+      "sidecar_path": "domestic/seed42.cbm.json",
+      "sidecar_sha256": "a934ad6ec69fd5d20634dd6be9ce61cf803895e8a8841b5dc2943f3753cc14cb",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 3000,
+      "path": "domestic/seed43.cbm",
+      "seed": 43,
+      "sha256": "ab4612b1fbb2a719abe74bf688fd30575d1937912e1abf3f51088c42bcaf88c1",
+      "sidecar_path": "domestic/seed43.cbm.json",
+      "sidecar_sha256": "18d4fa8563a6bad0624cf9375300739593e09cf8f0c668cf0e500917fffd833b",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 2976,
+      "path": "domestic/seed44.cbm",
+      "seed": 44,
+      "sha256": "612fd7997fead13304ff6b01b35221fabc3373d057c9a3f8e0e068eb549057bf",
+      "sidecar_path": "domestic/seed44.cbm.json",
+      "sidecar_sha256": "4f85e946c64384bfa1a946d8922042e2a3a898698b22800355ae011e07c5369f",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    }
+  ],
+  "model_name": "cat_joint6",
+  "policy": {
+    "stop_probability_cap": 1.0,
+    "threshold": 0.5
+  },
+  "provenance": {
+    "source_ensemble_sha256": "dc7fc43ab5eb092daeff091f855bed1e74e108a9e3d0339b01ac9047eca699d0",
+    "source_summary_sha256": "03de51726cb250fadd7819d33dd278a44955722dbdc696a23788e5628824bac8"
+  },
+  "research_results": {
+    "walk_2022": {
+      "audit": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 216,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": -0.003686661865407317,
+          "net_mean_upper": 0.0009619072025633497,
+          "precision_lower": 0.2544586107748184,
+          "precision_upper": 0.7680095588235294,
+          "reason": null,
+          "seed": 42,
+          "signal_count": 268,
+          "signal_days": 58,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 158,
+          "valid_replicates": 2000
+        },
+        "cost_bps": 20.0,
+        "count": 159565,
+        "coverage": 0.0016795663209350422,
+        "gross_mean_return": 0.0005735600596847492,
+        "net_mean_return": -0.0014264399403152508,
+        "precision": 0.503731343283582,
+        "signal_count": 268,
+        "signal_days": 58,
+        "symbol_count": 158
+      },
+      "qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      },
+      "validation": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 95,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": -0.0019166007149065678,
+          "net_mean_upper": 0.0001250219007998481,
+          "precision_lower": 0.4255258009293226,
+          "precision_upper": 0.6633663366336634,
+          "reason": null,
+          "seed": 42,
+          "signal_count": 107,
+          "signal_days": 33,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 63,
+          "valid_replicates": 2000
+        },
+        "cost_bps": 20.0,
+        "count": 91725,
+        "coverage": 0.001166530389751976,
+        "gross_mean_return": 0.0010022494484448281,
+        "net_mean_return": -0.000997750551555172,
+        "precision": 0.5420560747663551,
+        "signal_count": 107,
+        "signal_days": 33,
+        "symbol_count": 63
+      },
+      "validation_qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      }
+    },
+    "walk_2024": {
+      "audit": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 214,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": null,
+          "net_mean_upper": null,
+          "precision_lower": null,
+          "precision_upper": null,
+          "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+          "seed": 42,
+          "signal_count": 11,
+          "signal_days": 6,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 11,
+          "valid_replicates": 0
+        },
+        "cost_bps": 20.0,
+        "count": 144599,
+        "coverage": 7.607244863380797e-05,
+        "gross_mean_return": 0.0025454545454545456,
+        "net_mean_return": 0.0005454545454545456,
+        "precision": 0.7272727272727273,
+        "signal_count": 11,
+        "signal_days": 6,
+        "symbol_count": 11
+      },
+      "qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "insufficient_signal_count",
+          "insufficient_signal_days",
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      },
+      "validation": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 92,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": null,
+          "net_mean_upper": null,
+          "precision_lower": null,
+          "precision_upper": null,
+          "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+          "seed": 42,
+          "signal_count": 11,
+          "signal_days": 11,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 4,
+          "valid_replicates": 0
+        },
+        "cost_bps": 20.0,
+        "count": 67556,
+        "coverage": 0.00016282787613239387,
+        "gross_mean_return": 0.0017272727272727275,
+        "net_mean_return": -0.0002727272727272726,
+        "precision": 0.6363636363636364,
+        "signal_count": 11,
+        "signal_days": 11,
+        "symbol_count": 4
+      },
+      "validation_qualification": {
+        "note": "daily timeout returns differ; net-return lower bound independently required",
+        "qualified": false,
+        "reasons": [
+          "insufficient_signal_count",
+          "insufficient_signal_days",
+          "insufficient_symbol_count",
+          "precision_lower_not_above_two_outcome_cost_breakeven_2_over_3",
+          "net_return_lower_not_positive_after_20bps"
+        ],
+        "two_outcome_breakeven": 0.6666666666666667
+      }
+    }
+  },
+  "risk_flags": {
+    "deployment_allowed": false,
+    "intraday_path_verified": false,
+    "known_data_quality_issues": true,
+    "research_only": true,
+    "research_qualified": false
+  },
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "source": {
+    "new_target_experiment": {
+      "eligible_samples": 2668151,
+      "eligible_symbol_count": 2049,
+      "original_indices_sha256": "e805daf9f25c8b1b109e61c49fcf8b7bf41392f47a435c0e6a74d0ce7d7da9e9",
+      "quarantine": [],
+      "raw_bar_count": 3454129,
+      "raw_cache_target_is_not_used_for_labels": true,
+      "raw_samples": 2668151,
+      "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative",
+      "warnings": [
+        "known price-basis discontinuities quarantined, not corrected",
+        "other corporate-action issues may remain; SONY flagged",
+        "no intraday first-touch ordering",
+        "survivorship and observed-universe limitations remain"
+      ]
+    },
+    "raw_cache_provenance": {
+      "database_path": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1\\domestic_daily_clean.sqlite3",
+      "database_sha256": "9cc6e97466fe77237b53d188a82ce657d74586c1f4f2be25be7f8381ff6f73b8",
+      "market": "domestic",
+      "max_eval_samples": 60000,
+      "max_train_samples": 200000,
+      "purge_sessions": 30,
+      "seed": 42,
+      "start": "2010-01-01",
+      "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative",
+      "version": 2
+    }
+  }
+}

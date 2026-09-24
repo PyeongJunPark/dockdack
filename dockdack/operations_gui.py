@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 from dockdack.gui import label, number, table
 from dockdack.watchlist import STATUS_LABELS
 from dockdack.performance import realized_performance
+from dockdack.activity_snapshot import LedgerCollector, MAX_VISIBLE_ROWS, collect_event_logs
+from dockdack.signal_bridge import prototype_order_label
 
 
 def local_time(value):
@@ -33,18 +35,29 @@ def populate(widget, rows, keys):
     old_scroll = scrollbar.value()
     first = widget.item(widget.rowAt(0), 0)
     anchor = first.data(Qt.ItemDataRole.UserRole) if first and old_scroll else None
-    widget.setRowCount(len(rows))
-    for row, values in enumerate(rows):
-        for column, value in enumerate(values):
-            cell = QTableWidgetItem(str(value))
-            cell.setToolTip(str(value))
-            if column == 0:
-                cell.setData(Qt.ItemDataRole.UserRole, keys[row])
-            widget.setItem(row, column, cell)
-    if anchor in keys:
-        widget.scrollToItem(widget.item(keys.index(anchor), 0), widget.ScrollHint.PositionAtTop)
-    else:
-        scrollbar.setValue(old_scroll)
+    enabled = widget.updatesEnabled()
+    widget.setUpdatesEnabled(False)
+    try:
+        widget.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                text = str(value)
+                cell = widget.item(row, column)
+                if cell is None:
+                    cell = QTableWidgetItem(text)
+                    widget.setItem(row, column, cell)
+                elif cell.text() != text:
+                    cell.setText(text)
+                cell.setToolTip(text)
+                cell.setData(Qt.ItemDataRole.ForegroundRole, None)
+                if column == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, keys[row])
+        if anchor in keys:
+            widget.scrollToItem(widget.item(keys.index(anchor), 0), widget.ScrollHint.PositionAtTop)
+        else:
+            scrollbar.setValue(old_scroll)
+    finally:
+        widget.setUpdatesEnabled(enabled)
     return True
 
 
@@ -67,6 +80,11 @@ class EventLog(QWidget):
         if not force and head is not None and head == self._head:
             return
         events = store.events(limit=500, category=self.category)
+        self.apply_events(events, head=head)
+
+    def apply_events(self, events, *, head=None):
+        """Qt-only bounded paint; collection has already completed elsewhere."""
+        events = events[:MAX_VISIBLE_ROWS]
         self.latest = events[0]["time"] if events else None
         populate(self.table, [(local_time(r["time"]), r["symbol"].split(":")[-1], r["message"])
                               for r in events], [r["id"] for r in events])
@@ -96,10 +114,16 @@ class OperationsPanel(QWidget):
         layout.addWidget(self.tabs, 1)
 
     def reload(self, store, *, visible_only=False, force=False):
-        heads = store.event_heads()
+        categories = (self.tabs.currentWidget().category,) if visible_only else tuple(self.logs)
+        self.apply_logs(collect_event_logs(store, categories,
+            previous_heads={key: view._head for key, view in self.logs.items()}, force=force))
+
+    def apply_logs(self, payload):
+        """Apply worker-collected events without DB reads or a full-log rebuild."""
+        heads = payload["heads"]
         for view in self.logs.values():
-            if not visible_only or view is self.tabs.currentWidget():
-                view.reload(store, head=heads[view.category], force=force)
+            if view.category in payload["events"]:
+                view.apply_events(payload["events"][view.category], head=heads[view.category])
             view.latest = heads[view.category]["time"]
         self.flow.setText(f"최근 감시 기록 {local_time(self.logs['monitor'].latest)}  ·  최근 신호 기록 {local_time(self.logs['signal'].latest)}")
 
@@ -114,6 +138,8 @@ class OrderHistoryPanel(QWidget):
         self.records = ()
         self._ledger = ()
         self.performance = realized_performance(())
+        self._collector = None
+        self._applied_snapshot = None
         layout = QVBoxLayout(self)
         heading = QHBoxLayout()
         self.heading = label("실제 주문·체결 내역 · 모의계좌", "section")
@@ -145,7 +171,7 @@ class OrderHistoryPanel(QWidget):
         filter_row.addWidget(self.count_label, 1)
         records_layout.addLayout(filter_row)
         self.table = table(["요청시각 (로컬)", "종목", "시장", "매수/매도", "주문 수량", "체결 수량",
-                            "잔량", "상태", "실제 체결가", "주문번호", "매도 대응 원가", "실현손익", "실현 수익률"])
+                            "잔량", "상태", "실제 체결가", "주문번호", "매도 대응 원가", "실현손익", "실현 수익률", "매수 모델"])
         self.table.verticalHeader().setDefaultSectionSize(54)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -155,6 +181,8 @@ class OrderHistoryPanel(QWidget):
             self.table.setColumnHidden(column, True)
         for visual, logical in enumerate((0, 1, 3, 8, 5, 10, 11, 12, 7, 2, 4, 6, 9)):
             header.moveSection(header.visualIndex(logical), visual)
+        self.table.setColumnWidth(13, 160)
+        header.moveSection(header.visualIndex(13), 3)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setToolTip("체결가·원가·손익은 통화별 값입니다. 행에 마우스를 올리면 주문번호·주문 수량·잔량·가격 출처를 볼 수 있습니다.")
         records_layout.addWidget(self.table, 1)
@@ -169,18 +197,31 @@ class OrderHistoryPanel(QWidget):
         return record["status"] == "filled" or Decimal(str(record.get("filled_quantity") or 0)) > 0
 
     def reload(self, store, *, visible_only=False, force=False):
-        # A fill snapshot may change without an event. Always check visible order
-        # records; never use signal/order log revisions to infer broker fills.
-        ledger = store.order_history(limit=None)
-        if ledger != self._ledger:
-            self._ledger = ledger
-            self.performance = realized_performance(ledger)
-            self.records = tuple(reversed(ledger[-500:]))
-            self.render()
-        elif not self.table.rowCount():
-            self.render()
+        # Compatibility path for synchronous callers. The dashboard uses a
+        # worker-owned LedgerCollector then apply_snapshot to keep I/O/FIFO off
+        # the UI thread. The revision includes fill snapshots, not only logs.
+        if self._collector is None or self._collector.store is not store:
+            self._collector = LedgerCollector(store)
+        snapshot = self._collector.collect(force=force or self._ledger is None)
+        if snapshot is not None:
+            self.apply_snapshot(snapshot, force=force)
         if not visible_only or self.tabs.currentWidget() is self.audit:
             self.audit.reload(store, head=store.event_heads()["order"], force=force)
+
+    def apply_snapshot(self, snapshot, *, force=False):
+        """Paint precomputed results only; never reads SQLite or recomputes FIFO."""
+        if snapshot is self._applied_snapshot and self._ledger is not None and not force:
+            return False
+        self._applied_snapshot = snapshot
+        self._ledger = snapshot.ledger
+        self.performance = snapshot.performance
+        self.records = tuple(reversed(snapshot.ledger[-MAX_VISIBLE_ROWS:]))
+        self.render()
+        return True
+
+    def apply_logs(self, payload):
+        if "order" in payload["events"]:
+            self.audit.apply_events(payload["events"]["order"], head=payload["heads"]["order"])
 
     def set_recovery_status(self, status):
         text = status.get("message") or "체결가 확인 전"
@@ -252,7 +293,8 @@ class OrderHistoryPanel(QWidget):
                          "매수" if r["side"] == "buy" else "매도", r["quantity"],
                          "—" if filled is None else str(filled), "—" if remaining is None else str(remaining),
                          status, fill_text, r["order_number"] or "—", money(metric.get("cost_basis")),
-                         money(metric.get("realized_profit")), f"{rate:+.2f}%" if rate is not None else money(None)))
+                         money(metric.get("realized_profit")), f"{rate:+.2f}%" if rate is not None else money(None),
+                         prototype_order_label(r)))
         if populate(self.table, rows, [r["rule_id"] for r in records]):
             for index, r in enumerate(records):
                 self.table.item(index, 3).setForeground(QColor("#ed7892" if r["side"] == "buy" else "#7aa2ff"))
@@ -262,11 +304,12 @@ class OrderHistoryPanel(QWidget):
                 if remaining is None:
                     remaining = "0" if r["status"] == "filled" else "미확인"
                 details = (f"주문번호 {r['order_number'] or '—'} · 주문 {r['quantity']}주 · 잔량 {remaining}\n"
+                           f"매수 모델: {prototype_order_label(r)} · 저장된 신호: {r.get('external_signal_id') or '미확인'}\n"
                            f"가격 재조회: {r.get('recovery_message') or '아직 보완 조회하지 않음'}\n"
                            f"가격 출처: {r.get('recovery_source_api') or '증권사 체결 응답'} · {r.get('recovery_price_basis') or '저장된 체결가'}\n"
                            f"가격 검증: {metrics[index].get('price_reason') or '확인됨'} · 원본 응답 가격 {r.get('fill_price') or '미확인'}\n"
                            f"손익: {metrics[index].get('reason') or '앱 장부의 주문순서 FIFO · 수수료·세금 제외'}")
-                for column in (0, 1, 5, 8, 10, 11, 12):
+                for column in (0, 1, 5, 8, 10, 11, 12, 13):
                     self.table.item(index, column).setToolTip(details)
                 profit = metrics[index].get("realized_profit")
                 if profit is not None:

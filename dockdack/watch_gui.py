@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QFrame, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from dockdack.autotrade import AutoTrader
+from dockdack.autotrade import AutoTrader, _transient_poll_failure
 from dockdack.gui import STYLE, Worker, label, number, table
 from dockdack.gui_service import TradingService
 from dockdack.models import Market, TradingMode
@@ -36,6 +36,9 @@ from dockdack.signal_status import inspect_signal_file
 from dockdack.dashboard_theme import DASHBOARD_STYLE
 from dockdack.branding import APP_NAME, TAGLINE, app_icon
 from dockdack.fill_recovery import FillRecovery
+from dockdack.v00_widgets import SourceList, OrderToast, ActivityProgressBar
+from dockdack.market_status import market_statuses
+from dockdack.activity_snapshot import LedgerCollector, collect_event_logs
 from dockdack.watchlist import (
     STATUS_LABELS, TRIGGER_LABELS, MarketSnapshot, TriggerKind, TriggerRule, WatchItem, WatchStore, default_store, utc_now,
 )
@@ -155,6 +158,19 @@ class WatchlistDialog(QDialog):
         self._last_update_at = None
         self._last_export_error = ""
         self._market_summary = "시장 개장 상태 미확인 · 첫 조회 시 확인"
+        self._market_open = {}
+        self._market_display_open = {}
+        self._market_status_minute = None
+        self._notification_cursor = 0
+        self._notification_initialized = False
+        self._activity_worker = None
+        self._activity_pending = False
+        self._ledger_collector = LedgerCollector(self.store)
+        self._schedule_probe = None
+        self._schedule_minute = None
+        self._close_when_idle = False
+        self.activity_pool = QThreadPool(self)
+        self.activity_pool.setMaxThreadCount(1)
         self._inspection = None
         self._inspection_worker = None
         self._inspection_config = None
@@ -177,6 +193,8 @@ class WatchlistDialog(QDialog):
         self.setStyleSheet(STYLE + DASHBOARD_STYLE)
         self.window_controls = WindowControls(self)
         self._build()
+        self._apply_execution_preferences()
+        self.order_toast = OrderToast(self)
         self._sync_environment()
         self.environment_timer = QTimer(self)
         self.environment_timer.setInterval(100)
@@ -192,7 +210,7 @@ class WatchlistDialog(QDialog):
         # Worker-side disarming must appear even while the next API request is
         # still pending. This timer only reads state; it does not poll the broker.
         self.order_status_timer = QTimer(self)
-        self.order_status_timer.setInterval(100)
+        self.order_status_timer.setInterval(250)
         self.order_status_timer.timeout.connect(self._sync_order_controls)
         self.order_status_timer.start()
         self.health_timer = QTimer(self)
@@ -200,6 +218,26 @@ class WatchlistDialog(QDialog):
         self.health_timer.timeout.connect(self._update_health)
         self.health_timer.start()
         self._update_health()
+
+    def _apply_execution_preferences(self):
+        self.engine.session_only_poll = True
+        self.engine.enable_holdings_exits = True
+        self.engine.equity_buy_percent = Decimal(str(self.buy_percent.value())) if self.percent_sizing.isChecked() else None
+        self.engine.isolated_symbol_errors = True
+        self.engine.holding_caps = {Market.DOMESTIC: Decimal(str(self.external_krw.value())),
+                                    Market.US: Decimal(str(self.external_usd.value()))}
+
+    def _order_notifications_worker(self, progress):
+        with self.store.connection() as db:
+            if not self._notification_initialized:
+                self._notification_cursor = db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+                self._notification_initialized = True
+                return
+            rows = db.execute("SELECT e.id,e.symbol,e.message FROM events e JOIN event_category_index c ON c.event_id=e.id WHERE e.id>? AND c.category='order' ORDER BY e.id LIMIT 50",
+                              (self._notification_cursor,)).fetchall()
+        if rows:
+            self._notification_cursor = rows[-1]['id']
+            progress(('notifications', tuple(f"{row['symbol'].split(':')[-1]} · {row['message']}" for row in rows)))
 
     def _sync_environment(self):
         mode = selected_mode(self.service)
@@ -255,13 +293,20 @@ class WatchlistDialog(QDialog):
 
     @Slot()
     def _finish_environment_switch(self):
-        if not self._pending_environment or self.worker is not None or self._inspection_worker is not None:
+        if (not self._pending_environment or self.worker is not None or self._inspection_worker is not None
+                or self._activity_worker is not None or self._schedule_probe is not None):
             return
         service, store = self._pending_environment
         self._pending_environment = None
         self.environment_timer.stop()
         self.service, self.store = service, store
         self.engine = AutoTrader(service, store)
+        self._market_open = {}
+        self._market_display_open = {}
+        self._market_status_minute = None
+        self._notification_initialized = False
+        self._ledger_collector = LedgerCollector(store)
+        self._schedule_minute = None
         self.scheduler = RankingScheduler(service, store, clock=lambda: self.engine.clock(), stopped=lambda: self.engine._stop.is_set())
         self.portfolio = PortfolioCache(service)
         self._portfolio_payload = self.portfolio.snapshot()
@@ -291,6 +336,10 @@ class WatchlistDialog(QDialog):
         self.external_krw.setValue(0)
         self.external_usd.setValue(0)
         self.external_quantity.setValue(1)
+        self.additional_sources.table.setRowCount(0)
+        self.portfolio_panel._live_quotes.clear()
+        self.portfolio_panel.set_exit_targets({})
+        self.order_toast.hide()
         folder = store.path.parent / 'exchange'
         self.signal_path.setText(str(folder / 'signals.json'))
         self.chart_path.setText(str(folder / 'charts.json'))
@@ -300,9 +349,17 @@ class WatchlistDialog(QDialog):
         self.order_history_panel.table.setRowCount(0)
         self.order_history_panel.set_recovery_status(self._fill_recovery_status)
         self.trade_journal_panel.store = store
-        self.trade_journal_panel.refresh(force=True)
-        self.sweep_progress.setValue(0)
-        self.sweep_progress.setFormat('관심종목 시세·차트 조회 · 환경 전환 후 대기')
+        # Do not leave DEMO logs visible beneath a REAL badge when the new
+        # environment's asynchronous log query fails or has identical IDs.
+        for view in (*self.operations_panel.logs.values(), self.order_history_panel.audit):
+            view.apply_events((), head=None)
+        self.operations_panel.flow.setText('최근 감시 기록 — · 최근 신호 수신 —')
+        from dockdack.activity_snapshot import LedgerSnapshot
+        from dockdack.trade_journal import daily_trade_journal
+        empty = LedgerSnapshot(None, (), daily_trade_journal(()))
+        self.order_history_panel.apply_snapshot(empty, force=True)
+        self.trade_journal_panel.apply_snapshot(empty, force=True)
+        self.sweep_progress.set_activity('관심종목 시세·차트 조회 · 환경 전환 후 대기')
         self._sync_environment()
         self.reload_tables()
         self._reload_activity(force=True)
@@ -323,7 +380,7 @@ class WatchlistDialog(QDialog):
         title.addWidget(self.brand_mark)
         brand = QVBoxLayout()
         brand.setSpacing(2)
-        brand.addWidget(label(APP_NAME, "heading"))
+        brand.addWidget(label(APP_NAME + '  ver 0.0', "heading"))
         self.environment_caption = label(f"{TAGLINE}   /   모의투자", "eyebrow")
         brand.addWidget(self.environment_caption)
         title.addLayout(brand)
@@ -337,14 +394,25 @@ class WatchlistDialog(QDialog):
         layout.addLayout(title)
         self.environment_notice = label('', 'muted', wrap=True)
         layout.addWidget(self.environment_notice)
+        self.environment_notice.hide()
         status_line = QHBoxLayout()
         self.monitoring_label = label("감시 중지", "muted")
         self.order_status_detail = label("시세 감시와 자동주문이 중지되어 있습니다.", "muted", wrap=True)
         status_line.addWidget(self.monitoring_label)
         status_line.addWidget(self.order_status_detail, 1)
         layout.addLayout(status_line)
+        market_line = QHBoxLayout()
+        self.market_labels = {}
+        for market, title in ((Market.DOMESTIC, '한국'), (Market.US, '미국')):
+            badge = label(f'{title} · 장 시간 확인 중', 'connectionMode')
+            self.market_labels[market] = badge
+            market_line.addWidget(badge)
+        market_line.addWidget(label('정규장 기준 · 거래 시간은 마우스를 올려 확인', 'muted'))
+        market_line.addStretch()
+        layout.addLayout(market_line)
         self.health_label = label("앱 응답 확인 중 · API 상태 미확인", "muted", wrap=True)
         layout.addWidget(self.health_label)
+        self.health_label.hide()  # Full diagnostics live in the server/log page.
 
         control_card = QFrame()
         control_card.setObjectName("controlBar")
@@ -387,7 +455,7 @@ class WatchlistDialog(QDialog):
         self.connection_shortcut.setAutoDefault(False)
         flow.addWidget(self.connection_shortcut)
         layout.addLayout(flow)
-        self.sweep_progress = QProgressBar()
+        self.sweep_progress = ActivityProgressBar()
         self.sweep_progress.setObjectName("sweepProgress")
         self.sweep_progress.setRange(0, 100)
         self.sweep_progress.setValue(0)
@@ -395,7 +463,7 @@ class WatchlistDialog(QDialog):
         self.sweep_progress.setFormat('관심종목 시세·차트 조회 · 대기')
         self.sweep_progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sweep_progress.setFixedHeight(24)
-        self.sweep_progress.setAccessibleName('관심종목 시세·차트 조회 진행률 · 체결 표시 아님')
+        self.sweep_progress.setAccessibleName('관심종목 시세·차트 조회 / 보유종목 매도 조건 확인 진행률 · 체결 표시 아님')
         layout.addWidget(self.sweep_progress)
 
         self.workspace_tabs = QTabWidget()
@@ -646,7 +714,8 @@ class WatchlistDialog(QDialog):
     def _external_config_key(self):
         return (self.external_mode.isChecked(), self.random_demo.isChecked(), self.external_source.text().strip(),
                 self.signal_path.text().strip(), self.chart_path.text().strip(), self.external_quantity.value(),
-                self.external_krw.value(), self.external_usd.value(), self.random_us.currentData())
+                self.external_krw.value(), self.external_usd.value(), self.random_us.currentData(),
+                self.percent_sizing.isChecked(), self.buy_percent.value(), self.additional_sources.raw_sources())
 
     def connection_status(self):
         """Only observed in-memory worker state; no filesystem, DB or broker I/O."""
@@ -676,9 +745,14 @@ class WatchlistDialog(QDialog):
         self.signal_connection_panel.set_status(status)
         producer = "내장 모의 신호기" if status["producer"] == "random-demo" else "외부 JSON 신호" if status["configured"] else "수동 규칙"
         state = "수신 오류" if status.get("reader_error") else "입력 파일 대기" if status.get("reader_state") == "missing" else "신호 수신 중" if status["active"] else "수신 중지"
-        text = f"{producer}  ·  {state}  |  {self._market_summary}"
+        text = f"{producer}  ·  {state}"
         if self.connection_summary.text() != text:
             self.connection_summary.setText(text)
+        if hasattr(self, 'source_status'):
+            states = getattr(self.engine, 'external_sources', {})
+            errors = getattr(self.engine, 'external_source_errors', {})
+            self.source_status.setText(' · '.join(f"{source}: {'오류·해당 출처 보류' if source in errors else reader.status().get('reader_state', '대기')}"
+                                                  for source, (_, reader) in states.items()) or '추가 연결 없음')
 
     def open_connection_settings(self):
         self.workspace_tabs.setCurrentWidget(self.tabs)
@@ -703,7 +777,7 @@ class WatchlistDialog(QDialog):
             self.message.setText("연결 설정에서 외부 신호 모드를 먼저 선택하세요.")
             return
         config = self._applied_external_config if self.monitoring and self._applied_external_config else self._external_config_key()
-        _, random, source, inbox, _, quantity, krw, usd, _ = config
+        _, random, source, inbox, _, quantity, krw, usd, _ = config[:9]
         try:
             policy = ExternalPolicy(source, quantity, Decimal(str(krw)), Decimal(str(usd)), allow_market=random)
         except Exception as exc:
@@ -719,6 +793,9 @@ class WatchlistDialog(QDialog):
     @Slot(object, object)
     def _inspection_completed(self, result, error):
         self._inspection_worker = None
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+            return
         config = self._applied_external_config if self.monitoring and self._applied_external_config else self._external_config_key()
         if self._inspection_config != config:
             self._inspection = None
@@ -740,7 +817,8 @@ class WatchlistDialog(QDialog):
         grid.addWidget(self.random_demo, 0, 0, 1, 2)
         grid.addWidget(label("미국 처리 방식", "muted"), 1, 0)
         grid.addWidget(self.random_us, 1, 1)
-        grid.addWidget(label("국내는 시장가 · 매수/매도 수량은 외부 신호 탭의 수량 사용 (기본 1주)\n"
+        grid.addWidget(label("국내 매수는 시장가 · 매수 수량은 설정한 평가자산 비중 또는 고정 수량 적용\n"
+                             "보유분 매도는 상방·하방 가격을 별도로 확인하며 금액 상한과 매도 가능 수량 적용\n"
                              "같은 입력은 다시 추첨하지 않습니다. 이미 보유하면 추가매수하지 않습니다.\n"
                              "실제 평균 매입가 대비 +1% 이상 익절 / -0.8% 이하 손절 신호입니다.\n"
                              "호출 지연·가격 변동·미체결로 해당 수익률에서의 체결은 보장되지 않습니다 (수수료·세금 별도).\n"
@@ -766,12 +844,25 @@ class WatchlistDialog(QDialog):
 
     def _build_external_tab(self):
         self.external_panel = QWidget()
-        grid = QGridLayout(self.external_panel)
+        outer = QVBoxLayout(self.external_panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName('externalSignalSettingsContent')
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        content.setStyleSheet('QWidget#externalSignalSettingsContent { background: #121b2a; }')
+        scroll.setStyleSheet('QScrollArea { background: #121b2a; border: none; }')
+        grid = self.external_grid = QGridLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         self.external_mode = QCheckBox("외부 신호 모드 (수동 트리거 실행 안 함)")
         self.external_source = QLineEdit("external-model")
         self.external_quantity = QSpinBox()
         self.external_quantity.setRange(1, 999999999)
-        self.external_quantity.setSuffix(" 주 / 주문")
+        self.external_quantity.setValue(999999999)
+        self.external_quantity.setSuffix(" 주 상한")
+        self.external_quantity.setToolTip('별도 수량 상한입니다. 비중 매수는 10% 예산·주문당 금액·가용액을 우선 적용하므로 이 수량을 그대로 매수하지 않습니다.')
         self.external_krw, self.external_usd = QDoubleSpinBox(), QDoubleSpinBox()
         for field, currency in ((self.external_krw, "KRW"), (self.external_usd, "USD")):
             field.setRange(0, 999999999999)
@@ -797,10 +888,29 @@ class WatchlistDialog(QDialog):
         grid.addWidget(label("외부 모드: 종목별 즉시 전송 + 순회 후 전체 파일 갱신 · 과거 일봉 DB 재사용 / 당일 봉 증분 조회\n"
                              "금액 0은 해당 시장 차단 · 파일 읽기는 주문 활성화가 아님 · 입력/상한은 이번 창에서만 유지", "muted", wrap=True), 3, 0, 1, 5)
         grid.setColumnStretch(1, 1)
+        self.percent_sizing = QCheckBox('평가자산 비중으로 매수')
+        self.percent_sizing.setChecked(True)
+        self.buy_percent = QDoubleSpinBox()
+        self.buy_percent.setRange(0.01, 100)
+        self.buy_percent.setDecimals(2)
+        self.buy_percent.setValue(10)
+        self.buy_percent.setSuffix(' % / 1회 매수')
+        self.order_popups = QCheckBox('매수·매도 주문 팝업 알림')
+        self.order_popups.setChecked(True)
+        grid.addWidget(self.percent_sizing, 4, 0, 1, 2)
+        grid.addWidget(self.buy_percent, 4, 2)
+        grid.addWidget(self.order_popups, 4, 3, 1, 2)
+        grid.addWidget(label('시장별 현금 + 보유 평가금액 기준 · 국내 음수 예수금은 검증된 D+2 기준 · 가용액/상한 이내 정수 주\n'
+                             '보유종목 별도 매도 순회: 전략별 목표 우선 · 목표 없는 기존 보유분만 기본 +1% / -0.8% · 일반 오류는 해당 종목만 보류', 'muted', wrap=True), 5, 0, 1, 5)
+        self.additional_sources = SourceList()
+        grid.addWidget(self.additional_sources, 6, 0, 1, 5)
+        self.source_status = label('추가 연결 없음', 'muted', wrap=True)
+        grid.addWidget(self.source_status, 8, 0, 1, 5)
         self.tabs.addTab(self.external_panel, "외부 신호 연결")
 
     def configure_external(self):
         self.engine.disarm()
+        self._apply_execution_preferences()
         if selected_mode(self.service) is TradingMode.REAL and (
             self.random_demo.isChecked() or self.external_source.text().strip() == 'random-demo'
         ):
@@ -820,7 +930,20 @@ class WatchlistDialog(QDialog):
         self.engine.external_only = enabled
         self.engine.external_reader = SignalFileReader(self.store, inbox, policy, self.engine.clock) if enabled else None
         self.test_producer = RandomDemoSignals(self.service, self.store, policy, inbox, clock=lambda: self.engine.clock(),
-                                              quantity=self.external_quantity.value(), us_order_type=self.random_us.currentData()) if self.random_demo.isChecked() else None
+                                              quantity=1 if self.percent_sizing.isChecked() else self.external_quantity.value(), us_order_type=self.random_us.currentData()) if self.random_demo.isChecked() else None
+        sources = [(policy, self.engine.external_reader)] if enabled else []
+        seen_sources, seen_paths = {policy.source_id}, {inbox.resolve(), outbox.resolve()}
+        for source, path in self.additional_sources.sources():
+            path = Path(path).expanduser().resolve()
+            if source in seen_sources or path in seen_paths or path.suffix.lower() != '.json' or path == self.store.path:
+                raise ValueError('신호기 출처/입력은 중복할 수 없고, 출력·DB와 다른 .json 경로여야 합니다.')
+            extra = ExternalPolicy(source, policy.max_quantity, policy.max_krw, policy.max_usd)
+            seen_sources.add(source)
+            seen_paths.add(path)
+            if enabled:
+                sources.append((extra, SignalFileReader(self.store, path, extra, self.engine.clock)))
+        if hasattr(self.engine, 'configure_external_sources'):
+            self.engine.configure_external_sources(sources)
         self._applied_external_config = self._external_config_key()
         self._last_export_at, self._last_update_at, self._last_export_error, self._inspection = None, None, "", None
         return inbox, outbox, policy
@@ -843,10 +966,18 @@ class WatchlistDialog(QDialog):
             return
         days = self.days_input.value()
         def collect():
-            ranks = self.service.top_turnover(Market.DOMESTIC, 100) + self.service.top_turnover(Market.US, 100)
-            self.store.add_ranked(ranks, days)
+            from dockdack.market_schedule import ranking_allowed
+            for market in Market:
+                if ranking_allowed(market, self.engine.clock()):
+                    ranks = self.service.top_volume(market, 100)
+                    if not ranking_allowed(market, self.engine.clock()):
+                        raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
+                    protected = self.service.protected_symbols(market)
+                    if not ranking_allowed(market, self.engine.clock()):
+                        raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
+                    self.store.replace_ranked(market, ranks, protected, days=days, separate_holdings=True)
             return {}
-        self._run(collect, done="한국 100 + 미국 100종목 추가/갱신 완료 · 전체 조회 후 차트 JSON을 내보내세요.")
+        self._run(collect, done="선정 가능한 시장만 거래량 TOP100 갱신 · 장외/휴장 시장은 조회하지 않았습니다.")
 
     def export_json(self):
         if self.worker or self.monitoring:
@@ -971,7 +1102,8 @@ class WatchlistDialog(QDialog):
             finally:
                 view.blockSignals(False)
             self.watch_market_tabs.setTabText(index, f"{'한국 · KRW' if market is Market.DOMESTIC else '미국 · USD'} ({len(market_items)})")
-        rules = self.store.rules()
+        rules = self.store.rules(limit=500)
+        self.rules_table.setToolTip('최근 규칙 최대 500개 표시 · 전체 주문 기록은 실제 주문·체결 및 매매일지에서 확인하세요.')
         item_map = {i.id: i for i in items}
         self.set_rows(self.rules_table, [(item_map[r.watch_id].instrument.symbol, r.description,
                       "매수" if r.side.value == "buy" else "매도", r.quantity,
@@ -991,20 +1123,52 @@ class WatchlistDialog(QDialog):
         page = self.workspace_tabs.currentWidget()
         if not force and page not in (self.operations_panel, self.order_history_panel, self.trade_journal_panel):
             return
+        if self._close_when_idle:
+            return
+        if self._activity_worker is not None:
+            self._activity_pending |= force or visible_force
+            return
         now = monotonic()
         if not (force or visible_force) and now - self._last_log_reload < 2:
             return
         self._last_log_reload = now
-        try:
-            if force or page is self.operations_panel:
-                self.operations_panel.reload(self.store, visible_only=not force, force=force)
-            if force or page in (self.order_history_panel, self.trade_journal_panel):
-                self.order_history_panel.reload(self.store, visible_only=not force, force=force)
-                self.trade_journal_panel.refresh(records=self.order_history_panel._ledger, force=force)
-        except (OSError, sqlite3.Error) as exc:
-            self._last_log_error = f"기록 DB 조회 실패 · 이전 화면 유지: {exc}"
-        else:
-            self._last_log_error = ""
+        store, collector = self.store, self._ledger_collector
+        categories = tuple(self.operations_panel.logs) if force else (
+            (self.operations_panel.tabs.currentWidget().category,) if page is self.operations_panel else ())
+        if force or page is self.order_history_panel:
+            categories += ('order',)
+        heads = {key: view._head for key, view in self.operations_panel.logs.items()}
+        heads['order'] = self.order_history_panel.audit._head
+        ledger_needed = force or page in (self.order_history_panel, self.trade_journal_panel)
+        def collect():
+            logs = collect_event_logs(store, categories, previous_heads=heads)
+            snapshot = collector.collect() if ledger_needed else None
+            return store, logs, snapshot
+        worker = Worker(collect)
+        self._activity_worker = worker
+        worker.signals.completed.connect(self._activity_completed)
+        self.activity_pool.start(worker)
+
+    @Slot(object, object)
+    def _activity_completed(self, result, error):
+        self._activity_worker = None
+        if error is not None:
+            self._last_log_error = f'기록 DB 조회 실패 · 이전 화면 유지: {error}'
+        elif result[0] is self.store:
+            self._last_log_error = ''
+            _, logs, snapshot = result
+            self.operations_panel.apply_logs(logs)
+            self.order_history_panel.apply_logs(logs)
+            if snapshot is not None:
+                self.order_history_panel.apply_snapshot(snapshot)
+                self.trade_journal_panel.apply_snapshot(snapshot)
+        pending, self._activity_pending = self._activity_pending, False
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+        elif self._pending_environment:
+            self._finish_environment_switch()
+        elif pending:
+            self._reload_activity(force=True)
 
     def api_rate_status(self):
         """Read only existing clients; opening the dashboard never authenticates."""
@@ -1018,6 +1182,7 @@ class WatchlistDialog(QDialog):
         return list(states.values())
 
     def _update_health(self):
+        self._schedule_wakeup()  # Calendar-only badges also refresh while orders/monitoring are OFF.
         now = utc_now()
         age = monotonic() - self._last_activity
         if self.worker:
@@ -1041,6 +1206,12 @@ class WatchlistDialog(QDialog):
             retries = sum(s["retry_count"] for s in rates)
             pacing = f"제한 감지 후 {cooldown:.1f}초 대기" if cooldown > 0 else f"다음 호출까지 {remaining:.1f}초 대기" if remaining > 0 else "요청 처리 중" if any(s["in_flight"] for s in rates) else "호출 대기열 비어 있음"
             text += f"\nAPI 속도 조절 · {pacing} · 안전 간격 {interval:.2f}초 + 응답시간 · 조회 재시도 {retries}회"
+        if self.worker:
+            suffix = (f'호출 제한 대기 {cooldown:.1f}초' if cooldown > 0 else
+                      f'호출 간격 대기 {remaining:.1f}초' if remaining > 0 else '') if rates else ''
+            self.sweep_progress.refresh_wait(suffix)
+        elif self.monitoring and self._all_markets_closed():
+            self.sweep_progress.set_activity('장외 대기 · 한국·미국 정규장 전에는 시세·매수·매도 감시를 쉬고 있습니다')
         if self._last_log_error:
             text += f" · {self._last_log_error}"
         self.health_label.setText(text)
@@ -1066,6 +1237,8 @@ class WatchlistDialog(QDialog):
         self._portfolio_requested.clear()
         previous = self.portfolio.snapshot()
         payload = self.portfolio.refresh_due(force=force or requested, stopped=self.engine._stop.is_set)
+        if (payload != previous or requested or force) and hasattr(self.engine, 'holding_exit_targets'):
+            progress(('exit_targets', self._portfolio_exit_targets_worker(payload)))
         if payload == previous and not requested and not force:
             return
         for market, state in payload.items():
@@ -1074,6 +1247,26 @@ class WatchlistDialog(QDialog):
                 text = f"{market_name} 잔고 조회 실패 · {state.error}" if state.error else f"{market_name} 잔고 조회 완료 · 보유 {len(state.positions)}종목"
                 self.store.event("SYSTEM", text, category="system")
         progress(("portfolio", payload))
+
+    def _portfolio_exit_targets_worker(self, payload):
+        """An unsupported holding must not interrupt other markets' monitoring.
+
+        Keep the row visible, but never fabricate a tradable venue or a target
+        for it. Storage/integrity failures still escape to the fail-closed path.
+        """
+        targets = {}
+        for state in payload.values():
+            for position in state.positions:
+                key = f'{position.market.value}:{position.exchange}:{position.symbol}'
+                try:
+                    targets[key] = self.engine.holding_exit_targets(position)
+                except ValueError as exc:
+                    targets[key] = {'take_profit_price': None, 'stop_loss_price': None,
+                                    'source': '자동매도 보류', 'error': str(exc), 'watch_id': key}
+                    self.engine._message('holding-target-error:' + key, key,
+                        f'해당 보유종목 자동매도 보류 · 종목/거래소 확인 필요 ({position.exchange}): {exc}'
+                        ' · 다른 종목 감시는 계속', category='monitor')
+        return targets
 
     @Slot()
     def refresh_portfolio(self):
@@ -1086,6 +1279,7 @@ class WatchlistDialog(QDialog):
             previous = self.portfolio.snapshot()
             self._portfolio_requested.clear()
             payload = self.portfolio.refresh_due(force=True, stopped=self._account_stop.is_set)
+            progress(('exit_targets', self._portfolio_exit_targets_worker(payload)))
             for market, state in payload.items():
                 if state.last_attempt != previous[market].last_attempt:
                     self.store.event("SYSTEM", f"{'한국' if market is Market.DOMESTIC else '미국'} 잔고 "
@@ -1169,12 +1363,8 @@ class WatchlistDialog(QDialog):
         self._worker_started = utc_now()
         self._last_activity = monotonic()
         self._progress_text = "API 요청 대기"
-        if job_kind == "quotes":
-            self.sweep_progress.setRange(0, max(1, len(self._items_by_id)))
-            self.sweep_progress.setValue(0)
-            self.sweep_progress.setFormat('관심종목 시세·차트 조회 %v/%m종목 · %p%')
-        else:
-            self.sweep_progress.setFormat('계좌·자료 조회 처리 중 · 체결 표시 아님')
+        self.sweep_progress.set_activity('계좌·체결 조회 준비 · 이후 관심종목 → 보유종목 순회'
+            if job_kind == 'quotes' else '계좌·자료 조회 처리 중 · 체결 표시 아님', waiting=True)
         self._last_worker_error = ""
         self.worker.signals.progress.connect(self._progress)
         self.worker.signals.completed.connect(self._completed)
@@ -1187,6 +1377,34 @@ class WatchlistDialog(QDialog):
     def _progress(self, data):
         self._last_progress_at = utc_now()
         self._last_activity = monotonic()
+        if len(data) == 2 and data[0] == 'market_status':
+            self._apply_market_status(data[1])
+            return
+        if len(data) == 2 and data[0] == 'watch_progress':
+            value = data[1]
+            name = '한국' if value['market'] is Market.DOMESTIC else '미국'
+            self._progress_text = f"{name} 관심종목 시세·차트 조회 {value['completed']}/{value['total']}종목 · {value['symbol']}"
+            self.sweep_progress.set_activity(self._progress_text, waiting=True)
+            return
+        if len(data) == 2 and data[0] == 'holdings_progress':
+            self._holding_progress(data[1])
+            return
+        if len(data) == 2 and data[0] == 'notifications':
+            if self.order_popups.isChecked():
+                self.order_toast.notify(data[1])
+            return
+        if len(data) == 2 and data[0] == 'exit_targets':
+            self.portfolio_panel.set_exit_targets(data[1])
+            return
+        if len(data) == 2 and data[0] == 'phase':
+            self._progress_text = str(data[1])
+            self.message.setText(str(data[1]))
+            self.sweep_progress.set_activity(str(data[1]) + ' · 현재가로 상방/하방 확인', waiting=True)
+            return
+        if len(data) == 2 and data[0] == 'holding_quote':
+            self.portfolio_panel.apply_holding_quote(data[1])
+            self._progress_text = f"보유종목 매도 감시 · {data[1]['instrument'].symbol}"
+            return
         if len(data) == 2 and data[0] == "executions":
             self._fill_recovery_status = data[1]
             self.order_history_panel.set_recovery_status(data[1])
@@ -1212,11 +1430,54 @@ class WatchlistDialog(QDialog):
             self.fresh_ids.add(key)
         self.message.setText(f"조회 {count}/{total} · {key.split(':')[-1]} · 외부 모드에서는 새 신호를 우선 확인합니다.")
         self._progress_text = f"시세·차트 {count}/{total} · {key.split(':')[-1]}"
-        self.sweep_progress.setRange(0, max(1, total))
-        self.sweep_progress.setValue(count)
-        self.sweep_progress.setFormat('관심종목 시세·차트 조회 %v/%m종목 · %p%')
+        self.sweep_progress.set_activity('관심종목 시세·차트 조회 %v/%m종목 · %p%', completed=count, total=total)
         self.sweep_progress.setToolTip(f"이번 순회 {count}/{total} · 조회 시도 진행률이며 매수·매도·체결 또는 오류 없음의 표시가 아닙니다.")
         self._update_watch_row(key)
+
+    def _all_markets_closed(self):
+        return all(self._market_display_open.get(market) is False for market in Market)
+
+    def _apply_market_status(self, statuses):
+        # Badges can complete independently of a broker sweep. They must never
+        # replace the sweep's activation-validation market snapshot.
+        self._market_display_open = {market: value['is_open'] for market, value in statuses.items()}
+        self._market_summary = ' · '.join(value['text'] for value in statuses.values())
+        for market, value in statuses.items():
+            badge = self.market_labels[market]
+            badge.setText(value['text'])
+            badge.setToolTip(value['detail'] + f"\n확인 시각 {value['checked_at'].astimezone():%H:%M:%S}")
+            tone = 'active' if value['is_open'] else 'error' if value['is_open'] is None else ''
+            if badge.property('tone') != tone:
+                badge.setProperty('tone', tone)
+                badge.style().unpolish(badge)
+                badge.style().polish(badge)
+
+    def _holding_progress(self, value):
+        phase = value['phase']
+        market = value.get('market')
+        title = '한국' if market is Market.DOMESTIC else '미국' if market is Market.US else ''
+        completed, total = value.get('completed', 0), value.get('total', 0)
+        if phase == 'account':
+            text, waiting = f'{title} 보유종목 목록 조회 중', True
+        elif phase in {'checking', 'checked'}:
+            text = f"{title} 보유종목 매도 조건 확인 {completed}/{total}종목 · {value.get('symbol', '')}"
+            if value.get('error'):
+                text += ' · 해당 종목 확인 실패'
+            waiting = phase == 'checking'
+        elif phase == 'market_closed':
+            text, waiting = f'{title} 장외 · 보유종목 매도 감시 대기', False
+        elif phase == 'market_error':
+            text, waiting = f'{title} 보유종목 조회 실패 · 다음 순회 재확인', False
+        elif phase == 'market_complete':
+            text = f'{title} 보유종목 매도 조건 점검 순회 완료 {completed}/{total}종목' if total else f'{title} 보유종목 없음'
+            waiting = False
+        else:
+            text = ('장외 대기 · 한국·미국 정규장 전에는 주문하지 않습니다' if self._all_markets_closed() else
+                    f'보유종목 매도 조건 점검 순회 완료 · {completed}/{total}종목 · 체결 표시 아님')
+            waiting = False
+        self._progress_text = text
+        self.sweep_progress.set_activity(text, completed=completed, total=total, waiting=waiting)
+        self.sweep_progress.setToolTip(value.get('error') or '보유종목의 현재가와 상방·하방 목표가를 점검하는 진행 상태입니다. 주문·체결 성공을 의미하지 않습니다.')
 
     @Slot(object, object)
     def _completed(self, results, error):
@@ -1227,14 +1488,21 @@ class WatchlistDialog(QDialog):
         self._last_activity = monotonic()
         if job_kind == 'quotes':
             state = '중단' if error is not None or self.engine._stop.is_set() else '순회 완료'
-            self.sweep_progress.setFormat(f'관심종목 시세·차트 조회 {state} · %v/%m종목')
+            summary = ('장외 대기 · 한국·미국 정규장 전에는 시세·매수·매도 감시를 쉬고 있습니다'
+                       if state == '순회 완료' and self._all_markets_closed() else
+                       f'관심종목·보유종목 {state} · 체결 표시 아님')
+            self.sweep_progress.set_activity(summary, completed=1 if state == '순회 완료' else 0, total=1)
         else:
-            self.sweep_progress.setFormat('계좌·자료 조회 오류' if error is not None else '계좌·자료 조회 완료 · 체결 표시 아님')
+            self.sweep_progress.set_activity('계좌·자료 조회 오류' if error is not None else '계좌·자료 조회 완료 · 체결 표시 아님', completed=int(error is None), total=1)
         if error is not None:
-            self.engine.disarm()
+            # Failures before/after engine.poll need the same classification as
+            # checkpoint failures inside it. Never retain ON for a broken ledger.
+            if not self.engine.isolated_symbol_errors or not _transient_poll_failure(error):
+                self.engine.disarm()
             self._last_worker_error = str(error)
-            self.store.event("SYSTEM", f"작업 실패 · 자동주문 OFF: {error}", category="system")
-            self.message.setText(f"처리 실패 · 자동주문 OFF: {error}")
+            state = '해당 작업 보류 · 다음 순회 재시도' if self.engine.orders_enabled else '자동주문 OFF'
+            self.store.event("SYSTEM", f"작업 실패 · {state}: {error}", category="system")
+            self.message.setText(f"처리 실패 · {state}: {error}")
         else:
             for key, value in (results or {}).items():
                 if isinstance(value, Exception):
@@ -1257,6 +1525,9 @@ class WatchlistDialog(QDialog):
                     break
         self._focus_result = False
         self._reload_activity(force=True)
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+            return
         if self._pending_environment is not None:
             self._finish_environment_switch()
             return
@@ -1286,20 +1557,16 @@ class WatchlistDialog(QDialog):
                     self.test_producer.publish(payload)
             def refresh(progress):
                 # Calendar construction and session checks stay off the GUI thread.
-                from dockdack.market_schedule import is_open
                 checked = None
                 def market_status():
                     nonlocal checked
                     now = self.engine.clock()
                     if checked and (now - checked).total_seconds() < 60:
                         return
-                    states = []
-                    for market, title in ((Market.DOMESTIC, "한국"), (Market.US, "미국")):
-                        try:
-                            states.append(f"{title} {'정규장 열림' if is_open(market, now) else '정규장 아님'}")
-                        except Exception:
-                            states.append(f"{title} 장 상태 미확인")
-                    self._market_summary = " · ".join(states) + f" ({now.astimezone():%H:%M} 확인)"
+                    statuses = market_statuses(now)
+                    self._market_open = {market: value['is_open'] for market, value in statuses.items()}
+                    self._market_summary = ' · '.join(value['text'] for value in statuses.values())
+                    progress(('market_status', statuses))
                     checked = now
                 market_status()
                 self.store.event("SYSTEM", "감시 순회 시작 · 시세/차트 조회와 신호 전달 (주문 상태는 별도)", category="system")
@@ -1307,13 +1574,16 @@ class WatchlistDialog(QDialog):
                     market_status()
                     self._refresh_executions_worker(progress)
                     self._refresh_portfolio_worker(progress)
+                    self._order_notifications_worker(progress)
                     changed = self.scheduler.tick() if self.monitoring else False
                     if changed:
                         progress(("watchlist", None))
                     return changed
                 self._refresh_executions_worker(progress)
                 self._refresh_portfolio_worker(progress)
+                self._order_notifications_worker(progress)
                 results = self.engine.poll(progress=progress, checkpoint=checkpoint, on_snapshot=publish)
+                self._order_notifications_worker(progress)
                 if self.engine.external_only and not self.engine._stop.is_set():
                     try:
                         export_charts(self.store, outbox, now=self.engine.clock(),
@@ -1328,7 +1598,8 @@ class WatchlistDialog(QDialog):
     def start_monitoring(self):
         if self._pending_environment or self._confirming_environment:
             return
-        if self.worker or not self.store.items():
+        if self.worker or (not self.store.items() and not self.hourly_ranking.isChecked()
+                           and not self.engine.enable_holdings_exits):
             return
         self.engine.disarm()
         try:
@@ -1344,12 +1615,39 @@ class WatchlistDialog(QDialog):
         self.refresh_all()
 
     def _schedule_wakeup(self):
-        if self.monitoring and not self.worker and self.scheduler.due():
+        if self._close_when_idle or self._pending_environment or self._schedule_probe is not None:
+            return
+        now = self.engine.clock()
+        minute = int(now.timestamp()) // 60
+        check_schedule = self.monitoring and not self.worker and minute != self._schedule_minute
+        if not check_schedule and minute == self._market_status_minute:
+            return
+        if check_schedule:
+            self._schedule_minute = minute
+        self._market_status_minute = minute
+        # Calendar construction and SQLite must never block the UI timer.
+        scheduler = self.scheduler
+        worker = Worker(lambda: (scheduler, scheduler.due() if check_schedule else False, market_statuses(now)))
+        self._schedule_probe = worker
+        worker.signals.completed.connect(self._schedule_checked)
+        self.activity_pool.start(worker)
+
+    @Slot(object, object)
+    def _schedule_checked(self, result, error):
+        self._schedule_probe = None
+        if error is None and result[0] is self.scheduler:
+            self._apply_market_status(result[2])
+        if self._close_when_idle:
+            QTimer.singleShot(0, self.close)
+        elif self._pending_environment:
+            self._finish_environment_switch()
+        elif error is None and result[0] is self.scheduler and result[1] and self.monitoring and not self.worker:
             self.timer.stop()
-            def update():
-                self.scheduler.tick()
-                return {}
-            self._run(update, done="정시 재선정 처리 완료 · 시장별 결과는 활동 기록에서 확인하세요.")
+            self.refresh_all()
+        elif self.monitoring and not self.worker:
+            # Monitoring may have started while the initial calendar-only
+            # probe was running. Do not lose that first scheduling check.
+            self._schedule_wakeup()
 
     def stop_monitoring(self):
         was_running = self.monitoring or self.pending_auto_arm or self.engine.orders_enabled
@@ -1384,13 +1682,18 @@ class WatchlistDialog(QDialog):
                 "확인하면 전체 조회 완료 후 자동주문이 ON 됩니다. 다시 켜기를 누를 필요가 없습니다.\n"
                 "조회 실패 시 OFF를 유지하며, 기다리는 동안 OFF로 예약을 취소할 수 있습니다.\n\n"
                 f"{policy.source_id}의 새 buy/sell 신호를 개별 확인 없이 {name} 주문할까요?\n"
+                f"추가 연결 신호기: {len(self.additional_sources.sources())}개\n"
                 f"입력: {self.signal_path.text()}\n"
-                f"주문당 최대 {policy.max_quantity}주 · {policy.max_krw:,} KRW / {policy.max_usd:,} USD\n"
+                + (f"1회 매수: 시장별 계좌 평가금액(예수금 + 보유 평가액)의 {self.buy_percent.value():g}% · 정수 주식 수 내림\n국내 음수 예수금은 검증된 D+2 추정예수금을 사용하며 해당 현금·주문가능금액 이내로 제한합니다.\n" if self.percent_sizing.isChecked()
+                   else f"주문당 최대 {policy.max_quantity}주\n") +
+                f"주문당 금액 상한: {policy.max_krw:,} KRW / {policy.max_usd:,} USD\n"
                 f"국내 시장가 허용: {'예 (금액 상한은 현재가 추정치)' if policy.allow_market else '아니오'}\n"
                 f"미국: {self.random_us.currentText() if self.random_demo.isChecked() else '현재가 지정가만 허용'}\n"
                 + ("내장 모의 신호기: 매수 확률 10% · 평균 매입가 대비 +1% 익절 / -0.8% 손절\n" if self.random_demo.isChecked() else "") +
+                (str(getattr(self, "builtin_confirmation_notice", "")) + "\n" if getattr(self, "builtin_confirmation_notice", "") else "") +
                 "0인 시장은 차단됩니다. 수동 트리거는 실행하지 않습니다.\n"
-                "신호마다 1회, 주문 직전 현재가를 재조회하며 체결은 보장되지 않습니다.\n"
+                "보유분은 전략별 목표를 별도로 점검하며, 목표 없는 기존 보유분만 기본 평균매입가 +1% / −0.8%를 적용합니다.\n"
+                "미국은 증권사 거절이 확정된 경우만 조건을 재확인해 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
                 "상한은 주문당 제한이며 하루 누적 한도는 아닙니다."
                 + ("\n실제 자금으로 반복 주문되며 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
@@ -1404,7 +1707,7 @@ class WatchlistDialog(QDialog):
         return QMessageBox.question(self, f"{name} 자동주문 활성화 확인",
             "확인하면 전체 조회 성공 후 자동주문이 ON 됩니다. 기다리는 동안 OFF로 예약을 취소할 수 있습니다.\n"
             f"조건이 맞으면 개별 주문 확인창 없이 {name} 지정가 주문이 전송됩니다.\n"
-            "규칙별 한 번만 시도하며, 거절/오류 후 자동 재시도하지 않습니다.\n"
+            "미국 증권사 거절이 확정된 경우 조건 재확인 후 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
             "거래일 캘린더의 정규장만 허용하며 캘린더 오류 시 차단합니다.\n\n" + summary
             + ("\n실제 자금으로 주문되며 원금 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
@@ -1418,7 +1721,7 @@ class WatchlistDialog(QDialog):
     def enable_auto_orders(self):
         if self.engine.orders_enabled or self.pending_auto_arm or self._confirming_orders or self._pending_environment or self._confirming_environment:
             return
-        if not self.store.items():
+        if not self.store.items() and not self.hourly_ranking.isChecked() and not self.engine.enable_holdings_exits:
             self.message.setText("관심종목을 먼저 추가하세요. 자동주문은 OFF입니다.")
             return
         revision = self._order_request_revision
@@ -1479,6 +1782,10 @@ class WatchlistDialog(QDialog):
         if error is not None:
             return str(error) or type(error).__name__
         active_items = self.store.items()
+        if self._market_open:
+            active_items = tuple(item for item in active_items if self._market_open.get(item.instrument.market, False))
+            if not active_items and self.monitoring and not self.engine._stop.is_set():
+                return ''  # Closed markets never require out-of-session quotes to arm a gated engine.
         active = {item.id for item in active_items}
         results = results or {}
         failures = {key: str(value) for key, value in results.items() if key in active and isinstance(value, Exception)}
@@ -1596,21 +1903,18 @@ class WatchlistDialog(QDialog):
             self.reload_tables()
 
     def reject(self):
-        self._pending_environment = None
-        self.environment_timer.stop()
-        self.stop_monitoring()
-        if not self.worker and not self._inspection_worker:
-            self.health_timer.stop()
-            self.order_status_timer.stop()
-            super().reject()
+        self.close()
 
     def closeEvent(self, event):
+        self._close_when_idle = True
         self._pending_environment = None
         self.environment_timer.stop()
+        # A deferred close still means no new status/health ticks. Keep only
+        # the already-running workers alive until their completion callbacks.
+        self.health_timer.stop()
+        self.order_status_timer.stop()
         self.stop_monitoring()
-        if self.worker or self._inspection_worker:
+        if self.worker or self._inspection_worker or self._activity_worker or self._schedule_probe:
             event.ignore()
         else:
-            self.health_timer.stop()
-            self.order_status_timer.stop()
             event.accept()

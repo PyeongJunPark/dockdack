@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from dockdack.demo_session import SessionController
     from dockdack.watch_gui import WatchlistDialog
@@ -25,10 +27,16 @@ from test_autotrade import FakeTradingService, NOW
 
 @unittest.skipUnless(HAS_QT, "Install the gui extra")
 class DeferredOrderTests(unittest.TestCase):
-    """Drive real completion slots without starting any worker/API thread."""
+    """Drive broker completion slots without broker threads; drain local log workers."""
 
     @classmethod
     def setUpClass(cls):
+        # QTest.qWait can starve a worker's first numpy/pandas calendar import.
+        # Like the other GUI interaction fixtures, warm calendars on this
+        # thread before starting the display-only background badge worker.
+        from dockdack.market_schedule import calendar_for
+        for market in Market:
+            calendar_for(market, 2026)
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
@@ -65,13 +73,29 @@ class DeferredOrderTests(unittest.TestCase):
         self.app.processEvents()
 
     def tearDown(self):
+        self.window.health_timer.stop()
+        self.window.order_status_timer.stop()
+        self.window.environment_timer.stop()
         self.window.worker = None
         self.window.stop_monitoring()
+        self.wait_local_workers()
         self.window.close()
+        self.wait_local_workers()
         self.window.deleteLater()
         self.app.processEvents()
         self.pool_patch.stop()
         self.temp.cleanup()
+
+    def wait_local_workers(self):
+        deadline = time.monotonic() + 10
+        idle_rounds = 0
+        while idle_rounds < 2:
+            self.app.processEvents()
+            busy = (self.window._activity_worker or self.window._activity_pending
+                    or self.window._schedule_probe or self.window.activity_pool.activeThreadCount())
+            idle_rounds = 0 if busy else idle_rounds + 1
+            QTest.qWait(10)
+            self.assertLess(time.monotonic(), deadline, "Local activity worker did not finish")
 
     def busy(self, kind="quotes", *, monitoring=True):
         self.window.monitoring = monitoring

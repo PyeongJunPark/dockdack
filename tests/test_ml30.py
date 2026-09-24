@@ -10,7 +10,10 @@ from dockdack.lstm30_adapter import decide_position
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 if HAS_TORCH:
-    import torch
+    try:
+        import torch
+    except (ImportError, OSError) as exc:
+        raise unittest.SkipTest(f"Optional ML dependency cannot be imported: {type(exc).__name__}: {exc}") from exc
     from dockdack.ml30 import (
         CandleLSTM, FEATURE_NAMES, LOOKBACK, Predictor, TARGET,
         _inference_backend, validate_windows, window_features,

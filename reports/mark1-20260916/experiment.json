@@ -1,0 +1,256 @@
+{
+  "run_config": {
+    "db_dir": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1",
+    "output_dir": "outputs\\mark1\\experiment-20260916",
+    "cache_dir": "outputs\\mark1\\cache",
+    "market": "all",
+    "models": [
+      "mlp",
+      "lstm",
+      "gru",
+      "tcn",
+      "transformer",
+      "mlp_no_price_aug"
+    ],
+    "device": "NVIDIA GeForce RTX 5080",
+    "max_train_samples": 200000,
+    "max_eval_samples": 60000,
+    "epochs": 6,
+    "patience": 2,
+    "batch_size": 1024,
+    "seed": 42,
+    "cost_bps": 20,
+    "gpu_memory_fraction": 0.65,
+    "torch": "2.11.0+cu128",
+    "cuda": "12.8",
+    "model_config": {
+      "input_size": 9,
+      "sequence_length": 31,
+      "hidden_size": 64,
+      "dropout": 0.15
+    },
+    "augmentation_factors": [
+      0.99,
+      0.995,
+      1.0,
+      1.005,
+      1.01
+    ],
+    "selection_policy": "2024 Brier then log loss; never use test to pick",
+    "splits": {
+      "train": "2010-2021",
+      "tune": "2022",
+      "calibration": "2023",
+      "selection": "2024",
+      "test": "2025+"
+    },
+    "purge": "input start after previous split's last target date",
+    "single_seed_screen": true
+  },
+  "markets": {
+    "domestic": {
+      "cache_contract": {
+        "version": 2,
+        "database_path": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1\\domestic_daily_clean.sqlite3",
+        "database_sha256": "9cc6e97466fe77237b53d188a82ce657d74586c1f4f2be25be7f8381ff6f73b8",
+        "market": "domestic",
+        "start": "2010-01-01",
+        "max_train_samples": 200000,
+        "max_eval_samples": 60000,
+        "seed": 42,
+        "purge_sessions": 30,
+        "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative"
+      },
+      "selected_counts": {
+        "train": 200000,
+        "tune": 60000,
+        "calibration": 60000,
+        "selection": 60000,
+        "test": 60000
+      },
+      "uncapped_split_counts": {
+        "train": 1912490,
+        "tune": 177772,
+        "calibration": 171804,
+        "selection": 144599,
+        "test": 261486
+      },
+      "selected_symbols": 2049,
+      "split_dates": {
+        "train": {
+          "first": "2010-02-16",
+          "last": "2021-12-30"
+        },
+        "tune": {
+          "first": "2022-02-17",
+          "last": "2022-12-29"
+        },
+        "calibration": {
+          "first": "2023-02-15",
+          "last": "2023-12-28"
+        },
+        "selection": {
+          "first": "2024-02-15",
+          "last": "2024-12-30"
+        },
+        "test": {
+          "first": "2025-02-19",
+          "last": "2026-08-21"
+        }
+      },
+      "selection_locked": {
+        "market": "domestic",
+        "winner": "mlp_no_price_aug",
+        "criterion": "2024 selection Brier, then log loss",
+        "selection_locked_before_test": true,
+        "seed": 42,
+        "models": [
+          {
+            "variant": "mlp",
+            "brier": 0.18332762837849648,
+            "log_loss": 0.5497742670850233
+          },
+          {
+            "variant": "lstm",
+            "brier": 0.18375094905421194,
+            "log_loss": 0.5505733514457921
+          },
+          {
+            "variant": "gru",
+            "brier": 0.18458882543293045,
+            "log_loss": 0.5527807610618222
+          },
+          {
+            "variant": "tcn",
+            "brier": 0.18406071083666928,
+            "log_loss": 0.5519554723195723
+          },
+          {
+            "variant": "transformer",
+            "brier": 0.1836356966531365,
+            "log_loss": 0.5500768832721243
+          },
+          {
+            "variant": "mlp_no_price_aug",
+            "brier": 0.18213022102250734,
+            "log_loss": 0.5461996186905264
+          }
+        ]
+      },
+      "limitations": [
+        "Current catalog survivorship and security subtype limitations remain",
+        "Positive-volume observed targets are required; target availability/activity selection remains",
+        "Adjusted-history consistency and all corporate actions are not independently verified",
+        "This is an audited training dataset, not proof of profitability or point-in-time corporate-action availability",
+        "Daily bars do not reveal intraday barrier order or extrema after a hypothetical entry",
+        "Both-touch is failure for a conservative whole-session event, not proven stop-first execution",
+        "Synthetic entry prices are counterfactual queries, not new independent market observations",
+        "The historical target_up column is ignored; mark_1 must compute its own entry-relative labels",
+        "Gross returns are hypothetical stop-first and day-close-timeout proxies without costs or fills",
+        "The current historical catalog and train-availability universe omit some later IPOs"
+      ]
+    },
+    "us": {
+      "cache_contract": {
+        "version": 2,
+        "database_path": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1\\us_daily_clean.sqlite3",
+        "database_sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+        "market": "us",
+        "start": "2010-01-01",
+        "max_train_samples": 200000,
+        "max_eval_samples": 60000,
+        "seed": 42,
+        "purge_sessions": 30,
+        "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative"
+      },
+      "selected_counts": {
+        "train": 200000,
+        "tune": 60000,
+        "calibration": 60000,
+        "selection": 60000,
+        "test": 60000
+      },
+      "uncapped_split_counts": {
+        "train": 5298859,
+        "tune": 586642,
+        "calibration": 536343,
+        "selection": 588387,
+        "test": 1078313
+      },
+      "selected_symbols": 3450,
+      "split_dates": {
+        "train": {
+          "first": "2010-02-17",
+          "last": "2021-12-31"
+        },
+        "tune": {
+          "first": "2022-02-15",
+          "last": "2022-12-30"
+        },
+        "calibration": {
+          "first": "2023-02-15",
+          "last": "2023-12-29"
+        },
+        "selection": {
+          "first": "2024-02-14",
+          "last": "2024-12-31"
+        },
+        "test": {
+          "first": "2025-02-18",
+          "last": "2026-09-11"
+        }
+      },
+      "selection_locked": {
+        "market": "us",
+        "winner": "mlp_no_price_aug",
+        "criterion": "2024 selection Brier, then log loss",
+        "selection_locked_before_test": true,
+        "seed": 42,
+        "models": [
+          {
+            "variant": "mlp",
+            "brier": 0.203519174051691,
+            "log_loss": 0.5968345146352197
+          },
+          {
+            "variant": "lstm",
+            "brier": 0.2019086920726129,
+            "log_loss": 0.592243280051743
+          },
+          {
+            "variant": "gru",
+            "brier": 0.2029542512212652,
+            "log_loss": 0.5954455055396395
+          },
+          {
+            "variant": "tcn",
+            "brier": 0.20224561150910594,
+            "log_loss": 0.593775727841051
+          },
+          {
+            "variant": "transformer",
+            "brier": 0.20177673932951426,
+            "log_loss": 0.592540045338477
+          },
+          {
+            "variant": "mlp_no_price_aug",
+            "brier": 0.1985295483384498,
+            "log_loss": 0.5833582207217982
+          }
+        ]
+      },
+      "limitations": [
+        "Current catalog survivorship and security subtype limitations remain",
+        "Positive-volume observed targets are required; target availability/activity selection remains",
+        "Adjusted-history consistency and all corporate actions are not independently verified",
+        "This is an audited training dataset, not proof of profitability or point-in-time corporate-action availability",
+        "Daily bars do not reveal intraday barrier order or extrema after a hypothetical entry",
+        "Both-touch is failure for a conservative whole-session event, not proven stop-first execution",
+        "Synthetic entry prices are counterfactual queries, not new independent market observations",
+        "The historical target_up column is ignored; mark_1 must compute its own entry-relative labels",
+        "Gross returns are hypothetical stop-first and day-close-timeout proxies without costs or fills",
+        "The current historical catalog and train-availability universe omit some later IPOs"
+      ]
+    }
+  }
+}

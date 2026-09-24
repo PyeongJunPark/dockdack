@@ -1,5 +1,7 @@
 # DockDack 트레이딩 GUI
 
+현재 기본 창은 ver 0.0 통합 GUI이며 `DockDack.vbs`로 실행한다. [외부 AI 두 모델 동시 연결·모델별 보유 안내](MARK1_1_PROTOTYPE.md)를 참고한다. prototype 사용에는 `uv sync --extra gui --extra prototype`이 필요하다. 모델 선택·프로그램 실행만으로 주문하지 않는다. 아래 개별 시세/수동 주문 기능은 공통 GUI 기능으로 유지한다.
+
 Windows에서 검증한 PySide6 화면이다. **기본은 모의투자**이며 상단 모의/실전 버튼으로 환경을 선택한다.
 `.env`의 `DOCKDACK_TRADING_MODE=real`만으로 GUI가 실전으로 시작하지 않는다.
 실전은 경고 확인, 실전 키, 주문 허용 설정이 모두 필요하며 실제 계좌 주문 검증은 수행하지 않았다.

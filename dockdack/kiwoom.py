@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -12,7 +12,7 @@ from dockdack.exceptions import LiveOrderConfirmationRequired, OrderOutcomeUnkno
 from dockdack.http import HttpTransport, KiwoomHTTPClient
 from dockdack.history import DailyHistory, fetch_daily_history
 from dockdack.universe import RankedStock, top_turnover
-from dockdack.symbols import normalize_symbol
+from dockdack.symbols import normalize_symbol, normalize_us_exchange
 from dockdack.order_prices import current_limit_price, validate_us_order_price
 from dockdack.models import (
     AccountSnapshot,
@@ -166,6 +166,11 @@ class KiwoomBroker:
     def top_turnover(self, market: Market | str, limit: int = 100) -> tuple[RankedStock, ...]:
         selected = _market(market)
         return top_turnover(self._http_for(selected), selected, limit)
+
+    def top_volume(self, market: Market | str, limit: int = 100) -> tuple[RankedStock, ...]:
+        from dockdack.universe import top_volume
+        selected = _market(market)
+        return top_volume(self._http_for(selected), selected, limit)
 
     def common_equities(self, market: Market, candidates):
         from dockdack.equity_policy import common_equities
@@ -463,6 +468,10 @@ class KiwoomBroker:
                 "balance": [page.body for page in balance_pages],
                 "deposit": deposit,
             },
+            cash_d1=_settlement_decimal(deposit.get("d1_entra")),
+            cash_d2=_settlement_decimal(deposit.get("d2_entra")),
+            cash_receivable=_settlement_decimal(deposit.get("ch_uncla")),
+            cash_settlement_source="kt00001:d2_entra" if _settlement_decimal(deposit.get("d2_entra")) is not None else "",
         )
 
     def account_us(
@@ -511,6 +520,9 @@ class KiwoomBroker:
                 "deposit": deposit,
                 "krw_cash": deposit.get("krw_entra"),
             },
+            # The top-level ch_uncla is KRW. Only the USD row belongs in this
+            # market's cash summary; this endpoint supplies no D+1/D+2 cash.
+            cash_receivable=_settlement_decimal(usd_deposit.get("fc_ch_uncla")) if usd_deposit else None,
         )
 
     def get_account(
@@ -625,7 +637,8 @@ class KiwoomBroker:
                     filled_quantity=_decimal(row.get("cntr_qty")) or Decimal(0),
                     remaining_quantity=_decimal(row.get("oso_qty", row.get("ord_remnq"))) or Decimal(0),
                     order_price=_decimal(row.get("ord_pric", row.get("ord_uv")), absolute=True) or Decimal(0),
-                    fill_price=_decimal(row.get("cntr_pric", row.get("cntr_uv")), absolute=True) or Decimal(0),
+                    fill_price=_decimal(row.get("cntr_pric") if selected_market is Market.DOMESTIC
+                                        else row.get("cntr_uv"), absolute=True) or Decimal(0),
                     order_time=str(row.get("ord_tm") or row.get("ord_time", "")),
                 ))
         return tuple(orders)
@@ -641,8 +654,10 @@ class KiwoomBroker:
 
         Official schemas: Kiwoom-Securities/Kiwoom-REST-API, examples/
         국내주식/계좌/get_domestic_account_order_fill_detail.py (kt00007), and
-        미국주식/계좌/get_overseas_daily_order_fills.py (ust21150).
-        No undocumented retention, US query timezone, or VWAP is assumed.
+        미국주식/계좌/get_overseas_orders_by_period.py (ust21180).
+        US searches the local date and following Korean date in one request;
+        each returned order date/time is correlated by FillRecovery, not
+        assumed to use a particular undocumented timezone.
         """
         if type(day) is not date:
             raise ValueError("체결 조회일은 datetime.date 형식이어야 합니다.")
@@ -655,12 +670,12 @@ class KiwoomBroker:
                     "stk_bond_tp": "1", "sell_tp": "0", "stk_cd": "",
                     "fr_ord_no": "", "dmst_stex_tp": "%"}
         else:
-            api_id, path = "ust21150", "/api/us/acnt"
-            body = {"ord_dt": day.strftime("%Y%m%d"), "query_tp": "1",
-                    "slby_tp": "0", "stex_tp": "", "stk_cd": "",
-                    "oppo_trde_tp": "%", "fr_ord_no": ""}
+            api_id, path = "ust21180", "/api/us/acnt"
+            body = {"strt_dt": day.strftime("%Y%m%d"),
+                    "end_dt": (day + timedelta(days=1)).strftime("%Y%m%d"),
+                    "slby_tp": "0", "stex_tp": "", "stk_cd": "", "oppo_trde_tp": "%"}
         records: list[ExecutionHistoryRecord] = []
-        by_order: dict[str, ExecutionHistoryRecord] = {}
+        by_order: dict[tuple[date | None, str], ExecutionHistoryRecord] = {}
         for page in self._http_for(selected).iter_pages(
             api_id=api_id, path=path, body=body, max_pages=max_pages,
         ):
@@ -673,13 +688,14 @@ class KiwoomBroker:
                 raise ValueError("체결 내역 응답 목록이 없거나 잘못되었습니다.")
             for row in rows:
                 record = _execution_history_record(row, selected, day, api_id)
-                previous = by_order.get(record.order_number)
+                key = record.broker_order_date, record.order_number.lstrip("0")
+                previous = by_order.get(key)
                 if previous is not None:
                     # Never add snapshots as if they were distinct executions.
                     if previous != record:
                         raise ValueError("동일 주문번호의 체결 내역이 서로 달라 가격을 확정할 수 없습니다.")
                     continue
-                by_order[record.order_number] = record
+                by_order[key] = record
                 records.append(record)
         return tuple(records)
 
@@ -1121,6 +1137,7 @@ def _execution_history_record(row: Any, market: Market, day: date,
         raise ValueError("체결 내역의 주문번호가 올바르지 않습니다.")
     symbol = text_field("stk_cd", required=True)
     exchange = ""
+    broker_order_date = None
     if market is Market.DOMESTIC:
         symbol = _clean_domestic_symbol(symbol)
         # The account endpoint also documents J:ELW / Q:ETN prefixes. Keep
@@ -1146,6 +1163,13 @@ def _execution_history_record(row: Any, market: Market, day: date,
         order_time, fill_time = text_field("ord_time"), text_field("cntr_time")
         status = text_field("ord_stat_nm")
         original_order = ""
+        if api_id == "ust21180":
+            raw_day = text_field("ord_dt", required=True)
+            if len(raw_day) != 8 or not raw_day.isascii() or not raw_day.isdigit():
+                raise ValueError("미국 체결 내역의 반환 주문일이 올바르지 않습니다.")
+            broker_order_date = datetime.strptime(raw_day, "%Y%m%d").date()
+            if not day <= broker_order_date <= day + timedelta(days=1):
+                raise ValueError("미국 체결 내역의 반환 주문일이 조회 범위를 벗어났습니다.")
     buy, sell = "매수" in side_text, "매도" in side_text
     if buy == sell:
         raise ValueError("체결 내역의 매수·매도 방향을 확인할 수 없습니다.")
@@ -1153,9 +1177,16 @@ def _execution_history_record(row: Any, market: Market, day: date,
     if order_qty <= 0 or filled > order_qty or remaining > order_qty or filled + remaining > order_qty:
         raise ValueError("체결 내역의 주문·체결·잔량 수량이 일치하지 않습니다.")
     reported = price("cntr_uv")
+    amount = price("cntr_amt") if api_id == "ust21180" else None
     fill_price = None
     if filled == 0:
+        if amount is not None:
+            raise ValueError("미체결 주문에 양수 체결금액이 반환되었습니다.")
         basis = "not_filled"
+    elif amount is not None:
+        # The account's cumulative executed amount is authoritative. cntr_uv
+        # may be the last execution price, so never multiply it by all shares.
+        basis, fill_price = "broker_average", amount / filled
     elif reported is None:
         basis = "missing"
     elif order_qty == filled == 1:
@@ -1169,6 +1200,7 @@ def _execution_history_record(row: Any, market: Market, day: date,
         order_price=price("ord_uv"), fill_price=fill_price, reported_fill_price=reported,
         price_basis=basis, order_time=order_time, fill_time=fill_time, status=status,
         currency=currency, source_api=api_id, original_order_number=original_order,
+        broker_order_date=broker_order_date, fill_amount=amount,
     )
 
 
@@ -1195,6 +1227,12 @@ def _decimal(value: Any, *, absolute: bool = False) -> Decimal | None:
     except (InvalidOperation, ValueError):
         return None
     return abs(number) if absolute else number
+
+
+def _settlement_decimal(value: Any) -> Decimal | None:
+    """Keep signed cash amounts; missing or malformed forecasts stay unknown."""
+    number = _decimal(value)
+    return number if number is not None and number.is_finite() else None
 
 
 def _required_decimal(value: Any, label: str, *, absolute: bool = False) -> Decimal:
@@ -1359,12 +1397,26 @@ def _domestic_position(row: dict[str, Any], exchange: str) -> Position:
     )
 
 
+def _us_position_exchange(row: dict[str, Any]) -> str:
+    """Resolve explicit venue labels without guessing from a country or ticker.
+
+    ust21070 can return a Korean exchange name instead of an orderable code.
+    Keep unrecognized/missing or conflicting venues non-tradable; the original
+    fields remain available on Position.raw for diagnosis.
+    """
+    venues = {
+        normalize_us_exchange(row.get(key))
+        for key in ("stex_code", "stex_tp", "stex_nm")
+    } & {"ND", "NY", "NA"}
+    return venues.pop() if len(venues) == 1 else ""
+
+
 def _us_position(row: dict[str, Any]) -> Position:
     return Position(
         market=Market.US,
-        symbol=str(row.get("stk_cd", "")),
+        symbol=normalize_symbol(str(row.get("stk_cd") or "")),
         name=str(row.get("frgn_stk_nm", "")),
-        exchange=str(row.get("stex_nm", "")),
+        exchange=_us_position_exchange(row),
         currency=str(row.get("crnc_code") or "USD"),
         quantity=_decimal(row.get("poss_qty"), absolute=True) or Decimal(0),
         sellable_quantity=_decimal(row.get("sell_alowq"), absolute=True) or Decimal(0),

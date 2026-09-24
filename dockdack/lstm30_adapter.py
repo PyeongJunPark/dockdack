@@ -8,6 +8,7 @@ an export is one immutable decision, including its original expiry time.
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 import hashlib
 import json
 import math
@@ -221,8 +222,35 @@ class LSTM30SignalProducer:
     Persist ``state_path`` across restarts; never delete it to retry an order.
     """
 
+    source_id = SOURCE_ID
+    position_decision = staticmethod(decide_position)
+    input_bars = staticmethod(completed_bars)
+
+    def model_prediction(self, predictor, bars, price):
+        """Strategy hook; the default remains the original mark0 close target."""
+        return predictor.predict(bars), {
+            "target_basis": "next trading day close >= last completed close * 1.01; not current entry return",
+            "reference_close": str(bars[-1][3]),
+        }
+
+    def prediction_cache_key(self, predictor, stock, bars, price):
+        """Cache only the default price-independent mark0 prediction hook.
+
+        Mark1/prototype override ``model_prediction`` and use the current
+        candidate price. They must re-infer each new chart export; inheriting
+        the mark0 OHLCV-only cache would silently reuse the wrong probability.
+        """
+        if type(self).model_prediction is not LSTM30SignalProducer.model_prediction:
+            return None
+        return (id(predictor), stock["market"], stock["exchange"], stock["symbol"],
+                tuple(tuple(bar) for bar in bars))
+
     def __init__(self, predictors, *, position_provider, quantity, max_krw, max_usd,
-                 state_path=None, clock=utc_now):
+                 state_path=None, clock=utc_now, trading_mode="demo"):
+        if trading_mode not in {"demo", "real"}:
+            raise ValueError('Explicit demo or real trading mode required')
+        self.trading_mode = trading_mode
+        self._prediction_cache = OrderedDict()
         if type(quantity) is not int or not 1 <= quantity <= 999_999_999:
             raise ValueError("quantity must be an explicit positive integer")
         self.predictors = dict(predictors)
@@ -249,8 +277,8 @@ class LSTM30SignalProducer:
         if (not isinstance(charts, dict) or type(charts.get("schema_version")) is not int
                 or charts["schema_version"] != 1):
             raise ValueError("Expected chart schema_version=1")
-        if charts.get("trading_mode") != "demo" or charts.get("source") != "kiwoom_demo":
-            raise ValueError("Only explicit Kiwoom demo chart exports are accepted")
+        if charts.get("trading_mode") != self.trading_mode or charts.get("source") != f"kiwoom_{self.trading_mode}":
+            raise ValueError("Only matching explicit Kiwoom trading-mode chart exports are accepted")
         export_id = charts.get("export_id")
         if not isinstance(export_id, str) or not IDENTIFIER.fullmatch(export_id):
             raise ValueError("Invalid export_id")
@@ -277,7 +305,7 @@ class LSTM30SignalProducer:
                 diagnostics.append({"watch_id": key, "reason": "UNREGISTERED_INVALID_CHART", "emitted": False})
                 continue
             decision, detail = self._decision(stock, charts, now)
-            signal = {"signal_id": uuid5(NAMESPACE_URL, f"{SOURCE_ID}:{export_id}:{key}").hex,
+            signal = {"signal_id": uuid5(NAMESPACE_URL, f"{self.source_id}:{export_id}:{key}").hex,
                       "export_id": export_id,
                       **{field: stock[field] for field in ("market", "symbol", "exchange")},
                       "action": decision["action"], "generated_at": created.isoformat(),
@@ -286,7 +314,7 @@ class LSTM30SignalProducer:
                 signal.update({key: value for key, value in decision.items() if key not in {"action", "reason"}})
             signals.append(signal)
             diagnostics.append({"watch_id": key, "reason": decision["reason"], "emitted": True, **detail})
-        payload = {"schema_version": 1, "source_id": SOURCE_ID, "trading_mode": "demo", "signals": signals}
+        payload = {"schema_version": 1, "source_id": self.source_id, "trading_mode": self.trading_mode, "signals": signals}
         # Only recent immutable decisions are useful. Deleted entries cannot be
         # regenerated: new processing rejects exports older than SIGNAL_TTL.
         self.state = {key: value for key, value in self.state.items()
@@ -315,8 +343,8 @@ class LSTM30SignalProducer:
             qty, sellable, average = validate_position(position, stock, checked_at)
         except Exception as exc:
             return {"action": "hold", "reason": "QUOTE_OR_POSITION_UNAVAILABLE"}, {"error": str(exc)}
-        decision = decide_position(current_price=price, quantity=qty, sellable_quantity=sellable,
-                                   average_price=average)
+        decision = self.position_decision(current_price=price, quantity=qty, sellable_quantity=sellable,
+                                          average_price=average)
         if qty == 0:
             try:
                 if charts.get("adjusted_prices") is not True:
@@ -324,13 +352,22 @@ class LSTM30SignalProducer:
                 predictor = self.predictors.get(stock["market"])
                 if predictor is None or predictor.metadata.get("market") != stock["market"]:
                     raise ValueError("A matching market checkpoint is required")
-                bars = completed_bars(stock, checked_at)
-                prediction = predictor.predict(bars)
-                decision = decide_position(current_price=price, quantity=qty,
-                                           sellable_quantity=sellable, prediction=prediction)
+                bars = self.input_bars(stock, checked_at)
+                key = self.prediction_cache_key(predictor, stock, bars, price)
+                cached = self._prediction_cache.get(key) if key is not None else None
+                if cached is None:
+                    prediction, prediction_detail = self.model_prediction(predictor, bars, price)
+                    if key is not None:
+                        self._prediction_cache[key] = copy.deepcopy((prediction, prediction_detail))
+                        while len(self._prediction_cache) > 512:
+                            self._prediction_cache.popitem(last=False)
+                else:
+                    prediction, prediction_detail = copy.deepcopy(cached)
+                    self._prediction_cache.move_to_end(key)
+                decision = self.position_decision(current_price=price, quantity=qty,
+                                                  sellable_quantity=sellable, prediction=prediction)
                 detail["prediction"] = prediction
-                detail["target_basis"] = "next trading day close >= last completed close * 1.01; not current entry return"
-                detail["reference_close"] = str(bars[-1][3])
+                detail.update(prediction_detail)
             except Exception as exc:
                 return {"action": "hold", "reason": "PREDICTION_UNAVAILABLE"}, {"error": str(exc)}
         if decision["action"] == "hold":
