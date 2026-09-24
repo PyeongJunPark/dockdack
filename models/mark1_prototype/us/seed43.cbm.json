@@ -1,0 +1,13 @@
+{
+  "class_names": [
+    "take_only",
+    "stop_only",
+    "both_touch",
+    "neither"
+  ],
+  "feature_count": 184,
+  "model_name": "cat_binary8",
+  "model_sha256": "335c6a4f98059619a3d73c77140f80214d5b4e12a541f0fb4d423905c710e966",
+  "owner": "dockdack.mark1_selective_models",
+  "schema_version": 1
+}

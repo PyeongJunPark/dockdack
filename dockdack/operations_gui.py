@@ -15,6 +15,7 @@ from dockdack.gui import label, number, table
 from dockdack.watchlist import STATUS_LABELS
 from dockdack.performance import realized_performance
 from dockdack.activity_snapshot import LedgerCollector, MAX_VISIBLE_ROWS, collect_event_logs
+from dockdack.signal_bridge import prototype_order_label
 
 
 def local_time(value):
@@ -170,7 +171,7 @@ class OrderHistoryPanel(QWidget):
         filter_row.addWidget(self.count_label, 1)
         records_layout.addLayout(filter_row)
         self.table = table(["요청시각 (로컬)", "종목", "시장", "매수/매도", "주문 수량", "체결 수량",
-                            "잔량", "상태", "실제 체결가", "주문번호", "매도 대응 원가", "실현손익", "실현 수익률"])
+                            "잔량", "상태", "실제 체결가", "주문번호", "매도 대응 원가", "실현손익", "실현 수익률", "매수 모델"])
         self.table.verticalHeader().setDefaultSectionSize(54)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -180,6 +181,8 @@ class OrderHistoryPanel(QWidget):
             self.table.setColumnHidden(column, True)
         for visual, logical in enumerate((0, 1, 3, 8, 5, 10, 11, 12, 7, 2, 4, 6, 9)):
             header.moveSection(header.visualIndex(logical), visual)
+        self.table.setColumnWidth(13, 160)
+        header.moveSection(header.visualIndex(13), 3)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setToolTip("체결가·원가·손익은 통화별 값입니다. 행에 마우스를 올리면 주문번호·주문 수량·잔량·가격 출처를 볼 수 있습니다.")
         records_layout.addWidget(self.table, 1)
@@ -290,7 +293,8 @@ class OrderHistoryPanel(QWidget):
                          "매수" if r["side"] == "buy" else "매도", r["quantity"],
                          "—" if filled is None else str(filled), "—" if remaining is None else str(remaining),
                          status, fill_text, r["order_number"] or "—", money(metric.get("cost_basis")),
-                         money(metric.get("realized_profit")), f"{rate:+.2f}%" if rate is not None else money(None)))
+                         money(metric.get("realized_profit")), f"{rate:+.2f}%" if rate is not None else money(None),
+                         prototype_order_label(r)))
         if populate(self.table, rows, [r["rule_id"] for r in records]):
             for index, r in enumerate(records):
                 self.table.item(index, 3).setForeground(QColor("#ed7892" if r["side"] == "buy" else "#7aa2ff"))
@@ -300,11 +304,12 @@ class OrderHistoryPanel(QWidget):
                 if remaining is None:
                     remaining = "0" if r["status"] == "filled" else "미확인"
                 details = (f"주문번호 {r['order_number'] or '—'} · 주문 {r['quantity']}주 · 잔량 {remaining}\n"
+                           f"매수 모델: {prototype_order_label(r)} · 저장된 신호: {r.get('external_signal_id') or '미확인'}\n"
                            f"가격 재조회: {r.get('recovery_message') or '아직 보완 조회하지 않음'}\n"
                            f"가격 출처: {r.get('recovery_source_api') or '증권사 체결 응답'} · {r.get('recovery_price_basis') or '저장된 체결가'}\n"
                            f"가격 검증: {metrics[index].get('price_reason') or '확인됨'} · 원본 응답 가격 {r.get('fill_price') or '미확인'}\n"
                            f"손익: {metrics[index].get('reason') or '앱 장부의 주문순서 FIFO · 수수료·세금 제외'}")
-                for column in (0, 1, 5, 8, 10, 11, 12):
+                for column in (0, 1, 5, 8, 10, 11, 12, 13):
                     self.table.item(index, column).setToolTip(details)
                 profit = metrics[index].get("realized_profit")
                 if profit is not None:

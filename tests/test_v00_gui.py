@@ -90,6 +90,28 @@ class V00GuiTests(unittest.TestCase):
         self.assertTrue(content.testAttribute(Qt.WidgetAttribute.WA_StyledBackground))
         self.assertIn("#121b2a", content.styleSheet())
 
+    def test_fullscreen_from_maximized_restores_resizable_desktop_without_orders(self):
+        self.window.resize(1180, 820)
+        self.window.show()
+        self.app.processEvents()
+        geometry = self.window.geometry()
+        self.window.showMaximized()
+        self.app.processEvents()
+        self.window.window_controls.fullscreen_button.click()
+        self.app.processEvents()
+        self.assertTrue(self.window.isFullScreen())
+        self.window.window_controls.fullscreen_button.click()
+        self.app.processEvents()
+        self.assertFalse(self.window.isFullScreen())
+        self.assertFalse(self.window.isMaximized())
+        self.assertEqual(self.window.geometry(), geometry)
+        self.window.resize(1120, 800)
+        self.app.processEvents()
+        self.assertEqual((self.window.width(), self.window.height()), (1120, 800))
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.quote_calls, 0)
+        self.assertFalse(self.service.submitted)
+
     def test_optional_builtin_and_multiple_named_json_sources_can_coexist(self):
         self.window.builtin_lstm.setChecked(True)
         self.window.additional_sources.add_row(source="alpha-one", path=str(self.folder / "alpha.json"))

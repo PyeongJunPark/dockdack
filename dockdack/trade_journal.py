@@ -21,7 +21,7 @@ from dockdack.performance import realized_performance
 ZERO = Decimal("0")
 MARKETS = {"domestic": ("KRW", "Asia/Seoul"), "us": ("USD", "America/New_York")}
 DATE_DESCRIPTION = "주문일 기준: 한국은 서울, 미국은 뉴욕 날짜 · 정확한 체결일별 집계가 아닙니다."
-RETURN_DESCRIPTION = "매도 실현 수익률 = 확인된 실현손익 ÷ 해당 매도의 FIFO 매수원가 · 계좌 전체 일수익률 아님"
+RETURN_DESCRIPTION = "매도 실현 수익률 = 확인된 실현손익 ÷ 해당 매수원가 · 모델 매도는 지정 매수분, 일반 매도는 FIFO · 계좌 전체 일수익률 아님"
 _INVALID_CASH = {"duplicate_rule_id", "missing_rule_id", "invalid_quantity", "invalid_instrument", "invalid_side"}
 
 

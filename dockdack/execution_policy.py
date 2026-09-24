@@ -2,7 +2,7 @@
 
 from decimal import Decimal, ROUND_FLOOR
 
-from dockdack.models import Market
+from dockdack.models import Market, TradingMode
 
 
 def account_equity_cash(account):
@@ -56,12 +56,71 @@ def allocation_quantity(account, price, percent, cap, quantity_cap=999_999_999):
     return quantity
 
 
-def holding_exit_targets(store, position):
+def holding_exit_targets(store, position, *, prototype_lots=False):
     """UI/engine shared targets; approved fallback applies only without saved targets."""
     from dockdack.gui_service import Instrument
     from dockdack.watchlist import instrument_key
     key = instrument_key(Instrument(position.market, position.symbol, position.exchange))
     saved = store.exit_targets(key)
+    if prototype_lots:
+        from dockdack.signal_bridge import mark1_prototype_origin
+        import json
+        original = store.external_for_rule(saved.get("rule_id", "")) if saved else None
+        original_payload = json.loads(original["payload"]) if original else {}
+        marked_prototype = bool(saved and (mark1_prototype_origin(saved.get("source"))
+                                  or (original and mark1_prototype_origin(original["source_id"], original_payload))))
+        inventory = store.prototype_inventory(key, broker_quantity=position.quantity,
+                                               broker_sellable=position.sellable_quantity)
+        if marked_prototype and not inventory.get("has_prototype_history"):
+            inventory = {**inventory, "reconciled": False,
+                         "issues": (*inventory["issues"], "모델 소유 표식만 있고 확정 체결 장부가 없습니다.")}
+        if marked_prototype or inventory.get("has_prototype_history") or inventory["lots"]:
+            lots = []
+            ledger_available = sum((lot['available_quantity'] for lot in inventory['lots']), Decimal(0))
+            for lot in inventory["lots"]:
+                if lot["quantity_remaining"] <= 0:
+                    continue
+                lots.append({**lot, "quantity": lot["quantity_remaining"],
+                             "sellable_quantity": min(lot["available_quantity"], position.sellable_quantity) if inventory["reconciled"] else Decimal(0),
+                             "broker_sellable_quantity": position.sellable_quantity,
+                             "sellable_is_shared": position.sellable_quantity < ledger_available,
+                             "source": lot["model_title"], "buy_rule_id": lot["lot_id"],
+                             "take_profit_price": lot["take_profit_price"] if inventory["reconciled"] else None,
+                             "stop_loss_price": lot["stop_loss_price"] if inventory["reconciled"] else None})
+            return {"watch_id": key, "lots": tuple(lots), "reconciled": inventory["reconciled"],
+                    "issues": inventory["issues"], "take_profit_price": None, "stop_loss_price": None,
+                    "source": "모델별 분리 보유" if inventory["reconciled"] else "모델별 체결 대조 확인 필요"}
+    from dockdack.signal_bridge import mark1_prototype_origin, prototype_family, prototype_record_family
+    import json
+    record = store.external_for_rule(saved.get("rule_id", "")) if saved is not None else None
+    try:
+        metadata = json.loads(record["payload"]) if record else {}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("원본 매수 신호 기록을 읽을 수 없습니다.") from exc
+    mark1 = saved is not None and (mark1_prototype_origin(saved.get("source"))
+                                  or (record and mark1_prototype_origin(record["source_id"], metadata)))
+    if mark1:
+        # A saved bracket identifies a strategy-owned purchase. Recalculate
+        # against the broker's actual cost, not the earlier candidate quote.
+        # Do not change legacy or unrelated holdings' absolute/default targets.
+        if TradingMode(store.mode) is not TradingMode.DEMO:
+            raise ValueError("mark1 prototype 보유분 청산은 모의 환경만 허용합니다.")
+        family = prototype_record_family(record, watch_id=key, action="buy")
+        saved_family = prototype_family(saved.get("source"))
+        if family is None or (saved_family is not None and saved_family != family):
+            raise ValueError("mark1 prototype 보유분의 원본 매수 신호 기록을 확인할 수 없습니다.")
+        provenance = {"model_id": family.id, "model_title": family.title,
+                      "buy_source_id": record["source_id"], "buy_signal_id": record["signal_id"],
+                      "buy_rule_id": saved["rule_id"]}
+        average = position.average_price
+        if not isinstance(average, Decimal) or not average.is_finite() or average <= 0:
+            return {**saved, **provenance, "take_profit_price": None, "stop_loss_price": None,
+                    "source": family.title + " · 실제 평균매입가 확인 필요"}
+        profit_pct = format((family.take_profit * 100).normalize(), "f")
+        loss_pct = format((family.stop_loss * 100).normalize(), "f")
+        return {**saved, **provenance, "take_profit_price": average * (1 + family.take_profit),
+                "stop_loss_price": average * (1 - family.stop_loss),
+                "source": f"{family.title} · 실제 평균매입가 +{profit_pct}% / -{loss_pct}%"}
     if saved is not None:
         return saved
     average = position.average_price

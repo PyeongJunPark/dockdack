@@ -119,6 +119,13 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(self.service.quote_calls, 0)
         self.assertEqual(self.service.history_calls, 0)
         self.assertFalse(window.random_demo.isChecked())
+        self.assertFalse(window.percent_sizing.isChecked())
+        self.assertFalse(window.percent_sizing.isEnabled())
+        self.assertFalse(window.additional_sources.isEnabled())
+        self.assertFalse(window.engine.enable_holdings_exits)
+        self.assertIsNone(window.engine.equity_buy_percent)
+        self.assertEqual(window.engine.us_retry_attempts, 1)
+        self.assertTrue(window.engine.session_only_poll)
 
     def test_monitor_only_then_explicit_gui_on_submits_model_limit_buy(self):
         window = self.window()
@@ -252,12 +259,20 @@ class LSTM30GuiTests(unittest.TestCase):
         self.wait_idle(window)
         window.disarm_button.click()
         self.assertFalse(window.engine.orders_enabled)
-        self.predictor.predict.return_value.update(probability_ge_1pct=0.7, predicts_gain=True)
+        # An unchanged mark0 model/30-bar input reuses its immutable cache.
+        # Replace the fixture model explicitly instead of mutating the object
+        # returned by an earlier predict call behind that cache's back.
+        original_predictor = self.predictor
+        self.predictor = SimpleNamespace(metadata=dict(original_predictor.metadata), predict=Mock(return_value={
+            "probability_ge_1pct": 0.7, "buy_threshold": 0.5, "predicts_gain": True}))
+        window.lstm_bridge.producer.predictors["domestic"] = self.predictor
         with patch.object(window, "confirm_automation", return_value=True):
             window.arm_button.click()
         self.wait_idle(window)
         self.assertTrue(window.engine.orders_enabled)
         self.assertEqual(len(self.service.submitted), 1)
+        original_predictor.predict.assert_called_once()
+        self.predictor.predict.assert_called_once()
 
     def test_cli_stop_disarms_and_cannot_be_rearmed_by_gui_on(self):
         self.predictor.predict.return_value.update(probability_ge_1pct=0.2, predicts_gain=False)

@@ -19,7 +19,7 @@ if HAS_QT:
     from dockdack.watch_gui import WatchlistDialog
 
 from dockdack.watchlist import WatchItem, WatchStore, utc_now
-from test_autotrade import FakeTradingService
+from test_autotrade import FakeTradingService, NOW
 
 
 @unittest.skipUnless(HAS_QT, "Install the gui extra")
@@ -36,6 +36,9 @@ class DashboardPerformanceTests(unittest.TestCase):
         for item in self.items:
             self.store.save_item(item)
         self.window = WatchlistDialog(self.service, self.store)
+        # The fake chart ends on NOW; wall-clock dates eventually make this
+        # UI-only fixture stale even though the production freshness check is correct.
+        self.window.engine.clock = lambda: NOW
         self.window.health_timer.stop()
         self.window.order_status_timer.stop()
         self.window.hourly_ranking.setChecked(False)

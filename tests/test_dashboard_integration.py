@@ -66,7 +66,11 @@ class DashboardIntegrationTests(unittest.TestCase):
             busy = (self.window.worker or self.window._activity_worker or self.window._activity_pending
                     or self.window._schedule_probe or self.window.activity_pool.activeThreadCount())
             idle_rounds = 0 if busy else idle_rounds + 1
-            QTest.qWait(10)
+            # processEvents keeps Qt responsive; release the GIL between polls
+            # so cold numpy/pandas imports on activity_pool can make progress.
+            # QTest.qWait in this binding starves that Python worker. Keep the
+            # same 10-second deadline and all worker/idle assertions unchanged.
+            time.sleep(.01)
             self.assertLess(time.monotonic(), deadline, "Fake account worker did not finish")
         self.app.processEvents()
 

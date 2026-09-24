@@ -1,0 +1,356 @@
+{
+  "calibration": {
+    "stop": null,
+    "success": {
+      "bias": 0.06255313888243419,
+      "fit_log_loss": 0.5837480720530884,
+      "fit_samples": 233990,
+      "iterations": 4,
+      "method": "platt_monotone",
+      "regularization": 1e-06,
+      "slope": 1.0979400410114035,
+      "weighted": false
+    }
+  },
+  "fold": "walk_2024",
+  "market": "us",
+  "members": [
+    {
+      "best_iteration": 149,
+      "path": "us/seed42.cbm",
+      "seed": 42,
+      "sha256": "35ee2202f41eb8b03d5a37496450858d6747fd2c325011bb1d1b9519670c1832",
+      "sidecar_path": "us/seed42.cbm.json",
+      "sidecar_sha256": "7eb936242e15528f3490a2c7904d2744473aa316344c691af1d11aa857380e44",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 165,
+      "path": "us/seed43.cbm",
+      "seed": 43,
+      "sha256": "335c6a4f98059619a3d73c77140f80214d5b4e12a541f0fb4d423905c710e966",
+      "sidecar_path": "us/seed43.cbm.json",
+      "sidecar_sha256": "41844dca3a2f6e8f338c4528602eb90d5c797030bad410f347bcae2f8b64bf2f",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    },
+    {
+      "best_iteration": 165,
+      "path": "us/seed44.cbm",
+      "seed": 44,
+      "sha256": "59c7d6d7dfacb279416b093b08e92794eb3ae09b3ad045da55739ab3816af824",
+      "sidecar_path": "us/seed44.cbm.json",
+      "sidecar_sha256": "bf9a281f15dbddde6a51af474dde10a5199b65bc81615660dddbe8361bee87f8",
+      "training_versions": {
+        "backend": "1.2.10",
+        "numpy": "2.5.3",
+        "python": "3.13.5"
+      }
+    }
+  ],
+  "model_name": "cat_binary8",
+  "policy": {
+    "stop_probability_cap": 1.0,
+    "threshold": 0.5
+  },
+  "provenance": {
+    "backtest_summary_sha256": "2ddf05f5bea81fffaa5db76a0dace6a32571ef47082498da862ee162909f98ba",
+    "source_ensemble_sha256": "8917c7e37518dabf801987d3e79b8db77e5d273ff382e0b76aa273f6578e193d",
+    "source_summary_sha256": "62c929cc06056c8d7a7b2e9d08e51e8ca996e59055baf0ad775a894791e9be79"
+  },
+  "research_results": {
+    "development": {
+      "walk_2022": {
+        "audit": {
+          "block_bootstrap": {
+            "adjusted_for_policy_search": false,
+            "block_length": 10,
+            "confidence": 0.95,
+            "cost_bps": 20.0,
+            "count_days": 221,
+            "method": "moving_block_percentile",
+            "minimum_signal_days": 20,
+            "minimum_signals": 50,
+            "minimum_symbols": 10,
+            "n_boot": 2000,
+            "net_mean_lower": null,
+            "net_mean_upper": null,
+            "precision_lower": null,
+            "precision_upper": null,
+            "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+            "seed": 42,
+            "signal_count": 0,
+            "signal_days": 0,
+            "skipped_zero_signal_replicates": 0,
+            "symbol_count": 0,
+            "valid_replicates": 0
+          },
+          "cost_bps": 20.0,
+          "count": 487276,
+          "coverage": 0.0,
+          "gross_mean_return": null,
+          "net_mean_return": null,
+          "precision": null,
+          "signal_count": 0,
+          "signal_days": 0,
+          "symbol_count": 0
+        },
+        "qualification": {
+          "qualified": false,
+          "reasons": [
+            "requires_at_least_50_signal_count",
+            "requires_at_least_20_signal_days",
+            "requires_at_least_10_symbol_count",
+            "precision_must_be_at_least_0_65",
+            "invalid_or_suppressed_block_interval",
+            "invalid_bootstrap_replicate_or_population_counts",
+            "precision_lower_must_exceed_0_579",
+            "net_mean_lower_must_be_positive_after_cost"
+          ]
+        }
+      },
+      "walk_2024": {
+        "audit": {
+          "block_bootstrap": {
+            "adjusted_for_policy_search": false,
+            "block_length": 10,
+            "confidence": 0.95,
+            "cost_bps": 20.0,
+            "count_days": 222,
+            "method": "moving_block_percentile",
+            "minimum_signal_days": 20,
+            "minimum_signals": 50,
+            "minimum_symbols": 10,
+            "n_boot": 2000,
+            "net_mean_lower": null,
+            "net_mean_upper": null,
+            "precision_lower": null,
+            "precision_upper": null,
+            "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+            "seed": 42,
+            "signal_count": 0,
+            "signal_days": 0,
+            "skipped_zero_signal_replicates": 0,
+            "symbol_count": 0,
+            "valid_replicates": 0
+          },
+          "cost_bps": 20.0,
+          "count": 588175,
+          "coverage": 0.0,
+          "gross_mean_return": null,
+          "net_mean_return": null,
+          "precision": null,
+          "signal_count": 0,
+          "signal_days": 0,
+          "symbol_count": 0
+        },
+        "qualification": {
+          "qualified": false,
+          "reasons": [
+            "requires_at_least_50_signal_count",
+            "requires_at_least_20_signal_days",
+            "requires_at_least_10_symbol_count",
+            "precision_must_be_at_least_0_65",
+            "invalid_or_suppressed_block_interval",
+            "invalid_bootstrap_replicate_or_population_counts",
+            "precision_lower_must_exceed_0_579",
+            "net_mean_lower_must_be_positive_after_cost"
+          ]
+        }
+      }
+    },
+    "reused_evaluation": {
+      "classification": {
+        "block_bootstrap": {
+          "adjusted_for_policy_search": false,
+          "block_length": 10,
+          "confidence": 0.95,
+          "cost_bps": 20.0,
+          "count_days": 394,
+          "method": "moving_block_percentile",
+          "minimum_signal_days": 20,
+          "minimum_signals": 50,
+          "minimum_symbols": 10,
+          "n_boot": 2000,
+          "net_mean_lower": null,
+          "net_mean_upper": null,
+          "precision_lower": null,
+          "precision_upper": null,
+          "reason": "insufficient_signals_signal_days_or_symbols_for_interval",
+          "seed": 42,
+          "signal_count": 0,
+          "signal_days": 0,
+          "skipped_zero_signal_replicates": 0,
+          "symbol_count": 0,
+          "valid_replicates": 0
+        },
+        "cost_bps": 20.0,
+        "count": 1077696,
+        "coverage": 0.0,
+        "gross_mean_return": null,
+        "net_mean_return": null,
+        "precision": null,
+        "signal_count": 0,
+        "signal_days": 0,
+        "symbol_count": 0
+      },
+      "description": "reused_historical_evaluation_not_untouched_test",
+      "portfolios": {
+        "carry": {
+          "annualized_return": 0.0,
+          "assumptions": [
+            "Actual OPEN entries; signal > 0.5; both touches STOP FIRST",
+            "Opening gaps execute at OPEN; intraday exits never finance OPEN entries",
+            "One entry per symbol/day; integer shares; long only; no leverage",
+            "Liquidity cap uses supplied past-only share volume",
+            "Roundtrip bps split equally across actual entry/exit notionals",
+            "No bid/ask spread, market impact, partial fills, or price-limit restrictions",
+            "Missing held prices lock capital and use stale marks; resume at next observed OPEN",
+            "Missing-price paths and terminal stale-price liquidation are uncertain accounting, not observed execution",
+            "Last session forced CLOSE exit is an evaluation convention",
+            "Annualization and Sharpe use 252 sessions/year, zero risk-free rate"
+          ],
+          "avg_net_return": null,
+          "both_touch_stop_count": 0,
+          "candidate_count": 0,
+          "closing_counts": {},
+          "cost_bps": 20.0,
+          "eligible_signal_count": 0,
+          "end_date": 20707,
+          "end_of_data_count": 0,
+          "entry_fees": 0.0,
+          "exit_fees": 0.0,
+          "exit_mode": "carry",
+          "fees": 0.0,
+          "final_equity": 10000.0,
+          "forced_gap_count": 0,
+          "fully_observed": true,
+          "gap_calendar_days": 0,
+          "gap_valuation_days": 0,
+          "gross_pnl": 0.0,
+          "initial_cash": 10000.0,
+          "max_drawdown": 0.0,
+          "max_open_exposure": 0.0,
+          "max_positions": 20,
+          "mean_close_exposure": 0.0,
+          "mean_exposure": 0.0,
+          "net_pnl": 0.0,
+          "position_fraction": 0.05,
+          "profit_factor": null,
+          "rejected_count": 0,
+          "sessions": 394,
+          "sharpe": null,
+          "stale_terminal_count": 0,
+          "start_date": 20137,
+          "total_return": 0.0,
+          "trade_count": 0,
+          "uncertain_trades": 0,
+          "volume_fraction": 0.001,
+          "win_rate": null
+        },
+        "eod": {
+          "annualized_return": 0.0,
+          "assumptions": [
+            "Actual OPEN entries; signal > 0.5; both touches STOP FIRST",
+            "Opening gaps execute at OPEN; intraday exits never finance OPEN entries",
+            "One entry per symbol/day; integer shares; long only; no leverage",
+            "Liquidity cap uses supplied past-only share volume",
+            "Roundtrip bps split equally across actual entry/exit notionals",
+            "No bid/ask spread, market impact, partial fills, or price-limit restrictions",
+            "Missing held prices lock capital and use stale marks; resume at next observed OPEN",
+            "Missing-price paths and terminal stale-price liquidation are uncertain accounting, not observed execution",
+            "Last session forced CLOSE exit is an evaluation convention",
+            "Annualization and Sharpe use 252 sessions/year, zero risk-free rate"
+          ],
+          "avg_net_return": null,
+          "both_touch_stop_count": 0,
+          "candidate_count": 0,
+          "closing_counts": {},
+          "cost_bps": 20.0,
+          "eligible_signal_count": 0,
+          "end_date": 20707,
+          "end_of_data_count": 0,
+          "entry_fees": 0.0,
+          "exit_fees": 0.0,
+          "exit_mode": "eod",
+          "fees": 0.0,
+          "final_equity": 10000.0,
+          "forced_gap_count": 0,
+          "fully_observed": true,
+          "gap_calendar_days": 0,
+          "gap_valuation_days": 0,
+          "gross_pnl": 0.0,
+          "initial_cash": 10000.0,
+          "max_drawdown": 0.0,
+          "max_open_exposure": 0.0,
+          "max_positions": 20,
+          "mean_close_exposure": 0.0,
+          "mean_exposure": 0.0,
+          "net_pnl": 0.0,
+          "position_fraction": 0.05,
+          "profit_factor": null,
+          "rejected_count": 0,
+          "sessions": 394,
+          "sharpe": null,
+          "stale_terminal_count": 0,
+          "start_date": 20137,
+          "total_return": 0.0,
+          "trade_count": 0,
+          "uncertain_trades": 0,
+          "volume_fraction": 0.001,
+          "win_rate": null
+        }
+      },
+      "qualification": {
+        "qualified": false,
+        "reasons": [
+          "requires_at_least_50_signal_count",
+          "requires_at_least_20_signal_days",
+          "requires_at_least_10_symbol_count",
+          "precision_must_be_at_least_0_65",
+          "invalid_or_suppressed_block_interval",
+          "invalid_bootstrap_replicate_or_population_counts",
+          "precision_lower_must_exceed_0_579",
+          "net_mean_lower_must_be_positive_after_cost"
+        ]
+      },
+      "range": {
+        "first": "2025-02-18",
+        "last": "2026-09-11",
+        "sessions": 394
+      },
+      "samples": 1077696
+    }
+  },
+  "risk_flags": {
+    "deployment_allowed": false,
+    "intraday_path_verified": false,
+    "known_data_quality_issues": true,
+    "research_only": true,
+    "research_qualified": false
+  },
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "source": {
+    "database_path": "C:\\Users\\user\\Desktop\\dockdack-data-collection\\data\\kiwoom_daily\\clean-20260916-v1\\us_daily_clean.sqlite3",
+    "database_sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+    "market": "us",
+    "max_eval_samples": 60000,
+    "max_train_samples": 200000,
+    "purge_sessions": 30,
+    "seed": 42,
+    "start": "2010-01-01",
+    "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative",
+    "version": 2
+  }
+}

@@ -23,6 +23,112 @@ MAX_SIGNAL_BYTES = 2_000_000
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 
 
+@dataclass(frozen=True)
+class PrototypeFamily:
+    """Stable strategy identity and fractional exits, independent of GUI selection."""
+
+    id: str
+    title: str
+    take_profit: Decimal
+    stop_loss: Decimal
+
+
+_PROTOTYPE_FAMILIES = (
+    PrototypeFamily("mark1-prototype", "mark1 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-1-prototype", "mark1.1 prototype", Decimal(".005"), Decimal(".004")),
+)
+
+
+def _prototype_source(source):
+    normalized = str(source or "").strip().lower().replace("_", "-")
+    for family in _PROTOTYPE_FAMILIES:
+        aliases = {family.id, family.id + "-demo-trigger", family.id + "-daily-barrier"}
+        if family.id == "mark1-1-prototype":
+            aliases.update(alias.replace("mark1-1", "mark1.1") for alias in tuple(aliases))
+        if normalized in aliases:
+            return family
+    return None
+
+
+def _prototype_signal(signal_id):
+    value = str(signal_id or "").lower()
+    return next((family for family in _PROTOTYPE_FAMILIES if value.startswith(family.id + ":")), None)
+
+
+def mark1_prototype_origin(source, metadata=None):
+    """Broad DEMO restriction for either prototype; never an ownership proof."""
+    details = metadata if isinstance(metadata, dict) else {}
+    return bool(_prototype_source(source) or _prototype_signal(details.get("signal_id"))
+                or _prototype_source(details.get("origin_strategy"))
+                or _prototype_source(details.get("strategy_id")))
+
+
+def prototype_family(source, metadata=None):
+    """Resolve source identity; with payload require matching reserved signal ID.
+
+    A renamed/mismatched marker still triggers the broad REAL restriction but
+    cannot inherit another model's holding policy or friendly attribution.
+    This is local provenance validation, not authentication of external code.
+    """
+    family = _prototype_source(source)
+    if metadata is None:
+        return family
+    if not isinstance(metadata, dict):
+        raise ValueError("prototype 원본 매수 신호 출처 형식이 올바르지 않습니다.")
+    signal_family = _prototype_signal(metadata.get("signal_id"))
+    if not mark1_prototype_origin(source, metadata):
+        return None
+    if family is None or signal_family != family:
+        raise ValueError("prototype 원본 매수 신호의 출처와 signal_id 모델이 일치하지 않습니다.")
+    for field in ("origin_strategy", "strategy_id"):
+        declared = _prototype_source(metadata.get(field))
+        if field in metadata and declared != family:
+            raise ValueError("prototype 원본 매수 신호의 모델 식별자가 일치하지 않습니다.")
+    return family
+
+
+def prototype_record_family(record, *, watch_id=None, action=None):
+    """Strictly resolve a persisted signal row, including instrument/action links."""
+    if not record:
+        return None
+    try:
+        metadata = json.loads(record["payload"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("prototype 원본 매수 신호 기록을 읽을 수 없습니다.") from exc
+    family = prototype_family(record.get("source_id"), metadata)
+    if family is None:
+        return None
+    expected_watch = watch_id or record.get("watch_id")
+    payload_watch = f"{metadata.get('market')}:{metadata.get('exchange')}:{metadata.get('symbol')}"
+    if (record.get("signal_id") != metadata.get("signal_id")
+            or record.get("watch_id") != expected_watch or payload_watch != expected_watch
+            or record.get("decision") != metadata.get("action")
+            or (action is not None and metadata.get("action") != action)
+            or metadata.get("trading_mode", "demo") != "demo"):
+        raise ValueError("prototype 원본 매수 신호의 종목·방향·식별자 기록이 일치하지 않습니다.")
+    return family
+
+
+def prototype_order_label(row):
+    """Use only this order's durable BUY record, never current holdings/selection."""
+    allocated_sell = (row.get('side') == 'sell' and row.get('prototype_lot_id')
+                      and row.get('prototype_lot_id') == row.get('prototype_buy_rule_id'))
+    if row.get("side") != "buy" and not allocated_sell:
+        return "매수 출처 미확인"
+    if not row.get("external_payload"):
+        return "미확인 / 수동·외부"
+    record = {"source_id": row.get("external_source_id"),
+              "signal_id": row.get("external_signal_id"), "payload": row.get("external_payload"),
+              "decision": row.get("external_decision"), "watch_id": row.get("external_watch_id")}
+    try:
+        family = prototype_record_family(record, watch_id=row.get("watch_id"), action="buy")
+    except ValueError:
+        return "출처 불일치 · 확인 필요"
+    if allocated_sell and (family is None or row.get('prototype_strategy_id') != family.id):
+        return "출처 불일치 · 확인 필요"
+    return family.title if family else "미확인 / 수동·외부"
+
+
 def _signal_environment(store, source, metadata, *, watch_id=None):
     """Data-only mode provenance, not an authentication or strategy endorsement."""
     mode = TradingMode(getattr(store, "mode", TradingMode.DEMO))
@@ -30,6 +136,8 @@ def _signal_environment(store, source, metadata, *, watch_id=None):
     if declared is not None and declared != mode.value:
         raise ValueError("매매 신호의 trading_mode가 현재 선택한 모의/실전 환경과 다릅니다.")
     if mode is TradingMode.REAL:
+        if mark1_prototype_origin(source, metadata):
+            raise ValueError("mark1 prototype 연구 트리거는 출처 이름을 바꿔도 실전에서 사용할 수 없습니다.")
         if declared != "real":
             raise ValueError("실전 매매 신호에는 최상위 trading_mode='real' 명시가 필요합니다.")
         if str(source).strip().lower().replace("_", "-") == "random-demo":
@@ -252,12 +360,24 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
     parsed, seen = [], set()
     for entry in entries:
         required = {"signal_id", "export_id", "market", "symbol", "exchange", "action", "generated_at", "expires_at"}
-        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"}:
+        model_fields = {"strategy_id", "model_title", "model_version", "model_manifest_sha256"}
+        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"} - model_fields:
             raise ValueError("외부 신호의 필수/허용 필드를 확인하세요.")
         sid, export_id = identifier(entry["signal_id"], "signal_id"), identifier(entry["export_id"], "export_id")
         inst = Instrument(Market(entry["market"]), entry["symbol"], entry["exchange"])
         watch_id = instrument_key(inst)
         _signal_environment(store, source, {**entry, "trading_mode": payload.get("trading_mode")}, watch_id=watch_id)
+        if model_fields.intersection(entry):
+            family = prototype_family(source, entry)
+            if family is None:
+                raise ValueError("모델 식별 정보는 검증된 prototype 출처에만 사용할 수 있습니다.")
+            for field in model_fields.intersection(entry):
+                if not isinstance(entry[field], str) or not 1 <= len(entry[field]) <= 128:
+                    raise ValueError("모델 식별 정보는 1~128자 문자열이어야 합니다.")
+            if "model_title" in entry and entry["model_title"] != family.title:
+                raise ValueError("모델 표시 이름과 원본 신호 출처가 일치하지 않습니다.")
+            if "model_manifest_sha256" in entry and not re.fullmatch(r"[0-9a-f]{64}", entry["model_manifest_sha256"]):
+                raise ValueError("모델 체크섬 형식이 올바르지 않습니다.")
         if watch_id in seen:
             raise ValueError("한 파일에는 종목별 신호를 하나만 넣으세요.")
         seen.add(watch_id)

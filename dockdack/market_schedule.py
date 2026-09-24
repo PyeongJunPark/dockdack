@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
+from threading import Lock
 from uuid import uuid4
 
 from dockdack.history import market_time
@@ -12,6 +13,12 @@ from dockdack.models import Market
 # lacks this special session; do not invent exchange hours before KRX verification.
 UNVERIFIED_SESSIONS = {(Market.DOMESTIC, date(2026, 11, 19))}
 EXTRA_CLOSURES = {(Market.DOMESTIC, date(2026, 6, 3)), (Market.DOMESTIC, date(2026, 7, 17))}
+
+# lru_cache permits concurrent cache misses. Calendar construction mutates
+# exchange_calendars' shared Korean holiday Series and must not overlap across
+# display probes, broker workers, markets or years. Warm cache hits bypass this
+# lock; no broker I/O, session checks or trading loop runs under it.
+_calendar_init_lock = Lock()
 
 
 @dataclass(frozen=True)
@@ -29,11 +36,17 @@ class Session:
             value += timedelta(hours=1)
 
 
+def exchange_calendar(name, *, start, end):
+    """Shared construction guard for GUI schedule and model freshness callers."""
+    with _calendar_init_lock:
+        import exchange_calendars as calendars
+        return calendars.get_calendar(name, start=start, end=end)
+
+
 @lru_cache(maxsize=8)
 def calendar_for(market: Market, year: int):
-    import exchange_calendars as calendars
-    return calendars.get_calendar("XKRX" if market is Market.DOMESTIC else "XNYS",
-                                  start=f"{year-1}-12-01", end=f"{year+1}-01-31")
+    return exchange_calendar("XKRX" if market is Market.DOMESTIC else "XNYS",
+                             start=f"{year-1}-12-01", end=f"{year+1}-01-31")
 
 
 @lru_cache(maxsize=512)

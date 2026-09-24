@@ -1,0 +1,4 @@
+# Install into a Python 3.13 environment alongside the project/ML dependencies.
+# The local workspace keeps Qt in outputs/mark1/prototype-gui-deps instead.
+PySide6==6.11.2
+catboost==1.2.10

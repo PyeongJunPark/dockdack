@@ -901,7 +901,7 @@ class WatchlistDialog(QDialog):
         grid.addWidget(self.buy_percent, 4, 2)
         grid.addWidget(self.order_popups, 4, 3, 1, 2)
         grid.addWidget(label('시장별 현금 + 보유 평가금액 기준 · 국내 음수 예수금은 검증된 D+2 기준 · 가용액/상한 이내 정수 주\n'
-                             '보유종목은 별도 매도 순회: 신호 목표가격 우선, 없으면 평균매입가 +1% / -0.8% · 일반 오류는 해당 종목만 보류', 'muted', wrap=True), 5, 0, 1, 5)
+                             '보유종목 별도 매도 순회: 전략별 목표 우선 · 목표 없는 기존 보유분만 기본 +1% / -0.8% · 일반 오류는 해당 종목만 보류', 'muted', wrap=True), 5, 0, 1, 5)
         self.additional_sources = SourceList()
         grid.addWidget(self.additional_sources, 6, 0, 1, 5)
         self.source_status = label('추가 연결 없음', 'muted', wrap=True)
@@ -1690,8 +1690,9 @@ class WatchlistDialog(QDialog):
                 f"국내 시장가 허용: {'예 (금액 상한은 현재가 추정치)' if policy.allow_market else '아니오'}\n"
                 f"미국: {self.random_us.currentText() if self.random_demo.isChecked() else '현재가 지정가만 허용'}\n"
                 + ("내장 모의 신호기: 매수 확률 10% · 평균 매입가 대비 +1% 익절 / -0.8% 손절\n" if self.random_demo.isChecked() else "") +
+                (str(getattr(self, "builtin_confirmation_notice", "")) + "\n" if getattr(self, "builtin_confirmation_notice", "") else "") +
                 "0인 시장은 차단됩니다. 수동 트리거는 실행하지 않습니다.\n"
-                "보유분은 목표가 또는 평균매입가 +1% / −0.8% 조건을 별도로 점검합니다.\n"
+                "보유분은 전략별 목표를 별도로 점검하며, 목표 없는 기존 보유분만 기본 평균매입가 +1% / −0.8%를 적용합니다.\n"
                 "미국은 증권사 거절이 확정된 경우만 조건을 재확인해 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
                 "상한은 주문당 제한이며 하루 누적 한도는 아닙니다."
                 + ("\n실제 자금으로 반복 주문되며 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
@@ -1908,10 +1909,12 @@ class WatchlistDialog(QDialog):
         self._close_when_idle = True
         self._pending_environment = None
         self.environment_timer.stop()
+        # A deferred close still means no new status/health ticks. Keep only
+        # the already-running workers alive until their completion callbacks.
+        self.health_timer.stop()
+        self.order_status_timer.stop()
         self.stop_monitoring()
         if self.worker or self._inspection_worker or self._activity_worker or self._schedule_probe:
             event.ignore()
         else:
-            self.health_timer.stop()
-            self.order_status_timer.stop()
             event.accept()

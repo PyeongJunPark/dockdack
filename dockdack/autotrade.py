@@ -21,7 +21,7 @@ from dockdack.models import Market, OrderSide, TradingMode
 from dockdack.gui_service import Instrument
 from dockdack.execution_policy import allocation_quantity, holding_exit_targets
 from dockdack.order_prices import current_common_equity_limit_price
-from dockdack.signal_bridge import validate_external_rule
+from dockdack.signal_bridge import mark1_prototype_origin, validate_external_rule
 from dockdack.watchlist import MarketSnapshot, TriggerKind, TriggerRule, WatchItem, WatchStore, positive, utc_now
 
 
@@ -104,6 +104,11 @@ class AutoTrader:
         self.external_error_count = 0
         self.external_sources = {}
         self.external_source_errors = {}
+        self.source_validators = {}
+        # Opt-in virtual inventory. Broker positions remain aggregate; each
+        # prototype owns only its confirmed fills and its own exit allocation.
+        self.prototype_lots_enabled = False
+        self._lot_sellable_checks = {}
         self.session_only_poll = True
         self.enable_holdings_exits = False
         self.equity_buy_percent = None
@@ -126,8 +131,134 @@ class AutoTrader:
         self.external_sources = entries
         self.external_source_errors = {}
 
+    def configure_source_validators(self, validators):
+        """Install trusted, local-only execution checks; never arms monitoring/orders.
+
+        Each callback receives (item, rule, snapshot, actual_limit_price,
+        stage=...). It must not perform broker I/O, including at final_send.
+        Wire payloads cannot provide or replace executable callbacks.
+        """
+        if self.orders_enabled:
+            raise ValueError("신호 주문 검증 연결 변경 전에 자동주문을 OFF 하세요.")
+        entries = dict(validators)
+        if any(not isinstance(source, str) or not source or not callable(callback)
+               for source, callback in entries.items()):
+            raise ValueError("신호 출처별 로컬 주문 검증 함수를 등록하세요.")
+        if self._mode is TradingMode.REAL and any(self._demo_source(source) for source in entries):
+            raise ValueError("내장 모의 신호 검증기를 실전에 연결할 수 없습니다.")
+        self.source_validators = entries
+
     def holding_exit_targets(self, position):
-        return holding_exit_targets(self.store, position)
+        return holding_exit_targets(self.store, position, prototype_lots=self.prototype_lots_enabled)
+
+    def _prototype_source_for(self, rule):
+        if not self.prototype_lots_enabled:
+            return None
+        return self.store.prototype_rule_source(rule.id)
+
+    def _sent_key(self, item, rule):
+        source = self._prototype_source_for(rule)
+        if source is None:
+            return item.id
+        allocation = self.store.prototype_sell_allocation(rule.id)
+        return (item.id, "lot", allocation["lot_id"]) if allocation else (item.id, "model", source)
+
+    def _compatible_lot_pending(self, rule, pending):
+        """Only known accepted orders for a different strategy may coexist."""
+        source = self._prototype_source_for(rule)
+        if source is None or pending["status"] != "accepted":
+            return False
+        other = self.store.prototype_rule_source(pending["rule_id"])
+        if not other:
+            return False
+        from dockdack.signal_bridge import prototype_family
+        return prototype_family(source) != prototype_family(other)
+
+    def _validate_lot_inventory(self, item, rule, positions):
+        """Match durable virtual lots against the fresh aggregate broker position."""
+        if self._prototype_source_for(rule) is None:
+            return None
+        if any(p.exchange != item.instrument.exchange for p in positions):
+            raise ValueError("모델별 보유분과 브로커 거래소가 일치하지 않습니다.")
+        quantity = sum((p.quantity for p in positions), Decimal(0))
+        sellable = sum((p.sellable_quantity for p in positions), Decimal(0))
+        inventory = self.store.prototype_inventory(item.id, broker_quantity=quantity, broker_sellable=sellable)
+        if not inventory["reconciled"]:
+            raise ValueError("모델별 체결 수량과 실제 보유수량 대조 실패: " + " · ".join(inventory["issues"]))
+        from dockdack.signal_bridge import prototype_family
+        family = prototype_family(self._prototype_source_for(rule))
+        own = [lot for lot in inventory["lots"] if lot["strategy_id"] == family.id]
+        if rule.side is OrderSide.BUY:
+            if any(lot["quantity_remaining"] > 0 for lot in own):
+                raise ValueError("이 모델은 이미 해당 종목을 보유하고 있어 추가 매수하지 않습니다.")
+            return inventory
+        allocation = self.store.prototype_sell_allocation(rule.id)
+        lot = next((lot for lot in own if allocation and lot["lot_id"] == allocation["lot_id"]), None)
+        if lot is None or lot["average_price"] is None or lot["quantity_remaining"] < rule.quantity:
+            raise ValueError("매도 대상 모델의 확정 체결 보유분을 확인할 수 없습니다.")
+        # This rule's reserved shares are included in quantity_reserved_sell.
+        other_reserved = max(Decimal(0), lot["quantity_reserved_sell"] - Decimal(allocation["quantity"]))
+        # The broker can lag an accepted order or already subtract it. Reserve
+        # outstanding shares across ALL model lots either way, as with pending
+        # BUY cash: double reservation may defer a sell but never reuse a shared
+        # account limit. This ready rule's own allocation is already reserved.
+        shared_reserved = sum((row["quantity_reserved_sell"] for row in inventory["lots"]), Decimal(0))
+        other_shared_reserved = max(Decimal(0), shared_reserved - Decimal(allocation["quantity"]))
+        if (lot["quantity_remaining"] - other_reserved < rule.quantity
+                or sellable - other_shared_reserved < rule.quantity):
+            raise ValueError("모델별 미체결 매도 예약 또는 실제 매도 가능 수량이 부족합니다.")
+        self._lot_sellable_checks[rule.id] = (sellable, self.clock())
+        while len(self._lot_sellable_checks) > 500:
+            self._lot_sellable_checks.pop(next(iter(self._lot_sellable_checks)))
+        return lot
+
+    def _validate_lot_final(self, item, rule):
+        if self._prototype_source_for(rule) is None:
+            return
+        inventory = self.store.prototype_inventory(item.id)
+        if not inventory["reconciled"]:
+            raise ValueError("모델별 체결 기록을 확인할 수 없어 전송하지 않습니다.")
+        if any(attempt["rule_id"] != rule.id and not self._compatible_lot_pending(rule, attempt)
+               for attempt in self.store.attempts(item.id, pending_only=True)):
+            raise ValueError("같은 모델 또는 출처 불명의 미확정 주문이 생겨 전송하지 않습니다.")
+        if rule.side is OrderSide.BUY:
+            from dockdack.signal_bridge import prototype_family
+            family = prototype_family(self._prototype_source_for(rule))
+            if any(lot["strategy_id"] == family.id and lot["quantity_remaining"] > 0 for lot in inventory["lots"]):
+                raise ValueError("같은 모델의 기존 보유 체결이 확인되어 추가 매수하지 않습니다.")
+        if rule.side is OrderSide.SELL:
+            allocation = self.store.prototype_sell_allocation(rule.id)
+            lot = next((lot for lot in inventory["lots"] if allocation and lot["lot_id"] == allocation["lot_id"]), None)
+            if (lot is None or lot["average_price"] is None or lot["quantity_remaining"] < rule.quantity
+                    or lot["quantity_reserved_sell"] > lot["quantity_remaining"]):
+                raise ValueError("모델별 매도 예약/확정 체결 수량이 바뀌어 전송하지 않습니다.")
+            checked = self._lot_sellable_checks.pop(rule.id, None)
+            reserved = sum((row["quantity_reserved_sell"] for row in inventory["lots"]), Decimal(0))
+            if (checked is None or not 0 <= (self.clock() - checked[1]).total_seconds() <= 15
+                    or reserved > checked[0]):
+                raise ValueError("모델 전체 매도 예약이 확인된 계좌 매도가능수량을 초과하거나 검증이 만료되었습니다.")
+
+    def _lot_cash_account(self, account, rule):
+        """Conservatively reserve unfilled prototype buys across this market.
+
+        Some broker snapshots already deduct those orders; deliberately reserving
+        again may defer a buy but cannot make an acknowledged order look free.
+        """
+        if rule.side is not OrderSide.BUY or self._prototype_source_for(rule) is None:
+            return account
+        reserved = Decimal(0)
+        for row in self.store.order_history(limit=None):
+            if (row["market"] != account.market.value or row["side"] != "buy"
+                    or row["status"] not in {"accepted", "submitting", "unknown"}):
+                continue
+            if self.store.prototype_rule_source(row["rule_id"]) is None:
+                continue
+            remaining = max(Decimal(0), Decimal(row["quantity"]) - Decimal(row["filled_quantity"] or "0"))
+            reserved += remaining * positive(Decimal(row["reference_price"]), "미체결 매수 예약 단가") * Decimal("1.01")
+        available = account.available_to_order
+        if isinstance(available, Decimal) and available.is_finite():
+            return replace(account, available_to_order=max(Decimal(0), available - reserved))
+        return account
 
     def _policy_for(self, rule):
         record = self.store.external_for_rule(rule.id)
@@ -155,6 +286,8 @@ class AutoTrader:
             policies = [value[0] for value in self.external_sources.values()] + ([self.external_policy] if self.external_policy else [])
             if not policies or not any(max(policy.max_krw, policy.max_usd) > 0 for policy in policies):
                 raise ValueError("외부 신호 출처와 시장별 주문 상한을 먼저 설정하세요.")
+            if any(self._mark1_source(policy.source_id) and policy.source_id not in self.source_validators for policy in policies):
+                raise ValueError("mark1 prototype 모의 트리거의 신뢰된 모델 주문 검증 연결이 필요합니다.")
         elif not self.enable_holdings_exits and not any(rule.kind is not TriggerKind.EXTERNAL for rule in self.store.rules(statuses=("ready",))):
             raise ValueError("대기 중인 트리거 규칙이 없습니다.")
         if not self.isolated_symbol_errors and any(a["status"] in {"submitting", "unknown"} for a in self.store.attempts(pending_only=True)):
@@ -193,8 +326,9 @@ class AutoTrader:
                     raise ValueError("실전 API 키의 기록 범위와 매매 기록 저장소가 다릅니다.")
                 if not getattr(self.service, "live_risk_acknowledged", False) and orders:
                     raise ValueError("이번 세션의 실전투자 위험 확인이 필요합니다.")
-                if self.external_only and self.external_policy is not None and self._demo_source(self.external_policy.source_id):
-                    raise ValueError("내장 모의 테스트 신호(random-demo)는 실전 주문에 연결할 수 없습니다.")
+                policies = [value[0] for value in self.external_sources.values()] + ([self.external_policy] if self.external_policy else [])
+                if self.external_only and any(self._demo_source(policy.source_id) for policy in policies):
+                    raise ValueError("내장 모의 테스트/연구 신호는 실전 주문에 연결할 수 없습니다.")
             if instrument is not None:
                 check = getattr(self.service, "ensure_order_permission" if orders else "ensure_environment", None)
                 if check is None:
@@ -208,10 +342,36 @@ class AutoTrader:
 
     @staticmethod
     def _demo_source(value):
-        return str(value).strip().lower().replace("_", "-") == "random-demo"
+        return (str(value).strip().lower().replace("_", "-") == "random-demo"
+                or AutoTrader._mark1_source(value))
+
+    @staticmethod
+    def _mark1_source(value):
+        return mark1_prototype_origin(value)
+
+    @classmethod
+    def _mark1_origin(cls, record, metadata):
+        if not record:
+            return False
+        return (mark1_prototype_origin(record["source_id"], metadata)
+                or cls._mark1_source(metadata.get("origin_strategy", ""))
+                or cls._mark1_source(metadata.get("strategy_id", "")))
 
     def _reject_demo_rule(self, rule):
-        if self._mode is not TradingMode.REAL or rule.kind is not TriggerKind.EXTERNAL:
+        if self._mode is not TradingMode.REAL:
+            return
+        if self._holding_rule(rule):
+            if self.store.prototype_sell_allocation(rule.id) is not None:
+                self.disarm()
+                raise ValueError("prototype 모델별 보유분 청산은 모의 환경만 허용합니다.")
+            saved = self.store.exit_targets(rule.watch_id)
+            record = self.store.external_for_rule(saved["rule_id"]) if saved else None
+            metadata = json.loads(record["payload"]) if record else {}
+            if saved and (self._mark1_source(saved["source"]) or self._mark1_origin(record, metadata)):
+                self.disarm()
+                raise ValueError("mark1 prototype 보유분 청산은 모의 환경만 허용합니다.")
+            return
+        if rule.kind is not TriggerKind.EXTERNAL:
             return
         record = self.store.external_for_rule(rule.id)
         if record is None:
@@ -222,9 +382,32 @@ class AutoTrader:
             test_origin = db.execute("SELECT 1 FROM test_decisions WHERE export_id=? AND watch_id=?",
                                      (record["export_id"], record["watch_id"])).fetchone()
         # Check persisted origin, not just the editable UI policy/source name.
-        if self._demo_source(record["source_id"]) or metadata.get("signal_id") == generated_id or test_origin:
+        if self._demo_source(record["source_id"]) or self._mark1_origin(record, metadata) or metadata.get("signal_id") == generated_id or test_origin:
             self.disarm()
             raise ValueError("내장 모의 테스트 신호는 출처 이름을 바꿔도 실전 주문에 사용할 수 없습니다.")
+
+    def _validate_source_execution(self, item, rule, fresh, actual_limit_price, *, stage):
+        if rule.kind is not TriggerKind.EXTERNAL:
+            return
+        record = self.store.external_for_rule(rule.id)
+        if not record:
+            raise ValueError("외부 주문의 출처 기록이 없습니다.")
+        metadata = json.loads(record["payload"])
+        mark1 = self._mark1_origin(record, metadata)
+        validator = self.source_validators.get(record["source_id"])
+        if mark1:
+            from dockdack.signal_bridge import prototype_family
+            if prototype_family(record["source_id"], metadata) is None:
+                raise ValueError("모델의 원본 매수 신호 출처를 확인할 수 없습니다.")
+            if self._mode is not TradingMode.DEMO:
+                self.disarm()
+                raise ValueError("mark1 prototype은 모의 트리거 전용이며 실전 전송을 허용하지 않습니다.")
+            if not self._mark1_source(record["source_id"]) or validator is None:
+                raise ValueError("mark1 prototype의 원본 출처와 신뢰된 모델 주문 검증 연결이 필요합니다.")
+            if actual_limit_price is None:
+                raise ValueError("mark1 prototype은 검증 가능한 현재가 지정가 주문만 허용합니다.")
+        if validator is not None:
+            validator(item, rule, fresh, actual_limit_price, stage=stage)
 
     def _message(self, key: str, symbol: str, message: str, *, category="system"):
         if self._messages.get(key) != message:
@@ -315,10 +498,12 @@ class AutoTrader:
                               f"접수 후 체결 확인 대기 · 주문번호 {attempt['order_number']} · 이번 조회에 주문 행 없음(체결 실패 확정 아님), 중복 재주문하지 않음", category="order")
 
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
+        self._lot_sellable_checks.pop(rule.id, None)
         inst = item.instrument
         self._ensure_environment(inst, orders=True)
         self.service.ensure_common_equity(inst)
-        if self.store.attempts(item.id, pending_only=True):
+        pending = self.store.attempts(item.id, pending_only=True)
+        if any(not self._compatible_lot_pending(rule, attempt) for attempt in pending):
             raise ValueError("이 종목의 이전 주문이 미확정/미체결 상태입니다.")
         orders = self.service.safety_orders(inst)
         if self._stop.is_set():
@@ -327,7 +512,21 @@ class AutoTrader:
             if not order.remaining_quantity.is_finite() or order.remaining_quantity < 0:
                 raise ValueError("미체결 잔량을 확인할 수 없습니다.")
             if order.remaining_quantity > 0:
-                raise ValueError("미체결 주문이 있어 추가 자동주문을 차단합니다.")
+                from dockdack.fill_recovery import normalized_order_number
+                known = [attempt for attempt in pending
+                         if normalized_order_number(attempt["order_number"]) == normalized_order_number(order.order_number)]
+                if (len(known) != 1 or not self._compatible_lot_pending(rule, known[0])
+                        or order.symbol != inst.symbol):
+                    raise ValueError("미체결 주문이 있어 추가 자동주문을 차단합니다.")
+                from dockdack.manual_orders import _side
+                with self.store.connection() as db:
+                    original = db.execute("SELECT side,quantity FROM rules WHERE id=?", (known[0]["rule_id"],)).fetchone()
+                if (not original or order.market is not inst.market or order.exchange != inst.exchange
+                        or _side(order.side).value != original["side"]
+                        or order.order_quantity != original["quantity"]
+                        or not order.filled_quantity.is_finite() or order.filled_quantity < 0
+                        or order.filled_quantity + order.remaining_quantity > order.order_quantity):
+                    raise ValueError("다른 모델 미체결 주문의 종목·방향·수량 기록이 일치하지 않습니다.")
         account = self.service.safety_account(inst)
         if self._stop.is_set():
             raise InterruptedError("사용자 중지 요청")
@@ -339,7 +538,9 @@ class AutoTrader:
                 raise ValueError("보유 수량/통화를 확인할 수 없습니다.")
             if not 0 <= p.sellable_quantity <= p.quantity:
                 raise ValueError("보유 수량과 매도 가능 수량이 일치하지 않습니다.")
-        if rule.side is OrderSide.BUY and any(p.quantity > 0 for p in positions):
+        lot_inventory = self._validate_lot_inventory(item, rule, positions)
+        account = self._lot_cash_account(account, rule)
+        if rule.side is OrderSide.BUY and lot_inventory is None and any(p.quantity > 0 for p in positions):
             raise ValueError("이미 보유한 종목의 추가 자동매수는 지원하지 않습니다.")
         if rule.side is OrderSide.SELL and sum((p.sellable_quantity for p in positions), Decimal(0)) < rule.quantity:
             raise ValueError("매도 가능 수량이 부족합니다. 공매도는 지원하지 않습니다.")
@@ -356,7 +557,7 @@ class AutoTrader:
             held = [position for position in positions if position.quantity > 0]
             total = sum((position.quantity for position in held), Decimal(0))
             average = sum((position.average_price * position.quantity for position in held), Decimal(0)) / total
-            targets = self.holding_exit_targets(replace(held[0], average_price=average))
+            targets = lot_inventory if lot_inventory is not None else self.holding_exit_targets(replace(held[0], average_price=average))
             upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
             if upper is None or lower is None:
                 raise ValueError("매도 직전 보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
@@ -396,6 +597,7 @@ class AutoTrader:
                 raise ValueError("매도 직전 실제 평균 매입가 대비 손절 조건이 성립하지 않습니다.")
         if price is not None and price * rule.quantity > rule.max_notional:
             raise ValueError("가격 단위에 맞춘 지정가 주문금액이 규칙의 상한을 넘습니다.")
+        self._validate_source_execution(item, rule, fresh, price, stage="preflight")
         request = self.service.prepare(inst, rule.side.value, rule.quantity, kind, price)
         if (request.market, request.symbol, request.exchange, request.side, request.quantity, request.price) != (
                 inst.market, inst.symbol, inst.exchange, rule.side, rule.quantity, price) or request.order_type not in ({"3"} if kind == "market" else {"0", "00"}):
@@ -433,7 +635,8 @@ class AutoTrader:
             return False
         if (self.clock() - fresh.fetched_at).total_seconds() > 15:
             raise ValueError("주문 직전 시세가 오래되어 전송하지 않습니다.")
-        if not self.store.claim(rule, fresh.quote.price, self.clock()):
+        claim_options = {"prototype_lots": True} if self._prototype_source_for(rule) is not None else {}
+        if not self.store.claim(rule, fresh.quote.price, self.clock(), **claim_options):
             return False
         if request.price is not None and request.price != fresh.quote.price:
             self.store.event(item.id, f"현재가 지정가 가격 단위 적용 · 수량 {rule.quantity}주 · 참조 시세 {fresh.quote.price} → 주문 지정가 {request.price} {item.instrument.currency} (체결가 아님)", category="order")
@@ -477,7 +680,22 @@ class AutoTrader:
                 if rule.side is OrderSide.BUY:
                     record = self.store.external_for_rule(rule.id)
                     metadata = json.loads(record["payload"]) if record else {}
-                    if "take_profit_price" in metadata:
+                    if self._mark1_origin(record, metadata) and self.prototype_lots_enabled:
+                        # Confirmed execution snapshots create the virtual lot.
+                        # An acknowledgement is never inventory or a fill price.
+                        pass
+                    elif self._mark1_origin(record, metadata):
+                        # Persist strategy ownership, NOT a promised fill price.
+                        # The shared holding resolver derives mark1 boundaries
+                        # from the broker's actual average cost on each read.
+                        reference = request.price or fresh.quote.price
+                        from dockdack.signal_bridge import prototype_family
+                        family = prototype_family(record["source_id"], metadata)
+                        if family is None:
+                            raise ValueError("매수 모델 출처를 확인할 수 없습니다.")
+                        self.store.set_exit_targets(item.id, reference * (1 + family.take_profit), reference * (1 - family.stop_loss),
+                                                    source=record["source_id"], rule_id=rule.id, now=self.clock())
+                    elif "take_profit_price" in metadata:
                         self.store.set_exit_targets(item.id, Decimal(metadata["take_profit_price"]), Decimal(metadata["stop_loss_price"]),
                                                     source=record["source_id"], rule_id=rule.id, now=self.clock())
                     else:
@@ -513,6 +731,11 @@ class AutoTrader:
                                            ORDER BY newer.generated_at DESC LIMIT 1""", (record["rule_id"] if record else rule.id,)).fetchone()
                     if not latest or not record or latest["rule_id"] != record["rule_id"]:
                         raise ValueError("더 최근의 외부 매매/HOLD 신호가 도착하여 이전 주문을 전송하지 않음")
+            metadata = json.loads(record["payload"]) if rule.kind is TriggerKind.EXTERNAL and record else {}
+            actual_limit = (None if metadata.get("order_type", "limit") == "market" else
+                            current_common_equity_limit_price(item.instrument.market, rule.side, fresh.quote.price))
+            self._validate_source_execution(item, rule, fresh, actual_limit, stage="final_send")
+            self._validate_lot_final(item, rule)
             now = self.clock()
             if not regular_session(item.instrument.market, now):
                 raise ValueError("정규장이 종료되었거나 장 상태를 확인할 수 없어 전송하지 않음")
@@ -566,6 +789,44 @@ class AutoTrader:
         if (quote.market, quote.symbol, quote.exchange, quote.currency) != (inst.market, inst.symbol, inst.exchange, inst.currency):
             raise ValueError("현재가의 종목·거래소·통화가 보유종목과 다릅니다.")
         positive(quote.price, "보유종목 현재가")
+
+    def _lot_holdings_exits(self, item, position, snapshot, targets, sent):
+        """Sell each confirmed lot against its own basis, not the broker average."""
+        if not targets.get("reconciled"):
+            raise ValueError("모델별 보유 대조 실패: " + " · ".join(targets.get("issues", ())))
+        for lot in targets["lots"]:
+            if self._stop.is_set():
+                return
+            upper, lower = lot["take_profit_price"], lot["stop_loss_price"]
+            if upper is None or lower is None:
+                continue
+            price = snapshot.quote.price
+            hit = TriggerKind.PRICE_GE if price >= upper else TriggerKind.PRICE_LE if price <= lower else None
+            self._message("holding-lot:" + lot["lot_id"], item.id,
+                          f"{lot['model_title']} 분리 매도 감시 · 체결평균 {lot['average_price']} · 현재가 {price} · 상방 {upper} / 하방 {lower} · {'매도 조건 충족' if hit else '대기'}",
+                          category="monitor")
+            key = (item.id, "lot", lot["lot_id"])
+            if not hit or not self.orders_enabled or item.id in sent or key in sent:
+                continue
+            cap = self.holding_caps.get(position.market, Decimal(0))
+            if not isinstance(cap, Decimal) or not cap.is_finite() or cap <= 0:
+                continue
+            unit = current_common_equity_limit_price(position.market, OrderSide.SELL, price)
+            quantity = min(int(lot["sellable_quantity"]), int(position.sellable_quantity), int(cap / unit))
+            if quantity < 1:
+                continue
+            rule = TriggerRule("holding-exit-" + uuid4().hex, item.id, hit, OrderSide.SELL, quantity, cap,
+                               upper if hit is TriggerKind.PRICE_GE else lower)
+            self.store.save_holding_rule(item, rule)
+            try:
+                self.store.reserve_prototype_sell(rule.id, lot["lot_id"], quantity)
+                if self._execute(item, rule, snapshot):
+                    sent.add(key)
+            except Exception as exc:
+                self._message("holding-lot-error:" + lot["lot_id"], item.id,
+                              f"{lot['model_title']} 분리 매도 보류: {exc}", category="signal")
+            finally:
+                self.store.pause_rule(rule.id)
 
     def _holdings_pass(self, sent, *, checkpoint=None, progress=None):
         """Account holdings are SELL candidates even when absent from the watchlist.
@@ -629,12 +890,15 @@ class AutoTrader:
                     self._validate_quote(item, quote)
                     # Empty history explicitly means quote-only, never fabricated OHLC.
                     snapshot = MarketSnapshot(quote, DailyHistory(market, inst.symbol, inst.exchange, inst.currency, 0, ()), self.clock())
+                    self._reconcile(item)
                     targets = self.holding_exit_targets(position)
                     upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
                     if progress is not None:
                         progress(("holding_quote", {"watch_id": item.id, "instrument": inst,
                                                    "quote": quote, "position": position, "targets": targets}))
-                    self._reconcile(item)
+                    if "lots" in targets:
+                        self._lot_holdings_exits(item, position, snapshot, targets, sent)
+                        continue
                     if upper is None or lower is None:
                         raise ValueError("보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
                     hit = TriggerKind.PRICE_GE if quote.price >= upper else TriggerKind.PRICE_LE if quote.price <= lower else None
@@ -738,14 +1002,16 @@ class AutoTrader:
                             signal = evaluate_trigger(rule, snapshot, self.clock())
                             self._message(rule.id + ":signal", item.id,
                                           f"{rule.description} · {'조건 충족' if signal.matched else '대기'}", category="signal")
-                            if not signal.matched or not self.orders_enabled or item.id in sent:
+                            sent_key = self._sent_key(item, rule)
+                            if not signal.matched or not self.orders_enabled or item.id in sent or sent_key in sent:
                                 continue
                             if not regular_session(item.instrument.market, self.clock()):
                                 self._message(rule.id + ":gate", item.id, "정규장 시간이 아니므로 자동주문하지 않음", category="signal")
                                 continue
                             if self._execute(item, rule, snapshot):
-                                sent.add(item.id)
-                                break  # At most one submission per symbol per poll.
+                                sent.add(sent_key)
+                                if not self.prototype_lots_enabled or self._prototype_source_for(rule) is None:
+                                    break  # Legacy/manual policies remain one order per symbol.
                         except Exception as exc:
                             self._message(rule.id + ":gate", item.id, f"자동주문 보류: {exc}", category="signal")
                 except Exception as exc:

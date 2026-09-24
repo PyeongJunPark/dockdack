@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import replace
 from decimal import Decimal
 from typing import Mapping
 
@@ -181,10 +182,10 @@ class PortfolioPanel(QWidget):
 
     @staticmethod
     def _make_table() -> QTableWidget:
-        result = QTableWidget(0, 11)
+        result = QTableWidget(0, 12)
         result.setHorizontalHeaderLabels([
             "시장 / 통화", "종목명 / 코드", "보유", "매도 가능", "평균 매수가", "현재가",
-            "평가금액", "평가손익", "수익률", "익절 매도 예정", "손절 매도 예정",
+            "평가금액", "평가손익", "수익률", "익절 매도 예정", "손절 매도 예정", "매수 모델",
         ])
         result.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         result.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -204,6 +205,8 @@ class PortfolioPanel(QWidget):
             result.setColumnWidth(column, 145)
         header.moveSection(header.visualIndex(9), 2)
         header.moveSection(header.visualIndex(10), 3)
+        result.setColumnWidth(11, 160)
+        header.moveSection(header.visualIndex(11), 2)
         # Market/currency are already prominent in the selected tab. Keep the
         # data column for selection keys and copy/export compatibility, without
         # sacrificing scarce horizontal space to duplicate information.
@@ -279,23 +282,44 @@ class PortfolioPanel(QWidget):
             )
             self.summaries[market].setText(summary_text + ("\n" + cash_context if cash_context else ""))
             self.summaries[market].setToolTip(cash_detail)
-            for position in sorted(state.positions, key=lambda item: (-item.evaluation_amount, item.symbol)):
+            expanded = []
+            for held in sorted(state.positions, key=lambda item: (-item.evaluation_amount, item.symbol)):
+                key = f'{held.market.value}:{held.exchange}:{held.symbol}'
+                group = getattr(self, '_exit_targets', {}).get(key, {})
+                if group.get('lots') and group.get('reconciled'):
+                    for lot in group['lots']:
+                        qty, average = lot['quantity'], lot['average_price']
+                        if qty <= 0:
+                            continue
+                        cost, evaluation = qty * average, qty * held.current_price
+                        virtual = replace(held, quantity=qty, sellable_quantity=lot['sellable_quantity'],
+                                          average_price=average, evaluation_amount=evaluation,
+                                          profit_loss=evaluation-cost, profit_rate=(evaluation-cost)/cost*100,
+                                          raw={**held.raw, 'prototype_lot_id': lot['lot_id']})
+                        expanded.append((virtual, lot))
+                else:
+                    if 'lots' in group and not group.get('reconciled'):
+                        group = {**group, 'error': ' / '.join(map(str, group.get('issues', ()))) or '장부와 증권사 잔고 대조 필요',
+                                 'model_title': '모델 장부 대조 필요'}
+                    expanded.append((held, group))
+            for position, target in expanded:
                 key = f'{position.market.value}:{position.exchange}:{position.symbol}'
                 live = self._live_quotes.get(key)
                 live_price = live[0] if live and (state.fetched_at is None or live[1] >= state.fetched_at) else position.current_price
-                target = getattr(self, '_exit_targets', {}).get(key, {})
                 upper = target.get('take_profit_price')
                 lower = target.get('stop_loss_price')
                 if not target and position.average_price > 0:
                     upper, lower = position.average_price * Decimal('1.01'), position.average_price * Decimal('0.992')
                 values = (
                     f"{title} · {currency}", f"{position.name or position.symbol} · {position.symbol}", _quantity(position.quantity),
-                    _quantity(position.sellable_quantity), _table_money(position.average_price, currency, price=True),
+                    (f"공유 {_quantity(target['broker_sellable_quantity'])}" if target.get('sellable_is_shared')
+                     else _quantity(position.sellable_quantity)), _table_money(position.average_price, currency, price=True),
                     _table_money(live_price, currency, price=True), _table_money(position.evaluation_amount, currency),
                     _table_money(position.profit_loss, currency, signed=True),
                     f"{'+' if position.profit_rate > 0 else ''}{position.profit_rate:,.2f}%",
                     '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else f'≥ {_target_price(upper)}',
                     '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else f'≤ {_target_price(lower)}',
+                    target.get('model_title') or '미확인 / 수동·외부',
                 )
                 rows.append((values, position, status, state.fetched_at))
             self._apply_rows(market, rows)
@@ -310,6 +334,10 @@ class PortfolioPanel(QWidget):
         targets = getattr(self, '_exit_targets', {})
         targets[key] = target
         self._exit_targets = targets
+        if 'lots' in target:
+            self._rendered_states.clear()
+            self.apply(self._payload)
+            return
         table = self.tables[inst.market]
         for row in range(table.rowCount()):
             cell = table.item(row, 1)
@@ -322,17 +350,32 @@ class PortfolioPanel(QWidget):
                 value = target.get(field)
                 table.item(row, column).setText('미확인' if value is None else f'{sign} {_target_price(value)}')
                 table.item(row, column).setToolTip(self._target_tooltip(key))
+            table.item(row, 11).setText(target.get('model_title') or '미확인 / 수동·외부')
+            table.item(row, 11).setToolTip(self._target_tooltip(key))
             break
 
-    def _target_tooltip(self, key):
+    def _target_tooltip(self, key, lot_id=None):
         target = getattr(self, '_exit_targets', {}).get(key, {})
+        if lot_id is not None:
+            target = next((lot for lot in target.get('lots', ()) if lot.get('lot_id') == lot_id), {})
+        elif 'lots' in target and not target.get('reconciled'):
+            return ('모델별 체결 장부와 증권사 잔고가 일치하지 않아 자동매매를 보류합니다.\n'
+                    + '\n'.join(map(str, target.get('issues', ()))))
         if target.get('error'):
             return ('해당 종목 자동매도 보류: ' + str(target['error'])
                     + '\n다른 종목 감시는 계속합니다. 거래소/종목 확인 전에는 이 종목을 자동주문하지 않습니다.')
         source = target.get('source', '')
-        origin = ('목표가 없는 기존 보유분: 평균매입가 +1% / −0.8%' if not source or source.startswith('평균매입가')
+        origin = (source if target.get('model_title') else
+                  '목표가 없는 기존 보유분: 평균매입가 +1% / −0.8%' if not source or source.startswith('평균매입가')
                   else '매입가 확인 필요' if source == '매입가 확인 필요' else '매수 신호에서 받은 목표가격')
-        return origin + '\n현재가가 목표에 닿으면 매도 조건을 재확인합니다. 주문 OFF·장외에는 주문하지 않으며 체결을 보장하지 않습니다.'
+        attribution = (f"매수 모델: {target.get('model_title') or '미확인 / 수동·외부'}\n"
+                       f"저장된 매수 신호: {target.get('buy_signal_id') or '미확인'}\n"
+                       "현재 선택한 모델로 과거 매수 출처를 추정하지 않습니다.\n")
+        if lot_id:
+            attribution += f'분리 매수분: {lot_id}\n확인된 체결 수량·체결가 기준 가상 구분이며 증권사 잔고는 종목별 합산입니다.\n'
+        if target.get('sellable_is_shared'):
+            attribution += f"매도가능수량은 계좌 전체 공유 상한 {target['broker_sellable_quantity']}주입니다. 모델별 행의 수량을 더해 팔 수 있다는 뜻이 아닙니다.\n"
+        return attribution + origin + '\n현재가가 목표에 닿으면 매도 조건을 재확인합니다. 주문 OFF·장외에는 주문하지 않으며 체결을 보장하지 않습니다.'
 
     def set_exit_targets(self, targets):
         if targets != getattr(self, '_exit_targets', {}):
@@ -341,7 +384,7 @@ class PortfolioPanel(QWidget):
             self.apply(self._payload)
 
     def _apply_rows(self, market: Market, rows) -> None:
-        signature = tuple((values, position.profit_loss, position.profit_rate, status, fetched_at)
+        signature = tuple((values, position.profit_loss, position.profit_rate, position.raw.get('prototype_lot_id'), status, fetched_at)
                           for values, position, status, fetched_at in rows)
         if signature == self._row_signatures.get(market):
             return
@@ -356,6 +399,9 @@ class PortfolioPanel(QWidget):
             table.clearSelection()
             for row, (values, position, status, fetched_at) in enumerate(rows):
                 key = f"{position.market.value}:{position.symbol}"
+                lot_id = position.raw.get('prototype_lot_id')
+                if lot_id:
+                    key += ':' + lot_id
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     item.setData(Qt.ItemDataRole.UserRole, key)
@@ -370,8 +416,8 @@ class PortfolioPanel(QWidget):
                         item.setToolTip(f"{position.name or position.symbol} · 잔고 기준 {_time(fetched_at)}\n이전 잔고입니다. 현재 보유 상태와 다를 수 있습니다.")
                         if column in {0, 1}:
                             item.setForeground(QColor("#ffb586"))
-                    if column in {9, 10}:
-                        item.setToolTip(self._target_tooltip(f'{position.market.value}:{position.exchange}:{position.symbol}'))
+                    if column in {9, 10, 11} or (column == 3 and lot_id):
+                        item.setToolTip(self._target_tooltip(f'{position.market.value}:{position.exchange}:{position.symbol}', lot_id))
                     elif column == 5:
                         live = self._live_quotes.get(f'{position.market.value}:{position.exchange}:{position.symbol}')
                         if live and (fetched_at is None or live[1] >= fetched_at):

@@ -223,6 +223,12 @@ class WatchStore:
                 CREATE TABLE IF NOT EXISTS order_retries (
                     rule_id TEXT PRIMARY KEY REFERENCES rules(id), root_rule_id TEXT NOT NULL REFERENCES rules(id),
                     sequence INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS prototype_sell_allocations (
+                    rule_id TEXT PRIMARY KEY REFERENCES rules(id),
+                    lot_id TEXT NOT NULL REFERENCES attempts(rule_id),
+                    quantity TEXT NOT NULL, created_at TEXT NOT NULL,
+                    buy_filled_quantity TEXT, buy_average_price TEXT);
+                CREATE INDEX IF NOT EXISTS prototype_sells_by_lot ON prototype_sell_allocations(lot_id);
                 CREATE TABLE IF NOT EXISTS turnover_ranks (
                     market TEXT NOT NULL, rank INTEGER NOT NULL, watch_id TEXT NOT NULL,
                     turnover TEXT NOT NULL, currency TEXT NOT NULL, fetched_at TEXT NOT NULL,
@@ -273,9 +279,13 @@ class WatchStore:
             for column in ("price_basis_quantity", "price_basis_price"):
                 if column not in recovery_columns:
                     db.execute(f"ALTER TABLE order_fill_recovery ADD COLUMN {column} TEXT")
+            lot_columns = {row[1] for row in db.execute("PRAGMA table_info(prototype_sell_allocations)")}
+            for column in ("buy_filled_quantity", "buy_average_price"):
+                if column not in lot_columns:
+                    db.execute(f"ALTER TABLE prototype_sell_allocations ADD COLUMN {column} TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS ledger_revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL)")
             db.execute("INSERT OR IGNORE INTO ledger_revision VALUES(1,0)")
-            for table_name in ("attempts", "order_execution_snapshots", "order_fill_recovery", "rules", "watchlist"):
+            for table_name in ("attempts", "order_execution_snapshots", "order_fill_recovery", "rules", "watchlist", "prototype_sell_allocations"):
                 for operation in ("INSERT", "UPDATE", "DELETE"):
                     ref = "OLD" if operation == "DELETE" else "NEW"
                     condition = ""
@@ -529,6 +539,96 @@ class WatchStore:
                 (SELECT root_rule_id FROM order_retries WHERE rule_id=?),?)""", (rule_id, rule_id)).fetchone()
             return dict(row) if row else None
 
+    @staticmethod
+    def _prototype_allocations(db):
+        rows = db.execute("""SELECT p.rule_id,p.lot_id,p.quantity,p.created_at,p.buy_filled_quantity,p.buy_average_price,
+                    r.watch_id,r.side,r.status AS rule_status
+                FROM prototype_sell_allocations p JOIN rules r ON r.id=p.rule_id
+                UNION ALL
+                SELECT retry.rule_id,p.lot_id,CAST(r.quantity AS TEXT),p.created_at,p.buy_filled_quantity,p.buy_average_price,
+                    r.watch_id,r.side,r.status AS rule_status
+                FROM order_retries retry JOIN prototype_sell_allocations p ON p.rule_id=retry.root_rule_id
+                JOIN rules r ON r.id=retry.rule_id
+                WHERE NOT EXISTS(SELECT 1 FROM prototype_sell_allocations own WHERE own.rule_id=retry.rule_id)""")
+        return tuple(dict(row) for row in rows)
+
+    def _prototype_inventory(self, db, watch_id=None):
+        from dockdack.strategy_lots import project_prototype_inventory
+        rows = self._order_history(db, None)
+        allocations = self._prototype_allocations(db)
+        if watch_id is not None:
+            rows = tuple(row for row in rows if row["watch_id"] == watch_id)
+            allocations = tuple(row for row in allocations if row["watch_id"] == watch_id)
+        return project_prototype_inventory(rows, allocations, mode=self.mode.value, scope=self.storage_scope)
+
+    def prototype_lots(self, watch_id=None):
+        """Confirmed virtual lots; a pending acknowledgement has zero shares."""
+        with self.connection() as db:
+            db.execute("BEGIN")
+            return self._prototype_inventory(db, watch_id)["lots"]
+
+    def prototype_inventory(self, watch_id, broker_quantity=None, broker_sellable=None):
+        from dockdack.strategy_lots import reconcile_inventory
+        with self.connection() as db:
+            db.execute("BEGIN")
+            result = self._prototype_inventory(db, watch_id)
+        return reconcile_inventory(result, broker_quantity=broker_quantity, broker_sellable=broker_sellable)
+
+    def prototype_pending_buys(self, watch_id, strategy_id=None):
+        from dockdack.strategy_lots import row_family
+        result = []
+        for row in self.order_history(limit=None):
+            if row["watch_id"] != watch_id or row["side"] != "buy" or row["status"] not in PENDING:
+                continue
+            family = row_family(row)
+            if family and (strategy_id is None or family.id == strategy_id):
+                result.append(row)
+        return tuple(result)
+
+    def prototype_rule_source(self, rule_id):
+        from dockdack.signal_bridge import prototype_record_family
+        allocation = self.prototype_sell_allocation(rule_id)
+        record = self.external_for_rule(allocation["lot_id"] if allocation else rule_id)
+        return record["source_id"] if prototype_record_family(record, action="buy") else None
+
+    def prototype_sell_allocation(self, rule_id):
+        with self.connection() as db:
+            allocation = next((row for row in self._prototype_allocations(db) if row["rule_id"] == rule_id), None)
+            if allocation is None:
+                return None
+            lot = next((row for row in self._prototype_inventory(db, allocation["watch_id"])["lots"]
+                        if row["lot_id"] == allocation["lot_id"]), None)
+            if lot is None:
+                raise ValueError("매도 배분의 원매수 모델 체결 기록이 없습니다.")
+            return {**allocation, "quantity": Decimal(allocation["quantity"]),
+                    **{key: lot[key] for key in ("source_id", "strategy_id", "model_title", "buy_rule_id")}}
+
+    def reserve_prototype_sell(self, rule_id, lot_id, quantity, *, now=None):
+        """Persist immutable lot allocation before claim; never reserve broker shares."""
+        from dockdack.strategy_lots import number
+        quantity = number(quantity)
+        if quantity is None or quantity <= 0 or quantity != quantity.to_integral_value():
+            raise ValueError("모델별 매도 배분은 양의 정수 수량이어야 합니다.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = next((row for row in self._prototype_allocations(db) if row["rule_id"] == rule_id), None)
+            if previous:
+                if previous["lot_id"] != lot_id or Decimal(previous["quantity"]) != quantity:
+                    raise ValueError("이미 저장한 매도 로트/수량 배분은 변경할 수 없습니다.")
+                return
+            rule = db.execute("SELECT * FROM rules WHERE id=?", (rule_id,)).fetchone()
+            if (not rule or rule["side"] != "sell" or rule["status"] != "ready"
+                    or Decimal(rule["quantity"]) != quantity):
+                raise ValueError("대기 중인 매도 규칙과 배분 수량이 일치해야 합니다.")
+            inventory = self._prototype_inventory(db, rule["watch_id"])
+            lot = next((row for row in inventory["lots"] if row["lot_id"] == lot_id), None)
+            if (self.mode is not TradingMode.DEMO or inventory["issues"] or lot is None
+                    or quantity > lot["available_quantity"]):
+                raise ValueError("원매수 모델의 확인된 가용 보유량을 초과하거나 체결 기록 확인이 필요합니다.")
+            db.execute("INSERT INTO prototype_sell_allocations VALUES(?,?,?,?,?,?)",
+                       (rule_id, lot_id, str(quantity), (now or utc_now()).isoformat(),
+                        str(lot["filled_quantity"]), str(lot["average_price"])))
+
     def exit_targets(self, watch_id: str):
         with self.connection() as db:
             row = db.execute("SELECT * FROM position_exit_targets WHERE watch_id=?", (watch_id,)).fetchone()
@@ -695,7 +795,7 @@ class WatchStore:
                 sql += " AND status IN ('submitting', 'accepted', 'unknown')"
             return tuple(dict(row) for row in db.execute(sql + " ORDER BY rowid", params))
 
-    def claim(self, rule: TriggerRule, price: Decimal, now: datetime) -> bool:
+    def claim(self, rule: TriggerRule, price: Decimal, now: datetime, *, prototype_lots=False) -> bool:
         positive(price, "주문 단가")
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -705,7 +805,10 @@ class WatchStore:
             if not db.execute("SELECT 1 FROM watchlist WHERE id=? AND (active=1 OR ?)",
                               (rule.watch_id, rule.id.startswith("holding-exit-") and rule.side is OrderSide.SELL)).fetchone():
                 return False
-            if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (rule.watch_id,)).fetchone():
+            if prototype_lots:
+                if not self._prototype_claim_allowed(db, rule):
+                    return False
+            elif db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (rule.watch_id,)).fetchone():
                 return False
             db.execute("INSERT INTO attempts (rule_id, watch_id, status, price, started_at) VALUES (?, ?, 'submitting', ?, ?)",
                        (rule.id, rule.watch_id, str(price), now.isoformat()))
@@ -714,6 +817,55 @@ class WatchStore:
             self._insert_event(db, rule.watch_id,
                                f"주문 전송 의도 기록 · {rule.id} · {rule.side.value} {rule.quantity}주 · 참조 현재가 {price} (체결가 아님)",
                                category="order", at=now)
+        return True
+
+    def _prototype_claim_allowed(self, db, rule):
+        """Atomic per-model exception; all ambiguous/manual pending intents still block."""
+        from dockdack.signal_bridge import prototype_record_family
+        from dockdack.strategy_lots import row_family
+        if self.mode is not TradingMode.DEMO:
+            return False
+        inventory = self._prototype_inventory(db, rule.watch_id)
+        if inventory["issues"]:
+            return False
+        allocations = {row["rule_id"]: row for row in self._prototype_allocations(db)}
+        lots = {row["lot_id"]: row for row in inventory["lots"]}
+        if rule.side is OrderSide.BUY:
+            record = db.execute("""SELECT * FROM external_signals WHERE rule_id=COALESCE(
+                (SELECT root_rule_id FROM order_retries WHERE rule_id=?),?)""", (rule.id, rule.id)).fetchone()
+            try:
+                family = prototype_record_family(dict(record) if record else None,
+                                                  watch_id=rule.watch_id, action="buy")
+            except ValueError:
+                return False
+            if family is None or any(lot["strategy_id"] == family.id and lot["quantity_remaining"] > 0
+                                     for lot in lots.values()):
+                return False
+            strategy_id = family.id
+        else:
+            allocation = allocations.get(rule.id)
+            lot = lots.get(allocation["lot_id"]) if allocation else None
+            if (lot is None or lot["issues"] or lot["buy_pending"] or Decimal(allocation["quantity"]) != rule.quantity
+                    or lot["quantity_remaining"] < rule.quantity):
+                return False
+            strategy_id = lot["strategy_id"]
+        for pending in self._order_history(db, None):
+            if pending["watch_id"] != rule.watch_id or pending["status"] not in PENDING:
+                continue
+            if pending["status"] != "accepted":
+                return False
+            if pending["side"] == "buy":
+                try:
+                    other = row_family(pending)
+                except ValueError:
+                    return False
+                other_id = other.id if other else None
+            else:
+                other_allocation = allocations.get(pending["rule_id"])
+                other_lot = lots.get(other_allocation["lot_id"]) if other_allocation else None
+                other_id = other_lot["strategy_id"] if other_lot else None
+            if other_id is None or other_id == strategy_id:
+                return False
         return True
 
     def finish(self, rule_id: str, status: str, message: str, order_number: str = ""):
@@ -796,22 +948,47 @@ class WatchStore:
         if limit is not None and (type(limit) is not int or limit < 1):
             raise ValueError("주문 내역 개수는 양의 정수 또는 None이어야 합니다.")
         with self.connection() as db:
-            sql = """
-                SELECT a.rule_id,a.watch_id,a.started_at,a.status,a.order_number,a.message,
-                       a.price AS reference_price,w.symbol,w.name,w.market,w.exchange,
-                       CASE w.market WHEN 'domestic' THEN 'KRW' WHEN 'us' THEN 'USD' END AS currency,
-                       r.side,r.quantity,x.filled_quantity,x.remaining_quantity,x.fill_price,x.observed_at,
-                       f.status AS recovery_status,f.message AS recovery_message,f.checked_at AS recovery_checked_at,
-                       f.source_api AS recovery_source_api,f.price_basis AS recovery_price_basis,
-                       f.order_date AS recovery_order_date,f.order_time AS recovery_order_time,
-                       f.fill_time AS recovery_fill_time,f.reported_fill_price AS recovery_reported_fill_price,
-                       f.price_basis_quantity,f.price_basis_price
-                FROM attempts a JOIN rules r ON r.id=a.rule_id JOIN watchlist w ON w.id=a.watch_id
-                LEFT JOIN order_execution_snapshots x ON x.rule_id=a.rule_id
-                LEFT JOIN order_fill_recovery f ON f.rule_id=a.rule_id
-            """
-            sql += " ORDER BY a.started_at,a.rowid" if limit is None else " ORDER BY a.started_at DESC,a.rowid DESC LIMIT ?"
-            return tuple(dict(row) for row in db.execute(sql, () if limit is None else (limit,)))
+            return self._order_history(db, limit)
+
+    @staticmethod
+    def _order_history(db, limit):
+        sql = """
+            SELECT a.rule_id,a.watch_id,a.started_at,a.status,a.order_number,a.message,
+                   a.price AS reference_price,w.symbol,w.name,w.market,w.exchange,
+                   CASE w.market WHEN 'domestic' THEN 'KRW' WHEN 'us' THEN 'USD' END AS currency,
+                   r.side,r.quantity,x.filled_quantity,x.remaining_quantity,x.fill_price,x.observed_at,
+                   f.status AS recovery_status,f.message AS recovery_message,f.checked_at AS recovery_checked_at,
+                   f.source_api AS recovery_source_api,f.price_basis AS recovery_price_basis,
+                   f.order_date AS recovery_order_date,f.order_time AS recovery_order_time,
+                   f.fill_time AS recovery_fill_time,f.reported_fill_price AS recovery_reported_fill_price,
+                   f.price_basis_quantity,f.price_basis_price,
+                   e.source_id AS external_source_id,e.signal_id AS external_signal_id,
+                   e.payload AS external_payload,e.decision AS external_decision,
+                   e.watch_id AS external_watch_id,
+                   p.lot_id AS prototype_lot_id,p.lot_id AS prototype_buy_rule_id
+            FROM attempts a JOIN rules r ON r.id=a.rule_id JOIN watchlist w ON w.id=a.watch_id
+            LEFT JOIN order_execution_snapshots x ON x.rule_id=a.rule_id
+            LEFT JOIN order_fill_recovery f ON f.rule_id=a.rule_id
+            LEFT JOIN order_retries retry ON retry.rule_id=a.rule_id
+            LEFT JOIN prototype_sell_allocations p ON p.rule_id=COALESCE(retry.root_rule_id,a.rule_id)
+            LEFT JOIN order_retries buy_retry ON buy_retry.rule_id=p.lot_id
+            LEFT JOIN external_signals e ON e.rule_id=COALESCE(buy_retry.root_rule_id,p.lot_id,retry.root_rule_id,a.rule_id)
+        """
+        sql += " ORDER BY a.started_at,a.rowid" if limit is None else " ORDER BY a.started_at DESC,a.rowid DESC LIMIT ?"
+        result = []
+        for row in db.execute(sql, () if limit is None else (limit,)):
+            item = dict(row)
+            item["prototype_strategy_id"] = item["prototype_model_title"] = None
+            if item["prototype_lot_id"]:
+                from dockdack.strategy_lots import row_family
+                try:
+                    family = row_family(item)
+                except ValueError:
+                    family = None
+                if family:
+                    item["prototype_strategy_id"], item["prototype_model_title"] = family.id, family.title
+            result.append(item)
+        return tuple(result)
 
     def record_execution(self, rule_id: str, *, filled_quantity: Decimal,
                          remaining_quantity: Decimal, fill_price: Decimal | None,

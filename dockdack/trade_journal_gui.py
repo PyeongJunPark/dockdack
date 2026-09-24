@@ -17,6 +17,7 @@ from dockdack.operations_gui import populate
 from dockdack.trade_journal import DATE_DESCRIPTION, MARKETS, RETURN_DESCRIPTION, daily_trade_journal, empty_day
 from dockdack.watchlist import STATUS_LABELS
 from dockdack.activity_snapshot import LedgerSnapshot, MAX_VISIBLE_ROWS
+from dockdack.signal_bridge import prototype_order_label
 
 
 def _money(value, currency, *, signed=False, price=False):
@@ -121,7 +122,7 @@ class DailyTradeJournalPanel(QWidget):
             self.summaries[market] = label("", "muted", wrap=True)
             page_layout.addWidget(self.summaries[market])
             view = table(["주문시각", "종목", "매수/매도", "체결 수량", "체결 평균가", "체결금액",
-                          "실현손익", "실현 수익률", "주문 상태"])
+                          "실현손익", "실현 수익률", "주문 상태", "매수 모델"])
             view.setWordWrap(False)
             # Never squeeze the detail ledger down to a clipped header/one row.
             # Short windows scroll the market page instead of hiding its text.
@@ -132,6 +133,8 @@ class DailyTradeJournalPanel(QWidget):
             view.horizontalHeader().setStretchLastSection(True)
             for column, width in ((0, 92), (1, 180), (2, 75), (3, 85), (4, 125), (5, 135), (6, 125), (7, 105), (8, 145)):
                 view.setColumnWidth(column, width)
+            view.setColumnWidth(9, 160)
+            view.horizontalHeader().moveSection(9, 3)
             self.tables[market] = view
             self.pages[market] = page
             page_layout.addWidget(view, 1)
@@ -267,11 +270,14 @@ class DailyTradeJournalPanel(QWidget):
                           _money(row["effective_fill_price"], currency, price=True) if filled else "—",
                           _money(row["amount"], currency) if filled else "—",
                           _money(metric.get("realized_profit"), currency, signed=True) if sale else "—",
-                          f"{rate:+.2f}%" if sale and rate is not None else "미확인" if sale else "—", status))
+                          f"{rate:+.2f}%" if sale and rate is not None else "미확인" if sale else "—", status,
+                          prototype_order_label(row)))
         view = self.tables[market]
         if populate(view, cells, [row["rule_id"] for row in rows]):
             for index, row in enumerate(rows):
                 tooltip = (f"주문번호: {row.get('order_number') or '미확인'}\n{DATE_DESCRIPTION}\n"
+                           f"매수 모델: {prototype_order_label(row)}\n"
+                           f"저장된 신호: {row.get('external_signal_id') or '미확인'} · 현재 선택한 모델과 무관\n"
                            f"증권사 주문일 원문: {row.get('recovery_order_date') or '없음'} · 체결시각 원문: {row.get('recovery_fill_time') or '없음'}\n"
                            f"체결 정보 조회시각(체결시각 아님): {row.get('observed_at') or '없음'}\n"
                            f"가격: {row['metric'].get('price_reason') or '증권사 체결가격'}\n"

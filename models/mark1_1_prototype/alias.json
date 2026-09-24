@@ -1,0 +1,70 @@
+{
+  "contract": {
+    "identity_only_alias": true,
+    "owner": "dockdack.mark1_1_prototype",
+    "risk_flags": {
+      "deployment_allowed": false,
+      "intraday_path_verified": false,
+      "known_data_quality_issues": true,
+      "research_only": true,
+      "research_qualified": false
+    },
+    "schema_version": 1,
+    "semantics": {
+      "bar_columns": [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "both_touch": "stop_first_failure",
+      "buy_comparison": "strict_greater_than",
+      "buy_threshold": 0.5,
+      "candidate_entry_representation": "float64",
+      "class_names": [
+        "take_only",
+        "stop_only",
+        "both_touch",
+        "neither"
+      ],
+      "ensemble": "mean_raw_logits_then_platt",
+      "historical_representation": "validate_original_then_float32_raw_cache_parity",
+      "lookback": 30,
+      "path_limitation": "Whole-session conservative daily-bar event: high >= entry*1.005 and low > entry*0.996. Both-touch is failure. This is not a verified first-touch probability after an arbitrary intraday entry.",
+      "stop_loss_pct": 0.4,
+      "take_profit_pct": 0.5,
+      "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative"
+    },
+    "source_model_version": "20260920-v1",
+    "source_title": "mark1 0.5/0.4 research",
+    "strategy_id": "mark1-1-prototype",
+    "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative",
+    "title": "mark1.1 prototype",
+    "version": "20260924-v1",
+    "wrapper_sha256": "b96d93900d881686f6c46d05658292a5664f425372994b910fa91c1a0a840045"
+  },
+  "created_at_utc": "2026-09-24T06:18:30.128184+00:00",
+  "exporter_sha256": "51f0ca2cced57dc12f45f6ff6f59a92ad2992e1503b5f8ac6d1d806f4856b344",
+  "source_bundle_manifest_sha256": "570ce10050b912dfd9f790ef4f5e393cfcb9ea5f73e49c3819b3396fff12a5fb",
+  "source_files_sha256": {
+    "domestic/manifest.json": "1275ea82dd8d8820ba82a03af6a1dafeb43722ba9ca4cc95d59a992eb6869064",
+    "domestic/seed42.cbm": "0b053c26ab9b2b99b7d0b44a9df90c1ef95ed2638cfc884176a6b4acc2d125f8",
+    "domestic/seed42.cbm.json": "a934ad6ec69fd5d20634dd6be9ce61cf803895e8a8841b5dc2943f3753cc14cb",
+    "domestic/seed43.cbm": "ab4612b1fbb2a719abe74bf688fd30575d1937912e1abf3f51088c42bcaf88c1",
+    "domestic/seed43.cbm.json": "18d4fa8563a6bad0624cf9375300739593e09cf8f0c668cf0e500917fffd833b",
+    "domestic/seed44.cbm": "612fd7997fead13304ff6b01b35221fabc3373d057c9a3f8e0e068eb549057bf",
+    "domestic/seed44.cbm.json": "4f85e946c64384bfa1a946d8922042e2a3a898698b22800355ae011e07c5369f",
+    "export-validation.json": "15df2d8be4993b968da7ecb8936fe955cc353de4541cbef9fe74a785186472bb",
+    "manifest.json": "570ce10050b912dfd9f790ef4f5e393cfcb9ea5f73e49c3819b3396fff12a5fb",
+    "manifest.sha256": "9cdb55a5ab0b70dead1ed6cbbc34149ea5af3f1b74f298c072a7fec5006a937c",
+    "us/manifest.json": "87e0ba70cf8ff054372af507d1c5e56131f4fdcd6dc968bd97099fca31214d6f",
+    "us/seed42.cbm": "a1053af7b8023e0873373480a011be732fc5ce45e996607787328d628d4cb582",
+    "us/seed42.cbm.json": "a2c812331a3ad2604140c5d0f310306cf1a939b13a610508e015fa27dde0a183",
+    "us/seed43.cbm": "5e08338c8d2d227a8f04968d8073c8009ff6246b48abed95c2f421c01d03daa4",
+    "us/seed43.cbm.json": "367850c6262fe379fbb3d0c84fabaa0bb61b79cffb725552c44a1c7de013f6dc",
+    "us/seed44.cbm": "a95ec40f24847e6b60c60822aa0d003ec0a9f28941f49fb312bf89ebbc7a4e66",
+    "us/seed44.cbm.json": "26b116124f47e8b02884b7c3231c49b114d7be00d6274d34d62dfad3435b0e12"
+  },
+  "validation_sha256": "d9d6cc1af6e223cb38ad98ba303905fff93fcccf515d5df3fe2b46b41e6cc6b6"
+}
