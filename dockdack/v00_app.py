@@ -387,6 +387,12 @@ class V00Window(WatchlistDialog):
                 orders = '주문 ON' if self.engine.orders_enabled else '주문 OFF'
                 self.connection_summary.setText(f'외부 AI {len(self._chosen_external_models())}개 · {state} · {orders} · 모델별 연결 상태는 매매 설정에서 확인')
             self.model_status.setText(text)
+            builtin = producer.builtin if isinstance(producer, ExternalFeedGroup) else producer
+            if isinstance(builtin, DesktopModelBridge) and builtin._load_error:
+                warning = '내장 LSTM 실행 불가 · 매매 설정에서 원인 확인 · 다른 연결은 별도 운영'
+                self.connection_summary.setText(
+                    self.connection_summary.text() + '\n' + warning
+                    if self._chosen_external_models() else warning)
 
     def _prepare_builtin(self):
         choice = self._chosen_trigger()
