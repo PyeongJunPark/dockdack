@@ -108,6 +108,7 @@ class AutoTrader:
         # Opt-in virtual inventory. Broker positions remain aggregate; each
         # prototype owns only its confirmed fills and its own exit allocation.
         self.prototype_lots_enabled = False
+        self._lot_sellable_checks = {}
         self.session_only_poll = True
         self.enable_holdings_exits = False
         self.equity_buy_percent = None
@@ -197,8 +198,18 @@ class AutoTrader:
             raise ValueError("매도 대상 모델의 확정 체결 보유분을 확인할 수 없습니다.")
         # This rule's reserved shares are included in quantity_reserved_sell.
         other_reserved = max(Decimal(0), lot["quantity_reserved_sell"] - Decimal(allocation["quantity"]))
-        if lot["quantity_remaining"] - other_reserved < rule.quantity or sellable < rule.quantity:
+        # The broker can lag an accepted order or already subtract it. Reserve
+        # outstanding shares across ALL model lots either way, as with pending
+        # BUY cash: double reservation may defer a sell but never reuse a shared
+        # account limit. This ready rule's own allocation is already reserved.
+        shared_reserved = sum((row["quantity_reserved_sell"] for row in inventory["lots"]), Decimal(0))
+        other_shared_reserved = max(Decimal(0), shared_reserved - Decimal(allocation["quantity"]))
+        if (lot["quantity_remaining"] - other_reserved < rule.quantity
+                or sellable - other_shared_reserved < rule.quantity):
             raise ValueError("모델별 미체결 매도 예약 또는 실제 매도 가능 수량이 부족합니다.")
+        self._lot_sellable_checks[rule.id] = (sellable, self.clock())
+        while len(self._lot_sellable_checks) > 500:
+            self._lot_sellable_checks.pop(next(iter(self._lot_sellable_checks)))
         return lot
 
     def _validate_lot_final(self, item, rule):
@@ -221,6 +232,11 @@ class AutoTrader:
             if (lot is None or lot["average_price"] is None or lot["quantity_remaining"] < rule.quantity
                     or lot["quantity_reserved_sell"] > lot["quantity_remaining"]):
                 raise ValueError("모델별 매도 예약/확정 체결 수량이 바뀌어 전송하지 않습니다.")
+            checked = self._lot_sellable_checks.pop(rule.id, None)
+            reserved = sum((row["quantity_reserved_sell"] for row in inventory["lots"]), Decimal(0))
+            if (checked is None or not 0 <= (self.clock() - checked[1]).total_seconds() <= 15
+                    or reserved > checked[0]):
+                raise ValueError("모델 전체 매도 예약이 확인된 계좌 매도가능수량을 초과하거나 검증이 만료되었습니다.")
 
     def _lot_cash_account(self, account, rule):
         """Conservatively reserve unfilled prototype buys across this market.
@@ -482,6 +498,7 @@ class AutoTrader:
                               f"접수 후 체결 확인 대기 · 주문번호 {attempt['order_number']} · 이번 조회에 주문 행 없음(체결 실패 확정 아님), 중복 재주문하지 않음", category="order")
 
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
+        self._lot_sellable_checks.pop(rule.id, None)
         inst = item.instrument
         self._ensure_environment(inst, orders=True)
         self.service.ensure_common_equity(inst)

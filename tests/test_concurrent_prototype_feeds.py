@@ -392,6 +392,63 @@ class VirtualPrototypeLotEngineTests(unittest.TestCase):
         self.engine.poll()
         self.assertEqual(len(self.sells()), 2)
 
+    def test_shared_sellable_not_reused_when_broker_snapshot_lags_accepted_sell(self):
+        self.hold_both()
+        self.service.positions = (position(2, 1),)
+        self.service.prices = [Decimal("101.1")]
+        self.engine.poll()
+        self.assertEqual([row["quantity"] for row in self.sells()], [1])
+        self.assertEqual(sum(lot["quantity_reserved_sell"] for lot in self.store.prototype_lots(self.item.id)), 1)
+        self.engine.poll()
+        self.assertEqual(len(self.sells()), 1)
+
+    def test_broker_already_deducted_reservation_defers_other_lot_until_fill_confirmed(self):
+        self.hold_both()
+        self.service.prices = [Decimal("101.1")]
+        self.service.on_submit = lambda: setattr(self.service, "positions", (position(2, 1),))
+        self.engine.poll()
+        self.assertEqual(len(self.sells()), 1)
+        first = self.sells()[0]
+        self.store.record_execution(first["rule_id"], filled_quantity=Decimal(1), remaining_quantity=Decimal(0),
+                                    fill_price=Decimal("101.1"), observed_at=self.now)
+        self.store.finish(first["rule_id"], "filled", "fake confirmed sale")
+        self.service.on_submit = lambda: None
+        self.service.positions = (position(1, 1),)
+        self.engine.poll()
+        self.assertEqual(len(self.sells()), 2)
+        self.assertEqual(sum(lot["quantity_reserved_sell"] for lot in self.store.prototype_lots(self.item.id)), 1)
+
+    def test_cancelled_sell_releases_shared_reservation_without_adding_sellable(self):
+        self.hold_both()
+        self.service.positions = (position(2, 1),)
+        self.service.prices = [Decimal("100.6")]
+        self.engine.poll()
+        first = self.sells()[0]
+        self.store.record_execution(first["rule_id"], filled_quantity=Decimal(0), remaining_quantity=Decimal(0),
+                                    fill_price=None, observed_at=self.now)
+        self.store.finish(first["rule_id"], "cancelled", "fake cancellation")
+        self.service.prices = [Decimal("101.1")]
+        self.engine.poll()
+        self.assertEqual(len(self.sells()), 2)
+        accepted = [row for row in self.sells() if row["status"] == "accepted"]
+        self.assertEqual(sum(row["quantity"] for row in accepted), 1)
+
+    def test_other_lot_reservation_added_during_pacing_blocks_final_send(self):
+        old_buy, new_buy = self.hold_both()
+        self.service.positions = (position(2, 1),)
+        self.service.prices = [Decimal("100.6")]
+        def reserve_other_lot():
+            from dockdack.models import OrderSide
+            from dockdack.watchlist import TriggerKind, TriggerRule
+            rule = TriggerRule("holding-exit-pacing-other", self.item.id, TriggerKind.PRICE_GE,
+                               OrderSide.SELL, 1, Decimal(500), Decimal(101))
+            self.store.save_holding_rule(self.item, rule)
+            self.store.reserve_prototype_sell(rule.id, old_buy.id, 1)
+        self.service.before_guard = reserve_other_lot
+        self.engine.poll()
+        self.assertEqual(len(self.service.submitted), 2, "Only the two setup BUYs were transmitted")
+        self.assertEqual(self.sells()[0]["status"], "not_sent")
+
     def test_lot_targets_use_individual_fills_not_broker_blended_average(self):
         old_buy, new_buy = self.hold_both(prices=("100", "110"))
         summary = self.engine.holding_exit_targets(self.service.positions[0])

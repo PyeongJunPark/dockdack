@@ -36,10 +36,10 @@ def utc_now():
 @lru_cache(maxsize=8)
 def _market_calendar(market, year):
     """Import lazily: missing calendar data blocks entries, never held exits."""
-    import exchange_calendars
+    from dockdack.market_schedule import exchange_calendar
 
     name = "XKRX" if market == "domestic" else "XNYS"
-    return exchange_calendars.get_calendar(name, start=f"{year - 1}-01-01", end=f"{year + 1}-12-31")
+    return exchange_calendar(name, start=f"{year - 1}-01-01", end=f"{year + 1}-12-31")
 
 
 def previous_trading_day(market, now):
