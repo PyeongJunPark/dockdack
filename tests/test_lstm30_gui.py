@@ -593,7 +593,8 @@ class LSTM30GuiTests(unittest.TestCase):
 
     def test_closing_window_pauses_new_buy_without_disarming_liquidation_authority(self):
         window = self.window()
-        closer = SimpleNamespace(tick=Mock(), buy_blocked=Mock(return_value=True))
+        closer = SimpleNamespace(tick=Mock(), buy_blocked=Mock(return_value=True), enabled=True,
+                                 status=Mock(return_value={"enabled": True, "unsold": [], "errors": []}))
         window.engine.close_liquidator = closer
         window.start_session("DEMO_AUTOTRADE")
         self.wait_idle(window)

@@ -148,14 +148,15 @@ class Mark1WatchlistDialog(LSTM30WatchlistDialog):
         self.mark1_limitations.setWordWrap(True)
         layout.addWidget(self.mark1_limitations)
         self.mark1_model_table = QTableWidget(0, 5)
-        self.mark1_model_table.setHorizontalHeaderLabels(["종목", "모델", "보정 성공확률", "전달 신호", "판단 사유"])
+        self.mark1_model_table.setHorizontalHeaderLabels(["종목", "모델", "모델 추정 확률 (미검증)", "전달 신호", "판단 사유"])
         self.mark1_model_table.horizontalHeader().setStretchLastSection(True)
         self.mark1_model_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self.mark1_model_table)
         self.workspace_tabs.addTab(page, "mark1 모델 · 매매 조건")
         self.mark1_refresh_timer = QTimer(self)
         self.mark1_refresh_timer.setInterval(500)
-        self.mark1_refresh_timer.timeout.connect(self._update_mark1_table)
+        self.mark1_refresh_timer.timeout.connect(lambda: self._update_mark1_table(visible_only=True))
+        self.workspace_tabs.currentChanged.connect(lambda _: self._update_mark1_table(visible_only=True))
         self.mark1_refresh_timer.start()
         self._update_mark1_table()
         self.message.setText("mark1 모델 연결됨 · 감시 중지 · 자동주문 OFF · 시작은 사용자의 별도 조작 필요")
@@ -172,20 +173,33 @@ class Mark1WatchlistDialog(LSTM30WatchlistDialog):
             return
         self.signal_connection_panel.source_label.setText(f"mark1 보수적 일봉 장벽 모델 · source_id: {self.source_id}")
         state = "연결 활성" if self.monitoring and self.engine.external_reader else "연결 설정됨 · 감시 중지"
-        self.connection_summary.setText(f"mark1 · 성공확률 > 50% / +1% 익절 / -0.9% 손절 · {state} | {self._market_summary}")
+        self.connection_summary.setText(f"mark1 · 모델 추정 확률 > 50% / +1% 익절 / -0.9% 손절 · {state} | {self._market_summary}")
 
-    def _update_mark1_table(self):
+    def _update_mark1_table(self, *, visible_only=False):
+        if visible_only and not self.mark1_model_table.isVisible():
+            return
         diagnostics = dict(self.lstm_bridge.diagnostics)
-        self.mark1_model_table.setRowCount(len(self.lstm_items))
-        for index, item in enumerate(self.lstm_items):
+        rows = []
+        for item in self.lstm_items:
             row = diagnostics.get(item.id, {})
             prediction = row.get("prediction", {})
             probability = prediction.get("probability_success")
             display = "조회 전 / 모델 판단 없음" if probability is None else f"{float(probability):.2%}"
             values = (item.instrument.symbol, row.get("model_name", "—"), display,
                       row.get("action", "미전달"), row.get("reason", "감시를 시작하지 않았습니다"))
+            rows.append(values)
+        signature = tuple(rows)
+        if signature == getattr(self, '_mark1_table_signature', None):
+            return
+        self._mark1_table_signature = signature
+        self.mark1_model_table.setRowCount(len(rows))
+        for index, values in enumerate(rows):
             for column, value in enumerate(values):
-                self.mark1_model_table.setItem(index, column, QTableWidgetItem(str(value)))
+                cell = self.mark1_model_table.item(index, column)
+                if cell is None:
+                    self.mark1_model_table.setItem(index, column, QTableWidgetItem(str(value)))
+                elif cell.text() != str(value):
+                    cell.setText(str(value))
         self.mark1_model_table.resizeColumnsToContents()
 
     def shutdown(self):

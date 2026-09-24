@@ -74,8 +74,10 @@ CatBoost GPU Plain boosting, lr .03, L2 10, border 128, Bernoulli subsample .8. 
 
 `outputs/mark1/selective-20260916`에 설정/코드 hash, 모델, raw 예측, 확률 보정, 문턱, 전체 후보 결과를 보관한다. 원본·정제 DB와 `models/mark1/*.pt`를 덮어쓰지 않는다. 환경 추가 라이브러리는 Git 제외 연구용 폴더에만 설치했다. 자동주문·커밋·푸시·병합은 하지 않는다.
 
+아래는 **과거 학습 실행기 기록**이다. 현재 자료를 확인하기 위한 실행 명령이 아니며, 봉인된 기본 DB 경로는 이전 작업 폴더를 가리킨다. 새 학습은 새 실험 폴더·명시적 DB 경로·별도 승인이 필요하다.
+
 ```powershell
-$env:PYTHONPATH='C:/Users/user/Desktop/dockdack-mark_1/outputs/mark1/selective-deps'
+$env:PYTHONPATH='C:/Users/user/Desktop/dockdack/outputs/mark1/selective-deps'
 & 'C:/Users/user/Desktop/dockdack/.venv-ml-cuda/Scripts/python.exe' -m examples.train_mark1_selective
 ```
 
@@ -91,11 +93,11 @@ $env:PYTHONPATH='C:/Users/user/Desktop/dockdack-mark_1/outputs/mark1/selective-d
 - `outputs/mark1/selective-backtest-20260916`: 재사용 역사 예측과 64개 포트폴리오 장부, 독립 장부 감사.
 - `reports/mark1-selective-20260916`: 사람이 읽는 보고서, 요약 JSON, 후보/신호 빈도/수익/비용 그래프 네 장.
 
-기본값으로 완료한 실험의 백테스트와 보고서를 실행하는 명령은 다음과 같다. 재실행은 계산 시간이 들고 해당 결과 폴더를 갱신할 수 있으므로 단순 확인에는 저장 보고서를 연다. 선택적인 라이브러리는 Python 3.13용 격리 폴더에 설치됐으므로 다른 Python 버전에 그 폴더를 연결하지 않는다.
+완료한 실험을 단순 확인하려면 저장 보고서를 연다. 폴더 통합 후 백테스트 재실행에는 아래의 새 호환 진입점과 **존재하지 않는 새 출력 폴더**가 필요하다. 기존 결과는 덮어쓰지 않는다. 재실행에는 계산 시간이 들며, 이번 호환 수정에서는 학습이나 전체 백테스트를 다시 실행하지 않았다. 선택적인 라이브러리는 Python 3.13용 격리 폴더에 설치됐으므로 다른 Python 버전에 그 폴더를 연결하지 않는다. 상세 제약은 [연구 도구 안내](research-tools.md)를 참고한다.
 
 ```powershell
-$env:PYTHONPATH='C:/Users/user/Desktop/dockdack-mark_1/outputs/mark1/selective-deps'
-& 'C:/Users/user/Desktop/dockdack/.venv-ml-cuda/Scripts/python.exe' -m examples.backtest_mark1_selective
+$env:PYTHONPATH='C:/Users/user/Desktop/dockdack/outputs/mark1/selective-deps'
+& 'C:/Users/user/Desktop/dockdack/.venv-ml-cuda/Scripts/python.exe' -m dockdack.research_tools --workspace . backtest-selective -- --output-dir outputs/mark1/selective-backtest-new
 & 'C:/Users/user/Desktop/dockdack/.venv-ml-cuda/Scripts/python.exe' -m examples.report_mark1_selective
 ```
 

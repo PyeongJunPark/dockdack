@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-24",
+  "branch": "codex/optimization-adversarial-audit",
+  "base_commit": "6e3ace7797088f5f6d569d7586b8e5f3c91bdf15",
+  "tests": {
+    "current_discovery": 1925,
+    "default_root_discovery": 1925,
+    "unique_passed_ids": 1925,
+    "missing_ids": 0,
+    "shard_counts": [476, 504, 441, 503],
+    "last_gui_scope_suite": 12,
+    "note": "Final added GUI suite overlaps the shards by 11 cases; 1925 unique successful IDs verified."
+  },
+  "protected_model_inventory": {"files": 60, "changed_sha256": 0},
+  "wheel": {
+    "sha256": "3f0f9fc8ff9d145bdb5f76ff326681212912808ad21fb413b3658499f8e68bbd",
+    "installed_outside_checkout": true,
+    "gui_import": true,
+    "two_workers_four_model_market_predictions": true,
+    "research_import_and_five_cli_help_commands": true,
+    "bundles_supplied_explicitly_not_embedded": true
+  },
+  "checks": {"syntax": true, "uv_lock_check": true, "git_diff_check": true},
+  "production_broker_calls": 0,
+  "production_orders": 0,
+  "existing_user_database_migrations": 0,
+  "model_retraining": false,
+  "commit_push_merge": false,
+  "limits": [
+    "Remote CI was configured, not executed by this task.",
+    "Offscreen GUI checks are not physical multi-monitor/DPI or screen-reader validation.",
+    "Close liquidation requires a running, explicitly armed DEMO GUI; order acceptance is not guaranteed fill.",
+    "Frozen research numerical backtests/exports and CUDA training were not rerun.",
+    "Domain separation is staged; large legacy classes and sealed historical math remain."
+  ]
+}

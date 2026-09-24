@@ -83,10 +83,11 @@ class BackgroundUiTests(unittest.TestCase):
         self.window.engine.clock = lambda: NOW
         for timer in self.window.findChildren(QTimer):
             timer.stop()
+        self.drain()
 
     def drain(self):
         end = time.monotonic() + 10
-        while self.window._activity_worker or self.window._schedule_probe:
+        while self.window._activity_worker or self.window._schedule_probe or self.window._workspace_worker:
             self.window.activity_pool.waitForDone(100)
             self.app.processEvents()
             self.assertLess(time.monotonic(), end, 'background worker did not finish')

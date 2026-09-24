@@ -18,7 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
     from dockdack.v00_app import DesktopModelBridge, V00Window
     from dockdack.v00_widgets import OrderToast, SourceList
 
@@ -59,7 +59,8 @@ class V00GuiTests(unittest.TestCase):
             if pool is not None:
                 pool.waitForDone(1000)
             self.app.processEvents()
-            if getattr(self.window, "_activity_worker", None) is None and getattr(self.window, "_schedule_probe", None) is None:
+            if (getattr(self.window, "_activity_worker", None) is None and getattr(self.window, "_schedule_probe", None) is None
+                    and getattr(self.window, '_workspace_worker', None) is None):
                 return
         self.fail("offline activity worker did not finish")
 
@@ -77,6 +78,10 @@ class V00GuiTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_default_ten_percent_and_off_without_any_broker_read_or_order(self):
+        from dockdack.version import APP_RELEASE
+        self.assertIn(APP_RELEASE, self.window.message.text())
+        self.assertTrue(any(f'DOCKDACK  ver {APP_RELEASE}' == widget.text()
+                            for widget in self.window.findChildren(QLabel)))
         self.assertEqual(self.window.buy_percent.value(), 10)
         self.assertTrue(self.window.percent_sizing.isChecked())
         self.assertEqual(self.window.engine.equity_buy_percent, D(10))

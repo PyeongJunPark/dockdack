@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from dockdack.config import KiwoomConfig
+from dockdack.daily_generations import DailyGenerationStore, GenerationConflict, canonical_json
 from dockdack.exceptions import BrokerAPIError
 from dockdack.kiwoom import KiwoomBroker, _domestic_daily_bar, _us_daily_bar
 from dockdack.models import DailyBar, DomesticExchange, Market, StockInfo, TradingMode, USExchange
@@ -57,10 +58,11 @@ class CollectionResult:
     completed: int
     failed: int
     bars: int
+    pending_generations: int = 0
 
 
 class DailyDatasetStore:
-    """SQLite storage with page-level commits so long collections can resume."""
+    """Published daily history and resumable, separately staged generations."""
 
     def __init__(self, path: Path, market: Market) -> None:
         self.path = path.resolve()
@@ -72,6 +74,7 @@ class DailyDatasetStore:
         self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.execute("PRAGMA busy_timeout=60000")
         self._create_schema()
+        self.generations = DailyGenerationStore(self.connection)
 
     def close(self) -> None:
         self.connection.close()
@@ -331,6 +334,7 @@ class DailyDatasetStore:
             ) VALUES (?, ?, 'error', ?, ?)
             ON CONFLICT(symbol, exchange) DO UPDATE SET
                 status='error', error=excluded.error, updated_at=excluded.updated_at
+            WHERE collection_progress.status != 'complete'
             """,
             (instrument.symbol, instrument.exchange, message[:2_000], _now()),
         )
@@ -349,6 +353,10 @@ class DailyDatasetStore:
             "SELECT status, COUNT(*) AS count FROM collection_progress GROUP BY status"
         ):
             result[str(row["status"])] = int(row["count"])
+        for row in self.connection.execute(
+            "SELECT status, COUNT(*) AS count FROM daily_generations WHERE active=1 GROUP BY status"
+        ):
+            result[f"staged_{row['status']}"] = int(row["count"])
         return result
 
 
@@ -386,39 +394,31 @@ def collect_daily_dataset(
         for index, instrument in enumerate(instruments, 1):
             progress = store.progress(instrument)
             is_complete = progress is not None and progress["status"] == "complete"
-            if is_complete and not refresh_complete:
+            if (is_complete and not refresh_complete
+                    and not store.generations.pending(instrument.symbol, instrument.exchange)):
                 completed += 1
                 continue
 
-            known_latest = str(progress["latest_date"] or "") if is_complete else ""
-            if progress is None or is_complete:
-                store.start_fresh_pass(instrument)
-                cont_yn = None
-                next_key = None
-            else:
-                cont_yn = str(progress["cont_yn"] or "") or None
-                next_key = str(progress["next_key"] or "") or None
-
             try:
-                _collect_instrument(
+                published = _collect_instrument(
                     broker,
                     market,
                     store,
                     instrument,
-                    cont_yn=cont_yn,
-                    next_key=next_key,
-                    known_latest=known_latest,
+                    cont_yn=None,
+                    next_key=None,
+                    known_latest="",
                     max_pages=max_pages_per_symbol,
                     retries=retries,
                 )
-                final_progress = store.progress(instrument)
-                if final_progress is not None and final_progress["status"] == "complete":
+                if published:
                     completed += 1
                 if index == 1 or index % 25 == 0 or index == len(instruments):
                     stats = store.stats()
                     print(
                         f"[{market.value}] {index:,}/{len(instruments):,} 종목, "
-                        f"완료 {stats['complete']:,}, 일봉 {stats['bars']:,}, 오류 {stats['error']:,}",
+                        f"완료 {stats['complete']:,}, 일봉 {stats['bars']:,}, 오류 {stats['error']:,}, "
+                        f"별도 수집 중 {sum(value for key, value in stats.items() if key.startswith('staged_')):,}",
                         flush=True,
                     )
             except KeyboardInterrupt:
@@ -426,7 +426,9 @@ def collect_daily_dataset(
                 raise
             except Exception as exc:
                 failed += 1
-                store.mark_error(instrument, f"{type(exc).__name__}: {exc}")
+                # A failed refresh must not relabel the previous valid publication.
+                if not is_complete and not isinstance(exc, GenerationConflict):
+                    store.mark_error(instrument, f"{type(exc).__name__}: {exc}")
                 print(
                     f"[{market.value}] {instrument.symbol}/{instrument.exchange} 오류: {exc}",
                     file=sys.stderr,
@@ -441,6 +443,7 @@ def collect_daily_dataset(
             completed=stats["complete"],
             failed=failed,
             bars=stats["bars"],
+            pending_generations=sum(value for key, value in stats.items() if key.startswith("staged_")),
         )
 
 
@@ -455,7 +458,12 @@ def _collect_instrument(
     known_latest: str,
     max_pages: int | None,
     retries: int,
-) -> None:
+) -> bool:
+    # Legacy continuation/overlap hints cannot establish an adjustment basis.
+    # Resume only a new generation with a verified first-page anchor.
+    del cont_yn, next_key, known_latest
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be positive or None")
     client = broker._http_for(market)
     if market is Market.DOMESTIC:
         api_id = "ka10081"
@@ -480,61 +488,119 @@ def _collect_instrument(
         }
         response_key = "result_list"
 
-    seen_continuations: set[tuple[str | None, str | None]] = set()
-    pages_this_run = 0
-    while True:
+    generations = store.generations
+    generation = generations.claim(instrument.symbol, instrument.exchange)
+    generation_id = generation["id"]
+
+    def request_page(continuation: str | None = None) -> tuple[tuple[DailyBar, ...], str | None, str]:
+        generations.renew(generation_id)
         page = _request_with_retry(
             client,
             api_id=api_id,
             path=path,
             body=body,
-            cont_yn=cont_yn,
-            next_key=next_key,
+            cont_yn="Y" if continuation else None,
+            next_key=continuation,
             retries=retries,
         )
-        records = page.body.get(response_key, [])
-        if not isinstance(records, list):
-            raise ValueError(f"키움 응답의 {response_key}가 배열이 아닙니다.")
-        if market is Market.DOMESTIC:
-            bars = tuple(
-                _domestic_daily_bar(row, instrument.symbol, DomesticExchange.KRX)
-                for row in records
-                if isinstance(row, dict) and row.get("dt")
-            )
-        else:
-            exchange = USExchange(instrument.exchange)
-            bars = tuple(
-                _us_daily_bar(row, instrument.symbol, exchange, False)
-                for row in records
-                if isinstance(row, dict) and row.get("dt")
-            )
+        bars = _validated_page(page.body, response_key, instrument, market)
+        flag = str(page.cont_yn or "N").strip().upper()
+        if flag not in {"Y", "N"}:
+            raise ValueError("Invalid continuation flag")
+        token = str(page.next_key or "").strip() or None
+        if flag == "Y" and (not token or not bars):
+            raise ValueError("A continued response requires bars and a nonempty continuation key")
+        token = token if flag == "Y" else None
+        anchor = canonical_json({"bars": [_bar_row(bar, "") for bar in bars], "has_next": token is not None})
+        return bars, token, anchor
 
-        reached_known_data = bool(
-            known_latest
-            and any(bar.trade_date.isoformat() <= known_latest for bar in bars)
-        )
-        has_next = page.has_next and not reached_known_data
-        store.save_page(
-            instrument,
-            bars,
-            has_next=has_next,
-            cont_yn=page.cont_yn,
-            next_key=page.next_key,
-        )
-        pages_this_run += 1
-        if not has_next:
-            return
+    try:
+        # Reuse the original domestic reference date across capped runs/midnight.
+        if generation["request_json"]:
+            body = json.loads(generation["request_json"])
+        first_bars, first_token, anchor = request_page()
+        if generation["anchor"] is not None and generation["anchor"] != anchor:
+            generations.release(generation_id, superseded=True, error="First page changed; full restart")
+            generation = generations.claim(instrument.symbol, instrument.exchange)
+            generation_id = generation["id"]
+        pages_this_run = 0
+        if generation["pages"] == 0:
+            generations.append(generation_id, [_bar_row(bar, _now()) for bar in first_bars],
+                               anchor=anchor, request_json=canonical_json(body), next_key=first_token)
+            pages_this_run += 1
+        while True:
+            generation = generations.get(generation_id)
+            if generation["final_page"]:
+                # Detect an adjustment revision during traversal before publishing.
+                _, _, final_anchor = request_page()
+                generations.publish(generation_id, verified_anchor=final_anchor, timestamp=_now())
+                return True
+            if max_pages is not None and pages_this_run >= max_pages:
+                generations.release(generation_id)
+                return False
+            bars, token, _ = request_page(generation["next_key"])
+            generations.append(generation_id, [_bar_row(bar, _now()) for bar in bars],
+                               anchor=None, request_json=canonical_json(body), next_key=token)
+            pages_this_run += 1
+    except BaseException as exc:
+        generations.release(generation_id, error=f"{type(exc).__name__}: {exc}")
+        raise
 
-        continuation = (page.cont_yn, page.next_key)
-        if continuation in seen_continuations:
-            raise RuntimeError("키움 API가 동일한 연속조회 키를 반복했습니다.")
-        seen_continuations.add(continuation)
-        cont_yn = page.cont_yn or "Y"
-        next_key = page.next_key or ""
 
-        if max_pages is not None and pages_this_run >= max_pages:
-            store.mark_partial(instrument)
-            return
+def _validated_page(body: Mapping[str, Any], response_key: str,
+                    instrument: Instrument, market: Market) -> tuple[DailyBar, ...]:
+    """Reject missing/malformed success payloads, never silently discard records."""
+    if not isinstance(body, Mapping) or response_key not in body or not isinstance(body[response_key], list):
+        raise ValueError(f"키움 응답에 필수 배열 {response_key}가 없습니다.")
+
+    def identity(value: Mapping[str, Any]) -> None:
+        if "stk_cd" in value:
+            symbol = str(value["stk_cd"]).strip().upper()
+            if market is Market.DOMESTIC and len(symbol) == 7 and symbol.startswith("A"):
+                symbol = symbol[1:]
+            if symbol != instrument.symbol:
+                raise ValueError("Chart response symbol does not match the requested instrument")
+        if "stex_tp" in value and str(value["stex_tp"]).strip() != instrument.exchange:
+            raise ValueError("Chart response exchange does not match the requested instrument")
+
+    identity(body)
+    result: list[DailyBar] = []
+    seen: dict[date, tuple[Any, ...]] = {}
+    volume_field = "trde_qty" if market is Market.DOMESTIC else "acc_trde_qty"
+    required = ("open_pric", "high_pric", "low_pric", "cur_prc", volume_field)
+    for row in body[response_key]:
+        if not isinstance(row, dict):
+            raise ValueError("Chart response contains a non-object record")
+        identity(row)
+        text_date = str(row.get("dt", ""))
+        if len(text_date) != 8 or not text_date.isascii() or not text_date.isdigit():
+            raise ValueError("Chart record requires an eight-digit trade date")
+        for field in required:
+            value = row.get(field)
+            if value is None or isinstance(value, bool) or not str(value).strip():
+                raise ValueError(f"Chart record is missing required field: {field}")
+            number = Decimal(str(value).strip().replace(",", ""))
+            if not number.is_finite():
+                raise ValueError(f"Chart record has a non-finite value: {field}")
+            if field == volume_field and (number < 0 or number != number.to_integral_value() or number > 2**63 - 1):
+                raise ValueError("Volume must be a nonnegative SQLite-sized integer")
+        bar = (_domestic_daily_bar(row, instrument.symbol, DomesticExchange.KRX)
+               if market is Market.DOMESTIC else _us_daily_bar(row, instrument.symbol, USExchange(instrument.exchange), False))
+        if not (bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high):
+            raise ValueError("Chart OHLC prices are inconsistent")
+        for value in (bar.trade_value, bar.change, bar.change_rate, bar.adjustment_rate):
+            if value is not None and not value.is_finite():
+                raise ValueError("Chart optional numeric value is non-finite")
+        normalized = _bar_row(bar, "")
+        if bar.trade_date in seen:
+            if seen[bar.trade_date] != normalized:
+                raise ValueError("Conflicting duplicate date in chart response")
+            continue
+        if result and bar.trade_date >= result[-1].trade_date:
+            raise ValueError("Daily chart must be ordered newest to oldest")
+        seen[bar.trade_date] = normalized
+        result.append(bar)
+    return tuple(result)
 
 
 def _request_with_retry(
@@ -634,7 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--refresh-complete",
         action="store_true",
-        help="완료 종목의 최신 구간을 다시 조회해 새 거래일을 추가",
+        help="완료 종목의 전체 수정주가 이력을 별도 수집한 뒤 원자적으로 교체 (부분 수집은 별도 보존)",
     )
     return parser
 
@@ -680,7 +746,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for result in results:
         print(
             f"[{result.market.value}] DB={result.database} | 종목 {result.instrument_count:,} | "
-            f"완료 {result.completed:,} | 일봉 {result.bars:,} | 이번 실행 오류 {result.failed:,}",
+            f"공개 완료 {result.completed:,} | 일봉 {result.bars:,} | "
+            f"별도 미완료 {result.pending_generations:,} | 이번 실행 오류 {result.failed:,}",
             flush=True,
         )
     return 0 if all(result.failed == 0 for result in results) else 1

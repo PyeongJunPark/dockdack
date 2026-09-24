@@ -75,8 +75,12 @@ class DailyTradeJournalGuiTests(unittest.TestCase):
 
     def test_refresh_button_is_local_read_only_and_mode_is_visible(self):
         self.store.mode = SimpleNamespace(value="live")
+        requested = Mock()
+        self.panel.request_refresh.connect(requested)
         self.panel.refresh_button.click()
-        self.store.order_history.assert_called_once_with(limit=None)
+        requested.assert_called_once_with()
+        self.store.order_history.assert_not_called()
+        self.panel.refresh(records=())
         self.assertIn("REAL", self.panel.mode_badge.text())
         self.assertIn("API 조회나 매수·매도는 하지 않습니다", self.panel.refresh_button.toolTip())
 

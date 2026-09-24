@@ -27,7 +27,6 @@ class AutoIntegrationTests(unittest.TestCase):
 
     def test_domestic_external_market_order_contract_and_pre_http_journal(self):
         with tempfile.TemporaryDirectory() as folder:
-            store=WatchStore(Path(folder)/"watch.sqlite3")
             class AuditedTransport(QueueTransport):
                 def request(self,method,url,**kwargs):
                     if url.endswith("/ordr"):
@@ -40,6 +39,7 @@ class AutoIntegrationTests(unittest.TestCase):
                 FakeResponse({"acnt_evlt_remn_indv_tot":[]}),FakeResponse({"ord_alow_amt":"10000"}),
                 FakeResponse({"cur_prc":"100"}),FakeResponse({"return_code":0,"ord_no":"123","return_msg":"접수"}))
             service=TradingService(lambda _:KiwoomBroker(config(),transport=transport))
+            store=WatchStore(Path(folder)/"watch.sqlite3", storage_scope=service.storage_scope)
             item=WatchItem(service.resolve("005930","KRX"),days=1)
             store.save_item(item)
             now=datetime(2026,9,14,1,tzinfo=timezone.utc)
@@ -64,7 +64,6 @@ class AutoIntegrationTests(unittest.TestCase):
             with self.subTest(market=market), tempfile.TemporaryDirectory() as folder:
                 domestic = market is Market.DOMESTIC
                 symbol, exchange = ("005930", "KRX") if domestic else ("BRKb", "NY")
-                store = WatchStore(Path(folder) / "watch.sqlite3")
                 class AuditedTransport(QueueTransport):
                     def request(self, method, url, **kwargs):
                         if url.endswith("/ordr"):
@@ -82,6 +81,7 @@ class AutoIntegrationTests(unittest.TestCase):
                     FakeResponse({"return_code": 0, "ord_no": "0000200", "return_msg": "접수"}),
                 )
                 service = TradingService(lambda _: KiwoomBroker(config(), transport=transport))
+                store = WatchStore(Path(folder) / "watch.sqlite3", storage_scope=service.storage_scope)
                 item = WatchItem(service.resolve(symbol, exchange), days=1)
                 store.save_item(item)
                 now = datetime(2026, 9, 14, 1 if domestic else 15, tzinfo=timezone.utc)
@@ -110,7 +110,6 @@ class AutoIntegrationTests(unittest.TestCase):
             with self.subTest(market=market), tempfile.TemporaryDirectory() as folder:
                 domestic = market is Market.DOMESTIC
                 symbol, exchange = ("005930", "KRX") if domestic else ("AAPL", "ND")
-                store = WatchStore(Path(folder) / "watch.sqlite3")
 
                 class AuditedTransport(QueueTransport):
                     def request(self, method, url, **kwargs):
@@ -132,6 +131,7 @@ class AutoIntegrationTests(unittest.TestCase):
                 )
                 broker = KiwoomBroker(config(), transport=transport)
                 service = TradingService(lambda _: broker)
+                store = WatchStore(Path(folder) / "watch.sqlite3", storage_scope=service.storage_scope)
                 item = WatchItem(service.resolve(symbol, exchange))
                 store.save_item(item)
                 store.add_rule(TriggerRule.create(item, "price_ge", "buy", 1, Decimal(200), Decimal(95)))

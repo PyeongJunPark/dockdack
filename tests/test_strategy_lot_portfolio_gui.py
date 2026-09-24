@@ -4,6 +4,7 @@ from decimal import Decimal as D
 import importlib.util
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from dockdack.models import Market, Quote
@@ -56,6 +57,24 @@ class StrategyLotPortfolioTests(unittest.TestCase):
             'quote': Quote(inst.market, inst.symbol, 'test', inst.exchange, D('111'), 'KRW'), 'targets': self.targets})
         self.assertEqual([self.panel.table.item(row, 5).text() for row in range(2)], ['111', '111'])
         self.assertEqual(self.panel.table.item(1, 9).text(), '≥ 110.55')
+
+    def test_lot_quote_reuses_cells_and_preserves_unrelated_selection(self):
+        other = replace(self.held, symbol='000660', name='unrelated', evaluation_amount=D(1))
+        self.panel.apply({Market.DOMESTIC: PortfolioMarketState(Market.DOMESTIC,
+            account(positions=(self.held, other)), NOW, NOW)}, now=NOW)
+        view = self.panel.table
+        cells = [[view.item(row, col) for col in range(12)] for row in range(3)]
+        view.selectRow(2)
+        inst = Instrument(Market.DOMESTIC, '005930', 'KRX')
+        with patch.object(view, 'setItem', wraps=view.setItem) as write:
+            self.panel.apply_holding_quote({'instrument': inst, 'watch_id': 'domestic:KRX:005930',
+                'quote': Quote(inst.market, inst.symbol, 'test', inst.exchange, D('111'), 'KRW'), 'targets': self.targets})
+        write.assert_not_called()
+        for row in range(3):
+            for col in range(12):
+                self.assertIs(view.item(row, col), cells[row][col])
+        self.assertEqual(view.currentRow(), 2)
+        self.assertEqual(view.item(2, 5).text(), '110')
 
     def test_unreconciled_inventory_shows_broker_total_warning_not_fake_lots(self):
         self.panel.set_exit_targets({'domestic:KRX:005930': {**self.targets, 'reconciled': False,
