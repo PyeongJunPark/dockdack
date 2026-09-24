@@ -1,4 +1,4 @@
-"""Price + model-direction rules. Returns signals; does not place orders."""
+"""Price/direction compatibility API and packaged external workers; no orders."""
 
 from __future__ import annotations
 

@@ -15,6 +15,7 @@ dockdack/mark1_prototype_inference.py -text
 dockdack/mark1_0504_inference.py -text
 dockdack/mark1_data.py -text
 dockdack/mark1_deep_data.py -text
+dockdack/mark1_deep_models.py -text
 dockdack/mark1_deep_validation.py -text
 dockdack/mark1_selective_policy.py -text
 examples/train_mark1.py -text

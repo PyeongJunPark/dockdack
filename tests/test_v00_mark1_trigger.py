@@ -61,7 +61,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             self.app.processEvents()
-            if self.window._activity_worker is None and self.window._schedule_probe is None:
+            if self.window._activity_worker is None and self.window._schedule_probe is None and self.window._workspace_worker is None:
                 return
             time.sleep(.01)  # Release the GIL for numerical/worker imports.
         self.fail('Offline activity worker did not finish')
@@ -81,6 +81,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
             check.setChecked(model == name)
         builtin = name if name in ('none', 'lstm30') else 'none'
         self.window.model_trigger.setCurrentIndex(self.window.model_trigger.findData(builtin))
+        self.drain_activity()
 
     def test_selector_is_inline_in_existing_normal_window_and_starts_off(self):
         count = self.window.tabs.count()
@@ -92,10 +93,11 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.model_trigger.count(), 2)
         self.assertEqual(self.window.model_trigger.findData(MARK1_TRIGGER), -1)
         self.assertEqual(self.window.model_trigger.findData(MARK11_TRIGGER), -1)
-        selector_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_trigger))[0]
         notice_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_notice))[0]
         sources_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.additional_sources))[0]
-        self.assertEqual(selector_row, 5)
+        self.assertEqual(self.window.external_grid.indexOf(self.window.model_trigger), -1)
+        self.assertTrue(self.window.advanced_mode_panel.isAncestorOf(self.window.model_trigger))
+        self.assertFalse(self.window.workspace_tabs.isTabVisible(self.window.workspace_tabs.indexOf(self.window.tabs)))
         self.assertLess(notice_row, sources_row)
         self.assertFalse(self.window.builtin_lstm.isVisible())
         self.assertEqual(self.window.external_source.text(), 'external-model')
@@ -388,6 +390,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
             self.assertEqual(migrated._chosen_external_models(), (MARK11_TRIGGER,))
             self.assertFalse(migrated.engine.orders_enabled)
         finally:
+            migrated.close()
             for name in ('pool', 'inspection_pool', 'activity_pool'):
                 getattr(migrated, name).waitForDone(10000)
             self.app.processEvents()

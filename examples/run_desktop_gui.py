@@ -16,17 +16,22 @@ def configure_local_dependencies():
                 sys.path.insert(0, str(path))
 
 
-def desktop_arguments(argv, root=ROOT):
-    """Prefer this checkout, then reuse an existing sibling ledger/config in place."""
+def desktop_arguments(argv, root=None):
+    """Find a legacy source, never mistake it for an account-bound destination."""
+    if root is None:
+        from dockdack.runtime_paths import app_home
+        root = app_home()
     args = list(argv)
     has = lambda option: any(value == option or value.startswith(option + "=") for value in args)
     sibling = root.parent / "dockdack"
-    if not has("--store"):
+    if not has("--store") and not has("--legacy-store"):
         candidates = (root / ".dockdack/lstm30-demo/watchlist.sqlite3", root / ".dockdack/watchlist.sqlite3",
                       sibling / ".dockdack/lstm30-demo/watchlist.sqlite3", sibling / ".dockdack/watchlist.sqlite3")
         path = next((path for path in candidates if path.is_file()), None)
         if path is not None:
-            args.extend(("--store", str(path.resolve())))
+            # The GUI must ask about ownership before copying into a scoped
+            # destination. --store deliberately bypasses that migration flow.
+            args.extend(("--legacy-store", str(path.resolve())))
     if not has("--env-file"):
         path = next((path for path in (root / ".env", sibling / ".env") if path.is_file()), None)
         if path is not None:

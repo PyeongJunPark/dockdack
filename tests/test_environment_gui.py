@@ -161,7 +161,7 @@ class EnvironmentGuiTests(unittest.TestCase):
                            mode=TradingMode.REAL, storage_scope='b' * 64)
         for constructor in (lambda: WatchlistDialog(candidate, other),
                             lambda: TradingWindow(candidate, store=other)):
-            with self.assertRaisesRegex(ValueError, '인증 범위'):
+            with self.assertRaisesRegex(ValueError, '저장소가 다릅니다'):
                 constructor()
         self.assertEqual(other.order_history(), ())
         self.network.assert_not_called()

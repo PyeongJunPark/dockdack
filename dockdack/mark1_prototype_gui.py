@@ -24,8 +24,8 @@ from dockdack.watchlist import utc_now
 DEFAULT_RUNTIME_DIR = Path(".dockdack/mark1-prototype")
 ACTION_LABELS = {"buy": "매수", "sell": "매도", "hold": "대기", "none": "미전달"}
 REASON_LABELS = {
-    "PREDICTED_DAILY_BARRIER_SUCCESS": "성공확률 50% 초과 · 연구 매수 신호",
-    "BELOW_OR_EQUAL_BUY_THRESHOLD": "성공확률 50% 이하 · 대기",
+    "PREDICTED_DAILY_BARRIER_SUCCESS": "모델 추정 확률 50% 초과 · 연구 매수 신호",
+    "BELOW_OR_EQUAL_BUY_THRESHOLD": "모델 추정 확률 50% 이하 · 대기",
     "TAKE_PROFIT_1PCT": "평균매입가 대비 +1% 익절 기준 도달",
     "STOP_LOSS_0_9PCT": "평균매입가 대비 -0.9% 손절 기준 도달",
     "POSITION_INSIDE_EXIT_BOUNDS": "보유 중 · 익절/손절 기준 미도달",
@@ -116,7 +116,7 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         self.mark1_limitations.setWordWrap(True)
         self.mark1_limitations.setStyleSheet("color: #ffda91; font-weight: 600; padding: 8px;")
         self.mark1_model_table = QTableWidget(0, 5)
-        self.mark1_model_table.setHorizontalHeaderLabels(["종목", "모델", "보정 성공확률", "연구 신호 (주문 아님)", "판단 사유"])
+        self.mark1_model_table.setHorizontalHeaderLabels(["종목", "모델", "모델 추정 확률 (미검증)", "연구 신호 (주문 아님)", "판단 사유"])
         self.mark1_model_table.horizontalHeader().setStretchLastSection(True)
         self.mark1_model_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.mark1_model_table.setStyleSheet(
@@ -132,7 +132,8 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         self.workspace_tabs.addTab(page, "mark1 prototype · 연구 신호")
         self.mark1_refresh_timer = QTimer(self)
         self.mark1_refresh_timer.setInterval(500)
-        self.mark1_refresh_timer.timeout.connect(self._update_mark1_table)
+        self.mark1_refresh_timer.timeout.connect(lambda: self._update_mark1_table(visible_only=True))
+        self.workspace_tabs.currentChanged.connect(lambda _: self._update_mark1_table(visible_only=True))
         self.mark1_refresh_timer.start()
         self._update_mark1_table()
         self._sync_environment()
@@ -161,11 +162,13 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
             self.engine.disarm()
             raise ValueError("prototype은 고정 수량·단일 신호원만 사용합니다. 추가 연결/비중 주문은 금지됩니다.")
 
-    def _update_mark1_table(self):
+    def _update_mark1_table(self, *, visible_only=False):
         # Translate presentation only. Stored raw actions/reasons remain intact.
+        if visible_only and not self.mark1_model_table.isVisible():
+            return
         diagnostics = dict(self.lstm_bridge.diagnostics)
-        self.mark1_model_table.setRowCount(len(self.lstm_items))
-        for index, item in enumerate(self.lstm_items):
+        rows = []
+        for item in self.lstm_items:
             row = diagnostics.get(item.id, {})
             probability = row.get("prediction", {}).get("probability_success")
             display = "조회 전 / 모델 판단 없음" if probability is None else f"{float(probability):.2%}"
@@ -173,13 +176,24 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
             values = (item.instrument.symbol, row.get("model_name", "—"), display,
                       ACTION_LABELS.get(action, "상태 확인 필요"),
                       REASON_LABELS.get(reason, "감시를 시작하지 않았습니다" if not reason else "진단 정보 확인 필요"))
+            rows.append((values, action, reason))
+        signature = tuple(rows)
+        if signature == getattr(self, '_mark1_table_signature', None):
+            return
+        self._mark1_table_signature = signature
+        self.mark1_model_table.setRowCount(len(rows))
+        for index, (values, action, reason) in enumerate(rows):
             for column, value in enumerate(values):
-                cell = QTableWidgetItem(str(value))
+                cell = self.mark1_model_table.item(index, column)
+                if cell is None:
+                    cell = QTableWidgetItem(str(value))
+                    self.mark1_model_table.setItem(index, column, cell)
+                elif cell.text() != str(value):
+                    cell.setText(str(value))
                 if column in (3, 4):
                     raw = action if column == 3 else reason
                     cell.setData(Qt.ItemDataRole.UserRole, raw)
                     cell.setToolTip(raw)
-                self.mark1_model_table.setItem(index, column, cell)
         self.mark1_model_table.resizeColumnsToContents()
 
     def _sync_environment(self):

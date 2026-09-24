@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 from PySide6.QtGui import QIcon
+from dockdack.version import APP_VERSION
 
 ASSET_FOLDER = Path(__file__).with_name("assets")
 APP_NAME = "DOCKDACK"
@@ -24,5 +25,6 @@ def set_windows_app_id() -> None:
 
 def apply_branding(app) -> None:
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     app.setApplicationDisplayName(APP_NAME)
     app.setWindowIcon(app_icon())

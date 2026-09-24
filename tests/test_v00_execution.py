@@ -134,7 +134,7 @@ class V00ExecutionTests(unittest.TestCase):
         self.assertEqual(len(self.service.submitted), 1)
         self.assertTrue(self.engine.orders_enabled)
 
-    def test_buy_pass_precedes_independent_sell_pass(self):
+    def test_independent_sell_pass_precedes_new_buy_scan(self):
         self.engine.enable_holdings_exits = True
         other = replace(position(), symbol="000660")
         self.service.positions = (other,)
@@ -142,7 +142,7 @@ class V00ExecutionTests(unittest.TestCase):
         self.rule()
         self.arm()
         self.engine.poll()
-        self.assertEqual([order.side for order in self.service.submitted], [OrderSide.BUY, OrderSide.SELL])
+        self.assertEqual([order.side for order in self.service.submitted], [OrderSide.SELL, OrderSide.BUY])
 
     def test_monitor_only_checks_holdings_without_submit(self):
         self.engine.enable_holdings_exits = True

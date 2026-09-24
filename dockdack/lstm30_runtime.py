@@ -157,7 +157,8 @@ class DemoLSTMRuntime:
             raise RuntimeError("A runtime instance can only be started once")
         self.lock.acquire()
         try:
-            self.store = WatchStore(self.root / "watchlist.sqlite3", mode=TradingMode.DEMO)
+            self.store = WatchStore(self.root / "watchlist.sqlite3", mode=TradingMode.DEMO,
+                                    storage_scope=getattr(self.service, "storage_scope", "demo"))
             existing = self.store.items()
             if existing and {item.id for item in existing} != {item.id for item in self.items}:
                 raise ValueError("Existing runtime watchlist differs; choose another dedicated runtime directory")

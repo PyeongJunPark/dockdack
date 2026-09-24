@@ -373,7 +373,8 @@ class LSTM30WatchlistDialog(WatchlistDialog):
         self.session_lock = SessionLock(self.runtime_dir / "session.lock")
         self.session_lock.acquire()
         try:
-            store = WatchStore(self.runtime_dir / "watchlist.sqlite3", mode=TradingMode.DEMO)
+            store = WatchStore(self.runtime_dir / "watchlist.sqlite3", mode=TradingMode.DEMO,
+                               storage_scope=getattr(service, "storage_scope", "demo"))
             existing = store.items()
             if existing:
                 existing_fixed = {item.id for item in existing if item.instrument.market not in self.ranked_markets}
