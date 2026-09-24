@@ -229,6 +229,8 @@
 | ML-11 | LSTM30 JSON 신호 발행 | `examples.publish_lstm30` | 기본 preview; 주문 권한 자동 부여 없음 |
 | ML-12 | 외부 신호 제작 예제 | `examples.external_signal_producer` | 기본 HOLD 형식 예제; 그 자체가 투자전략이나 주문기가 아님 |
 
+현재 두 prototype을 각각 설명하는 [MK1 / MK1.1 실제 학습 명세](../mark1.md)에 사용 데이터·184개 특징·CatBoost 구조·시간 분리·보정·평가 수치를 정리했다. 초기 딥러닝 실험과 실제 연결된 최종 모델을 구분하며 현재 두 모델에는 가격 증강을 사용하지 않았다.
+
 소스는 [학습 도구 폴더](../examples), [초기 mark1 문서](mark1-strategy.md), [심층 연구](mark1-deep-protocol.md), [선별 연구](mark1-selective-protocol.md), [0.5/0.4 연구](MARK1_0504.md)에 있다. 과거 경로를 사용하는 백테스트/내보내기는 [새 연구 호환 명령](research-tools.md)으로 실행한다. 원래 기록을 다시 쓰지 않으며 전체 연구 수치 재실행 검증과는 구분한다.
 
 ## 11. 백테스트·보고서·진단·모델 보관
