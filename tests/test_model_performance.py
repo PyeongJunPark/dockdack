@@ -16,7 +16,7 @@ from dockdack.trading.performance import realized_performance
 
 
 START = datetime(2026, 9, 24, tzinfo=timezone.utc)
-OLD, NEW = "mark1-prototype", "mark1-1-prototype"
+OLD, NEW, DEEP = "mark1-prototype", "mark1-1-prototype", "mark1-2-prototype"
 
 
 def order(number, side, quantity=1, price="100", *, model=None, market="domestic", **overrides):
@@ -53,10 +53,10 @@ def row(report, model=OLD, market="domestic", currency="KRW"):
 
 
 class ModelPerformanceTests(unittest.TestCase):
-    def test_empty_four_rows_are_no_sales_not_zero_return(self):
+    def test_empty_six_rows_are_no_sales_not_zero_return(self):
         report = result([], TradingMode.DEMO)
         self.assertEqual(report["mode"], "demo")
-        self.assertEqual(len(report["rows"]), 4)
+        self.assertEqual(len(report["rows"]), 6)
         for item in report["rows"]:
             self.assertEqual(item["status"], "no_sales")
             self.assertIsNone(item["return_pct"])
@@ -88,6 +88,21 @@ class ModelPerformanceTests(unittest.TestCase):
         self.assertEqual(row(report)["status"], "no_sales")
         self.assertEqual(row(report, NEW)["realized_profit"], D("5"))
         self.assertEqual(row(report, NEW)["known_cost_basis"], D("120"))
+
+    def test_three_models_same_symbol_keep_independent_sale_attribution(self):
+        records = [order(1, "buy", model=OLD), order(2, "buy", price="120", model=NEW),
+                   order(3, "buy", price="80", model=DEEP),
+                   order(4, "sell", price="110", prototype_lot_id="3", prototype_buy_rule_id="3"),
+                   order(5, "sell", price="130", prototype_lot_id="2", prototype_buy_rule_id="2"),
+                   order(6, "sell", price="90", prototype_lot_id="1", prototype_buy_rule_id="1")]
+        report = result(records)
+        self.assertEqual(row(report, OLD)["realized_profit"], D("-10"))
+        self.assertEqual(row(report, NEW)["realized_profit"], D("10"))
+        self.assertEqual(row(report, DEEP)["realized_profit"], D("30"))
+        self.assertEqual(row(report, DEEP)["known_cost_basis"], D("80"))
+        self.assertEqual(row(report, DEEP)["return_pct"], D("37.5"))
+        self.assertEqual(report["coverage"]["executed_sell_count"], 3)
+        self.assertTrue(report["complete"])
 
     def test_sell_friendly_model_cannot_reassign_origin(self):
         records = [order(1, "buy", model=OLD), order(2, "sell", price="110", model=NEW,
@@ -207,11 +222,13 @@ class ModelPerformanceTests(unittest.TestCase):
             self.assertEqual(subtotal, performance["summaries"][(market, currency)]["known_realized_profit"])
 
     def test_demo_prototype_provenance_is_not_relabelled_real(self):
-        report = result([order(1, "buy", model=OLD), order(2, "sell", price="110")], "real")
-        self.assertEqual(report["mode"], "real")
-        self.assertEqual(row(report)["status"], "no_sales")
-        self.assertFalse(report["complete"])
-        self.assertIn("model_environment_mismatch", report["warnings"][0]["reason_codes"])
+        for model in (OLD, NEW, DEEP):
+            with self.subTest(model=model):
+                report = result([order(1, "buy", model=model), order(2, "sell", price="110")], "real")
+                self.assertEqual(report["mode"], "real")
+                self.assertEqual(row(report, model)["status"], "no_sales")
+                self.assertFalse(report["complete"])
+                self.assertIn("model_environment_mismatch", report["warnings"][0]["reason_codes"])
 
     def test_invalid_mode_is_rejected(self):
         with self.assertRaises(ValueError):

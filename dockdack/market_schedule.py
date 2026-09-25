@@ -1,4 +1,4 @@
-"""Independent exchange slots: open minus ten minutes, then local whole hours."""
+"""Exchange ranking slots: pre-open, the actual open, then local whole hours."""
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +21,10 @@ EXTRA_CLOSURES = {(Market.DOMESTIC, date(2026, 6, 3)), (Market.DOMESTIC, date(20
 _calendar_init_lock = Lock()
 
 
+class _SupersededRanking(InterruptedError):
+    """A newer schedule slot is due; this is not a broker/data failure."""
+
+
 @dataclass(frozen=True)
 class Session:
     opened: datetime
@@ -28,8 +32,11 @@ class Session:
 
     def slots(self):
         yield self.opened - timedelta(minutes=10)
+        # US opens at :30. Pre-open membership must not remain authoritative
+        # until :00, and pre-open completion must not dedupe the opening refresh.
+        yield self.opened
         value = self.opened.replace(minute=0, second=0, microsecond=0)
-        if value < self.opened:
+        if value <= self.opened:
             value += timedelta(hours=1)
         while value < self.closed:
             yield value
@@ -209,13 +216,23 @@ class RankingScheduler:
                     continue
                 try:
                     def guard():
-                        if (self.started is None or self.stopped() or not ranking_allowed(market, self.clock())
+                        # A slow pre-open/hourly response must not overwrite a
+                        # newer slot, even if its own lease has not expired yet.
+                        current_slot = self._slot(market, self.clock())
+                        if (self.started is None or self.stopped() or current_slot is None
                                 or not self._owns(market, slot, owner)):
                             raise InterruptedError("중지·장 종료·다른 작업 인계로 재선정 결과를 적용하지 않음")
+                        if current_slot != slot:
+                            raise _SupersededRanking("새 선정 시각으로 넘어가 이전 조회 결과를 적용하지 않음")
                     guard()
                     self._refresh_market(market, guard)
                     self._finish(market, slot, owner, "done", "거래량 TOP100 재선정 완료")
                     changed = True
+                except _SupersededRanking as exc:
+                    self._finish(market, slot, owner, "superseded", str(exc))
+                    # Let the next tick claim the current slot. A normal time
+                    # boundary must not trip the legacy engine's failure guard.
+                    continue
                 except Exception as exc:
                     self._finish(market, slot, owner, "failed", str(exc))
                     raise

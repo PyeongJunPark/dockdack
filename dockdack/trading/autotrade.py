@@ -109,6 +109,7 @@ class AutoTrader:
         # prototype owns only its confirmed fills and its own exit allocation.
         self.prototype_lots_enabled = False
         self._lot_sellable_checks = {}
+        self._historical_sell_checks = {}
         self.session_only_poll = True
         self.enable_holdings_exits = False
         self.equity_buy_percent = None
@@ -218,6 +219,12 @@ class AutoTrader:
             return False
         from dockdack.signal_bridge import prototype_family
         return prototype_family(source) != prototype_family(other)
+
+    def _historical_buys_for_sell(self, item, rule):
+        if (self._mode is not TradingMode.DEMO or rule.side is not OrderSide.SELL
+                or self._prototype_source_for(rule) is not None):
+            return frozenset()
+        return self.store.historical_buy_attempt_ids(item.id, self.clock())
 
     def _validate_lot_inventory(self, item, rule, positions):
         """Match durable virtual lots against the fresh aggregate broker position."""
@@ -505,6 +512,14 @@ class AutoTrader:
             raise ValueError("접수 여부 확인 필요 · 해당 종목 추가 주문 격리. 영웅문 주문 내역을 확인하세요.")
         if not pending:
             return
+        # Today's endpoint cannot establish historical fills. Keep those original
+        # records pending; only the separate, freshly verified DEMO sell path may
+        # proceed past eligible old BUY records. Old SELLs still block new orders.
+        today = market_time(item.instrument.market, self.clock()).date()
+        pending = tuple(a for a in pending if market_time(
+            item.instrument.market, datetime.fromisoformat(a["started_at"])).date() == today)
+        if not pending:
+            return
         executions = self.service.safety_executions(item.instrument)
         from dockdack.manual_orders import MANUAL_PREFIX, _side, reconcile_manual_executions
         from dockdack.fill_recovery import normalized_order_number
@@ -549,19 +564,29 @@ class AutoTrader:
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
         self._check_close_buy(item, rule)
         self._lot_sellable_checks.pop(rule.id, None)
+        self._historical_sell_checks.pop(rule.id, None)
         inst = item.instrument
         self._ensure_environment(inst, orders=True)
         self.service.ensure_common_equity(inst)
         pending = self.store.attempts(item.id, pending_only=True)
-        if any(not self._compatible_lot_pending(rule, attempt) for attempt in pending):
-            raise ValueError("이 종목의 이전 주문이 미확정/미체결 상태입니다.")
+        historical_buys = self._historical_buys_for_sell(item, rule)
+        blocking = [a for a in pending if a["rule_id"] not in historical_buys
+                    and not self._compatible_lot_pending(rule, a)]
+        if blocking:
+            details = " · ".join(f"{a['order_number'] or a['rule_id']} ({a['status']})" for a in blocking)
+            raise ValueError("이 종목의 이전 주문이 미확정/미체결 상태입니다: " + details)
+        broker_checked_at = self.clock()
         orders = self.service.safety_orders(inst)
         if self._stop.is_set():
             raise InterruptedError("사용자 중지 요청")
         for order in orders:
+            if historical_buys and (order.market, order.symbol, order.exchange) != (inst.market, inst.symbol, inst.exchange):
+                raise ValueError("과거 매수와 별도 매도를 위한 미체결 조회의 종목·거래소·시장이 다릅니다.")
             if not order.remaining_quantity.is_finite() or order.remaining_quantity < 0:
                 raise ValueError("미체결 잔량을 확인할 수 없습니다.")
             if order.remaining_quantity > 0:
+                if historical_buys:
+                    raise ValueError("현재 브로커 미체결 주문이 있어 과거 매수 기록과 별도로 매도할 수 없습니다.")
                 from dockdack.fill_recovery import normalized_order_number
                 known = [attempt for attempt in pending
                          if normalized_order_number(attempt["order_number"]) == normalized_order_number(order.order_number)]
@@ -584,7 +609,8 @@ class AutoTrader:
             raise ValueError("잔고의 시장/통화가 주문과 다릅니다.")
         positions = [p for p in account.positions if p.symbol == inst.symbol]
         for p in positions:
-            if p.market is not inst.market or p.currency != inst.currency or not p.quantity.is_finite() or not p.sellable_quantity.is_finite():
+            if (p.market is not inst.market or p.exchange != inst.exchange or p.currency != inst.currency
+                    or not p.quantity.is_finite() or not p.sellable_quantity.is_finite()):
                 raise ValueError("보유 수량/통화를 확인할 수 없습니다.")
             if not 0 <= p.sellable_quantity <= p.quantity:
                 raise ValueError("보유 수량과 매도 가능 수량이 일치하지 않습니다.")
@@ -594,6 +620,8 @@ class AutoTrader:
             raise ValueError("이미 보유한 종목의 추가 자동매수는 지원하지 않습니다.")
         if rule.side is OrderSide.SELL and sum((p.sellable_quantity for p in positions), Decimal(0)) < rule.quantity:
             raise ValueError("매도 가능 수량이 부족합니다. 공매도는 지원하지 않습니다.")
+        if historical_buys and len(positions) != 1:
+            raise ValueError("보유종목 잔고 행이 중복되거나 없어 매도 가능 수량을 확정할 수 없습니다.")
         # Account/open-order calls take time: recheck both the trigger and limit using a fresh quote.
         fresh = MarketSnapshot(self.service.quote(inst), snapshot.history, self.clock())
         if self._holding_rule(rule):
@@ -652,6 +680,10 @@ class AutoTrader:
         if (request.market, request.symbol, request.exchange, request.side, request.quantity, request.price) != (
                 inst.market, inst.symbol, inst.exchange, rule.side, rule.quantity, price) or request.order_type not in ({"3"} if kind == "market" else {"0", "00"}):
             raise ValueError("주문 미리보기와 트리거의 종목·수량·가격이 다릅니다.")
+        if historical_buys:
+            self._historical_sell_checks[rule.id] = (broker_checked_at, historical_buys)
+            while len(self._historical_sell_checks) > 500:
+                self._historical_sell_checks.pop(next(iter(self._historical_sell_checks)))
         return request, fresh, rule
 
     def _execute(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot) -> bool:
@@ -687,8 +719,15 @@ class AutoTrader:
         if (self.clock() - fresh.fetched_at).total_seconds() > 15:
             raise ValueError("주문 직전 시세가 오래되어 전송하지 않습니다.")
         claim_options = {"prototype_lots": True} if self._prototype_source_for(rule) is not None else {}
+        if rule.id in self._historical_sell_checks:
+            claim_options["allow_historical_buys"] = True
         if not self.store.claim(rule, fresh.quote.price, self.clock(), **claim_options):
+            self._historical_sell_checks.pop(rule.id, None)
+            self._message(rule.id + ":claim", item.id,
+                          "자동주문 보류: 주문 상태가 변경되었거나 다른 미확정 주문이 있어 전송하지 않음", category="order")
             return False
+        if rule.id in self._historical_sell_checks:
+            self.store.event(item.id, "과거 매수 기록은 미확정으로 보존 · 현재 미체결 없음/실제 보유·매도가능수량 확인 후 별도 매도 진행", category="order")
         if request.price is not None and request.price != fresh.quote.price:
             self.store.event(item.id, f"현재가 지정가 가격 단위 적용 · 수량 {rule.quantity}주 · 참조 시세 {fresh.quote.price} → 주문 지정가 {request.price} {item.instrument.currency} (체결가 아님)", category="order")
         if self._stop.is_set() or not self.orders_enabled:
@@ -788,12 +827,26 @@ class AutoTrader:
                             current_common_equity_limit_price(item.instrument.market, rule.side, fresh.quote.price))
             self._validate_source_execution(item, rule, fresh, actual_limit, stage="final_send")
             self._validate_lot_final(item, rule)
+            if self._prototype_source_for(rule) is None:
+                checked = self._historical_sell_checks.get(rule.id)
+                allowed = self._historical_buys_for_sell(item, rule) if checked is not None else frozenset()
+                if checked is not None:
+                    if not 0 <= (self.clock() - checked[0]).total_seconds() <= 15:
+                        raise ValueError("잔고·미체결 확인 후 15초를 초과했거나 미래 시각이므로 매도를 전송하지 않음")
+                    allowed &= checked[1]  # A new historical row has not passed broker preflight.
+                if any(a["rule_id"] != rule.id and a["rule_id"] not in allowed
+                       for a in self.store.attempts(item.id, pending_only=True)):
+                    raise ValueError("주문 직전 다른 미확정/미체결 주문이 확인되어 전송하지 않음")
             now = self.clock()
             if not regular_session(item.instrument.market, now):
                 raise ValueError("정규장이 종료되었거나 장 상태를 확인할 수 없어 전송하지 않음")
             # Include time spent on final local checks/calendar access as well.
-            if not 0 <= (self.clock() - fresh.fetched_at).total_seconds() <= 15:
+            now = self.clock()
+            if not 0 <= (now - fresh.fetched_at).total_seconds() <= 15:
                 raise ValueError("호출 대기 후 시세가 15초를 초과했거나 미래 시각이므로 전송하지 않음")
+            checked = self._historical_sell_checks.get(rule.id)
+            if checked is not None and not 0 <= (now - checked[0]).total_seconds() <= 15:
+                raise ValueError("최종 검증 후 잔고·미체결 확인이 15초를 넘어 매도를 전송하지 않음")
             if self._stop.is_set() or not self.orders_enabled:
                 raise ValueError("사용자 중지/OFF 요청으로 전송하지 않음")
         except Exception as exc:
@@ -959,7 +1012,7 @@ class AutoTrader:
                     hit = TriggerKind.PRICE_GE if quote.price >= upper else TriggerKind.PRICE_LE if quote.price <= lower else None
                     self._message("holding:" + item.id, item.id,
                                   f"보유종목 매도 감시 · 현재가 {quote.price} · 상방 {upper} / 하방 {lower} · {'매도 조건 충족' if hit else '대기'}", category="monitor")
-                    if not hit or not self.orders_enabled or item.id in sent or self.store.attempts(item.id, pending_only=True):
+                    if not hit or not self.orders_enabled or item.id in sent:
                         continue
                     if market is Market.US and self.store.rejection_cooldown_remaining(item.id, "", self.clock(), seconds=self.us_failure_cooldown_seconds):
                         self._message("rejection-cooldown:" + item.id, item.id,

@@ -11,7 +11,9 @@ from dockdack.models import TradingMode
 from dockdack.ui.operations_gui import populate
 
 
-MODELS = (("mark1-prototype", "mark1 prototype"), ("mark1-1-prototype", "mark1.1 prototype"))
+MODELS = (("mark1-prototype", "mark1 prototype"),
+          ("mark1-1-prototype", "mark1.1 prototype"),
+          ("mark1-2-prototype", "mark1.2 prototype"))
 MARKETS = (("domestic", "국내 · KRW", "KRW"), ("us", "미국 · USD", "USD"))
 RETURN_DESCRIPTION = "누적 실현 수익률 = 확인된 매도 실현손익 ÷ 해당 매도분의 매입원가 × 100 · 수수료·세금 제외"
 WARNING_TEXT = {

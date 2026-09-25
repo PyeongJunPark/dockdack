@@ -1,4 +1,4 @@
-"""Packaged external mark1/mark1.1 worker; no account or order authority."""
+"""Packaged external prototype worker; no account or order authority."""
 from __future__ import annotations
 
 import argparse

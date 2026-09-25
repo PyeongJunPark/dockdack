@@ -520,6 +520,7 @@ prototype = [
     { name = "catboost" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "torch" },
 ]
 research = [
     { name = "catboost" },
@@ -547,6 +548,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31,<3" },
     { name = "setuptools", marker = "extra == 'dev'", specifier = ">=68" },
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.6,<3" },
+    { name = "torch", marker = "extra == 'prototype'", specifier = ">=2.6,<3" },
     { name = "torch", marker = "extra == 'research'", specifier = ">=2.6,<3" },
     { name = "tzdata", specifier = ">=2025.2" },
     { name = "websockets", marker = "extra == 'conditions'", specifier = ">=15,<16" },

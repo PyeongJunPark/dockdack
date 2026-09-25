@@ -24,6 +24,7 @@ from test_autotrade import FakeTradingService, NOW, position
 
 OLD = "mark1-prototype-demo-trigger"
 NEW = "mark1-1-prototype-demo-trigger"
+DEEP = "mark1-2-prototype-demo-trigger"
 
 
 def signal_record(source=NEW):
@@ -45,22 +46,28 @@ class PrototypeFamilyTests(unittest.TestCase):
         self.assertEqual((prototype_family(OLD).take_profit, prototype_family(OLD).stop_loss), (D('.01'), D('.009')))
         self.assertEqual((prototype_family(NEW).take_profit, prototype_family(NEW).stop_loss), (D('.005'), D('.004')))
         self.assertEqual(prototype_family(NEW).title, "mark1.1 prototype")
+        self.assertEqual((prototype_family(DEEP).take_profit, prototype_family(DEEP).stop_loss),
+                         (D('.01'), D('.009')))
+        self.assertEqual(prototype_family(DEEP).title, "mark1.2 prototype")
 
-    def test_both_families_remain_real_blocked_even_when_renamed(self):
-        for source in (OLD, NEW, "MARK1_1_PROTOTYPE", "mark1.1-prototype"):
+    def test_all_families_remain_real_blocked_even_when_renamed(self):
+        for source in (OLD, NEW, DEEP, "MARK1_1_PROTOTYPE", "mark1.1-prototype",
+                       "MARK1_2_PROTOTYPE", "mark1.2-prototype"):
             self.assertTrue(mark1_prototype_origin(source))
-        for family in ("mark1-prototype", "mark1-1-prototype"):
+        for family in ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype"):
             self.assertTrue(mark1_prototype_origin("renamed", {"signal_id": family + ":saved"}))
             self.assertTrue(mark1_prototype_origin("renamed", {"origin_strategy": family}))
 
     def test_cross_family_and_renamed_source_cannot_claim_ownership(self):
         for source, signal_id in ((OLD, "mark1-1-prototype:wrong"), (NEW, "mark1-prototype:wrong"),
+                                  (DEEP, "mark1-prototype:wrong"), (OLD, "mark1-2-prototype:wrong"),
                                   ("renamed", "mark1-1-prototype:wrong"), (NEW, "unmarked")):
             with self.subTest(source=source, signal_id=signal_id), self.assertRaises(ValueError):
                 prototype_family(source, {"signal_id": signal_id})
 
     def test_legacy_original_buy_without_optional_new_metadata_is_valid(self):
         self.assertEqual(prototype_record_family(signal_record(OLD)).id, "mark1-prototype")
+        self.assertEqual(prototype_record_family(signal_record(DEEP)).id, "mark1-2-prototype")
 
     def test_record_identity_and_instrument_links_must_agree(self):
         for change in ({"signal_id": "mark1-prototype:forged"}, {"watch_id": "domestic:KRX:000660"},
@@ -81,6 +88,9 @@ class PrototypeFamilyTests(unittest.TestCase):
         self.assertEqual(prototype_order_label({**row, "side": "sell"}), "매수 출처 미확인")
         self.assertEqual(prototype_order_label({"side": "buy", "model_title": "mark1.1 prototype"}), "미확인 / 수동·외부")
         self.assertIn("불일치", prototype_order_label({**row, "external_source_id": OLD}))
+        deep_row = {"side": "buy", "watch_id": "domestic:KRX:005930",
+                    **ledger_metadata(signal_record(DEEP))}
+        self.assertEqual(prototype_order_label(deep_row), "mark1.2 prototype")
 
     def test_new_family_cannot_register_real_source_or_validator(self):
         from test_trading_environment import RealFakeService
@@ -89,11 +99,12 @@ class PrototypeFamilyTests(unittest.TestCase):
             store = WatchStore(Path(directory) / 'real-offline.sqlite3', mode=TradingMode.REAL,
                                storage_scope=service.storage_scope)
             engine = AutoTrader(service, store, clock=lambda: NOW)
-            policy = ExternalPolicy(NEW, 1, D('500'), D('1000'))
-            with self.assertRaises(ValueError):
-                engine.configure_external_sources([(policy, lambda: None)])
-            with self.assertRaises(ValueError):
-                engine.configure_source_validators({NEW: lambda *args, **kwargs: None})
+            for source in (NEW, DEEP):
+                policy = ExternalPolicy(source, 1, D('500'), D('1000'))
+                with self.subTest(source=source), self.assertRaises(ValueError):
+                    engine.configure_external_sources([(policy, lambda: None)])
+                with self.subTest(source=source), self.assertRaises(ValueError):
+                    engine.configure_source_validators({source: lambda *args, **kwargs: None})
             self.assertEqual(service.submitted, [])
 
 
@@ -106,11 +117,14 @@ class HoldingFamilyTests(unittest.TestCase):
         return holding_exit_targets(store, replace(position(), average_price=average))
 
     def test_each_position_keeps_own_policy_on_actual_broker_average(self):
-        old, new = self.targets(OLD), self.targets(NEW)
+        old, new, deep = self.targets(OLD), self.targets(NEW), self.targets(DEEP)
         self.assertEqual((old['take_profit_price'], old['stop_loss_price']), (D('111.1'), D('109.01')))
         self.assertEqual((new['take_profit_price'], new['stop_loss_price']), (D('110.55'), D('109.56')))
         self.assertEqual(new['model_title'], 'mark1.1 prototype')
         self.assertEqual(new['buy_signal_id'], 'mark1-1-prototype:fixture')
+        self.assertEqual((deep['take_profit_price'], deep['stop_loss_price']), (D('111.1'), D('109.01')))
+        self.assertEqual(deep['model_title'], 'mark1.2 prototype')
+        self.assertEqual(deep['buy_signal_id'], 'mark1-2-prototype:fixture')
 
     def test_renamed_nonreserved_bracket_uses_original_record(self):
         self.assertEqual(self.targets(OLD, saved_source='renamed')['model_id'], 'mark1-prototype')

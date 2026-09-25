@@ -36,6 +36,7 @@ class PrototypeFamily:
 _PROTOTYPE_FAMILIES = (
     PrototypeFamily("mark1-prototype", "mark1 prototype", Decimal(".01"), Decimal(".009")),
     PrototypeFamily("mark1-1-prototype", "mark1.1 prototype", Decimal(".005"), Decimal(".004")),
+    PrototypeFamily("mark1-2-prototype", "mark1.2 prototype", Decimal(".01"), Decimal(".009")),
 )
 
 
@@ -43,8 +44,10 @@ def _prototype_source(source):
     normalized = str(source or "").strip().lower().replace("_", "-")
     for family in _PROTOTYPE_FAMILIES:
         aliases = {family.id, family.id + "-demo-trigger", family.id + "-daily-barrier"}
-        if family.id == "mark1-1-prototype":
-            aliases.update(alias.replace("mark1-1", "mark1.1") for alias in tuple(aliases))
+        for numbered in ("mark1-1", "mark1-2"):
+            if family.id.startswith(numbered):
+                aliases.update(alias.replace(numbered, numbered.replace("-", "."))
+                               for alias in tuple(aliases))
         if normalized in aliases:
             return family
     return None
@@ -56,7 +59,7 @@ def _prototype_signal(signal_id):
 
 
 def mark1_prototype_origin(source, metadata=None):
-    """Broad DEMO restriction for either prototype; never an ownership proof."""
+    """Broad DEMO restriction for every prototype; never an ownership proof."""
     details = metadata if isinstance(metadata, dict) else {}
     return bool(_prototype_source(source) or _prototype_signal(details.get("signal_id"))
                 or _prototype_source(details.get("origin_strategy"))

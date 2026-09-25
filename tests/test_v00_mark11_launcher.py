@@ -18,13 +18,14 @@ class Mark11DesktopLauncherTests(unittest.TestCase):
         self.assertEqual(desktop_model_choices(None, False, []), ('none', ['mark1-prototype', 'mark1-1-prototype']))
 
     def test_explicit_mark11_paths_pass_through_unchanged(self):
-        args = ['--trigger', 'mark1-1-prototype', '--mark11-bundle=half-model',
+        args = ['--trigger', 'mark1-2-prototype', '--mark12-bundle=neural-model', '--mark11-bundle=half-model',
                 '--mark1-bundle=old-model', '--store=paper.sqlite3', '--env-file=fake.env']
         self.assertEqual(launcher.desktop_arguments(args), args)
 
-    def test_check_loads_both_models_for_both_markets_without_starting_gui(self):
+    def test_check_loads_all_models_for_both_markets_without_starting_gui(self):
         with patch('dockdack.mark1_prototype_inference.PrototypePredictor') as old, \
                 patch('dockdack.mark1_1_prototype_inference.Mark11PrototypePredictor') as new, \
+                patch('dockdack.signals.mark1_2_trigger.Mark12PrototypePredictor') as neural, \
                 patch('dockdack.v00_app.main', side_effect=AssertionError('Do not start the GUI')), \
                 patch('requests.sessions.Session.request', side_effect=AssertionError('No network')), \
                 redirect_stdout(io.StringIO()) as output:
@@ -33,15 +34,19 @@ class Mark11DesktopLauncherTests(unittest.TestCase):
                          [(launcher.ROOT / 'models/mark1_prototype', market) for market in ('domestic', 'us')])
         self.assertEqual([call.args for call in new.call_args_list],
                          [(launcher.ROOT / 'models/mark1_1_prototype', market) for market in ('domestic', 'us')])
+        self.assertEqual([call.args for call in neural.call_args_list],
+                         [(launcher.ROOT / 'models/mark1_2_prototype', market) for market in ('domestic', 'us')])
         self.assertIn('mark1.1 prototype', output.getvalue())
+        self.assertIn('mark1.2 prototype', output.getvalue())
         self.assertIn('no monitoring, orders or network', output.getvalue())
 
-    def test_help_names_both_choices_and_separate_bundle_arguments(self):
+    def test_help_names_all_choices_and_separate_bundle_arguments(self):
         from dockdack.v00_app import main
         with redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit) as raised:
             main(['--help'])
         self.assertEqual(raised.exception.code, 0)
-        for option in ('mark1-prototype', 'mark1-1-prototype', '--mark1-bundle', '--mark11-bundle'):
+        for option in ('mark1-prototype', 'mark1-1-prototype', 'mark1-2-prototype',
+                       '--mark1-bundle', '--mark11-bundle', '--mark12-bundle'):
             self.assertIn(option, output.getvalue())
 
 

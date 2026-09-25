@@ -816,7 +816,49 @@ class WatchStore:
                 sql += " AND status IN ('submitting', 'accepted', 'unknown')"
             return tuple(dict(row) for row in db.execute(sql + " ORDER BY rowid", params))
 
-    def claim(self, rule: TriggerRule, price: Decimal, now: datetime, *, prototype_lots=False) -> bool:
+    def historical_buy_attempt_ids(self, watch_id: str, now: datetime) -> frozenset[str]:
+        """DEMO-only candidates for independently verified sells, NOT proof of fills.
+
+        Unknown direction, missing rules, ambiguous sends and today's buys remain
+        blocking. Model inventories must use their existing allocation protocol.
+        The caller still needs fresh broker orders, holdings and sellable shares.
+        """
+        with self.connection() as db:
+            return self._historical_buy_attempt_ids(db, watch_id, now)
+
+    def _historical_buy_attempt_ids(self, db, watch_id, now):
+        from dockdack.history import market_time
+        if self.mode is not TradingMode.DEMO or now.tzinfo is None or now.utcoffset() is None:
+            return frozenset()
+        watch = db.execute("SELECT market FROM watchlist WHERE id=?", (watch_id,)).fetchone()
+        if watch is None:
+            return frozenset()
+        market = Market(watch["market"])
+        today = market_time(market, now).date()
+        eligible = set()
+        for row in db.execute("""SELECT a.*,r.side,r.watch_id AS original_watch_id,
+                                 r.status AS original_status,r.quantity
+                                 FROM attempts a LEFT JOIN rules r ON r.id=a.rule_id
+                                 WHERE a.watch_id=? AND a.status='accepted'""", (watch_id,)):
+            if (row["side"] != "buy" or row["original_watch_id"] != watch_id
+                    or row["original_status"] != "accepted" or not row["order_number"].strip()
+                    or type(row["quantity"]) is not int or row["quantity"] <= 0):
+                continue
+            try:
+                started = datetime.fromisoformat(row["started_at"])
+                if (started.tzinfo is not None and started.utcoffset() is not None
+                        and started < now and market_time(market, started).date() < today):
+                    eligible.add(row["rule_id"])
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if eligible:
+            inventory = self._prototype_inventory(db, watch_id)
+            if inventory["has_prototype_history"] or inventory["issues"]:
+                return frozenset()  # Never turn unconfirmed model fills into ordinary holdings.
+        return frozenset(eligible)
+
+    def claim(self, rule: TriggerRule, price: Decimal, now: datetime, *, prototype_lots=False,
+              allow_historical_buys=False) -> bool:
         positive(price, "주문 단가")
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -829,8 +871,13 @@ class WatchStore:
             if prototype_lots:
                 if not self._prototype_claim_allowed(db, rule):
                     return False
-            elif db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (rule.watch_id,)).fetchone():
-                return False
+            else:
+                allowed = (self._historical_buy_attempt_ids(db, rule.watch_id, now)
+                           if allow_historical_buys and rule.side is OrderSide.SELL else frozenset())
+                if any(row["rule_id"] not in allowed for row in db.execute(
+                        "SELECT rule_id FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')",
+                        (rule.watch_id,))):
+                    return False
             db.execute("INSERT INTO attempts (rule_id, watch_id, status, price, started_at) VALUES (?, ?, 'submitting', ?, ?)",
                        (rule.id, rule.watch_id, str(price), now.isoformat()))
             db.execute("UPDATE rules SET status='submitting' WHERE id=?", (rule.id,))

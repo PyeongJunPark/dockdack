@@ -24,7 +24,7 @@ class ScheduleTests(unittest.TestCase):
         kr = session_on(Market.DOMESTIC, date(2026,9,15))
         us = session_on(Market.US, date(2026,9,15))
         self.assertEqual([s.strftime("%H:%M") for s in kr.slots()], ["08:50"]+[f"{h:02d}:00" for h in range(9,16)])
-        self.assertEqual([s.strftime("%H:%M") for s in us.slots()], ["09:20"]+[f"{h:02d}:00" for h in range(10,16)])
+        self.assertEqual([s.strftime("%H:%M") for s in us.slots()], ["09:20", "09:30"]+[f"{h:02d}:00" for h in range(10,16)])
         self.assertTrue(is_open(Market.DOMESTIC, kr.opened))
         self.assertFalse(is_open(Market.DOMESTIC, kr.closed))
 
@@ -35,7 +35,7 @@ class ScheduleTests(unittest.TestCase):
                     (Market.DOMESTIC,date(2026,12,31)), (Market.DOMESTIC,date(2026,9,19))):
             self.assertIsNone(session_on(m,d))
         early = session_on(Market.US, date(2026,11,27))
-        self.assertEqual([s.strftime("%H:%M") for s in early.slots()], ["09:20","10:00","11:00","12:00"])
+        self.assertEqual([s.strftime("%H:%M") for s in early.slots()], ["09:20","09:30","10:00","11:00","12:00"])
         self.assertEqual(session_on(Market.US,date(2026,7,2)).closed.hour,16)
         self.assertEqual(session_on(Market.US,date(2026,12,24)).closed.hour,13)
         self.assertEqual(session_on(Market.DOMESTIC,date(2026,1,2)).opened.hour,10)

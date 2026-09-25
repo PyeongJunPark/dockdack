@@ -20,7 +20,8 @@ from dockdack.trading.strategy_lots import row_family
 
 ZERO = Decimal("0")
 MODELS = (("mark1-prototype", "mark1 prototype"),
-          ("mark1-1-prototype", "mark1.1 prototype"))
+          ("mark1-1-prototype", "mark1.1 prototype"),
+          ("mark1-2-prototype", "mark1.2 prototype"))
 MARKETS = (("domestic", "KRW"), ("us", "USD"))
 UNASSIGNED = "unassigned"
 DESCRIPTION = (

@@ -23,7 +23,7 @@ from uuid import uuid4
 import dockdack
 from dockdack.runtime_paths import app_home, checkout_root, model_bundle
 
-MODEL_IDS = ("mark1-prototype", "mark1-1-prototype")
+MODEL_IDS = ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype")
 MAX_RPC_BYTES = 12_000_000
 # Package import root (checkout or site-packages), independent of this module's
 # internal location. Model/artifact paths come from runtime_paths, never ROOT.
@@ -37,6 +37,9 @@ def model_bridge_type(model_id):
     if model_id == "mark1-1-prototype":
         from dockdack.mark1_1_trigger import Mark11TriggerBridge
         return Mark11TriggerBridge
+    if model_id == "mark1-2-prototype":
+        from dockdack.signals.mark1_2_trigger import Mark12TriggerBridge
+        return Mark12TriggerBridge
     raise ValueError("Unknown prototype model identity")
 
 
@@ -90,9 +93,12 @@ class PrototypeWorker:
             if self.model_id == "mark1-prototype":
                 from dockdack.mark1_prototype_inference import PrototypePredictor
                 self.predictors[market] = PrototypePredictor(self.bundle_root, market)
-            else:
+            elif self.model_id == "mark1-1-prototype":
                 from dockdack.mark1_1_prototype_inference import Mark11PrototypePredictor
                 self.predictors[market] = Mark11PrototypePredictor(self.bundle_root, market)
+            else:
+                from dockdack.signals.mark1_2_trigger import Mark12PrototypePredictor
+                self.predictors[market] = Mark12PrototypePredictor(self.bundle_root, market)
         return self.predictors[market]
 
     def dispatch(self, request):

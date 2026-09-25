@@ -10,6 +10,16 @@ dockdack/mark1_0504_data.py -text
 # Named mark1.1 bundle and its identity wrapper are also SHA-256 sealed.
 models/mark1_1_prototype/** -text whitespace=cr-at-eol
 dockdack/mark1_1_prototype_inference.py -text
+# Mark1.2 stores byte-level seals for its model files and runtime/training code.
+# Keep LF bytes unchanged on Windows as well as non-Windows checkouts.
+models/mark1_2_prototype/** -text whitespace=cr-at-eol
+dockdack/mark1_2_data.py -text
+dockdack/mark1_2_models.py -text
+dockdack/mark1_2_inference.py -text
+examples/train_mark1_2.py -text
+examples/export_mark1_2.py -text
+examples/backtest_mark1_2.py -text
+examples/finish_mark1_2.py -text
 # Source bytes recorded in the frozen training/export contracts.
 dockdack/mark1_prototype_inference.py -text
 dockdack/mark1_0504_inference.py -text

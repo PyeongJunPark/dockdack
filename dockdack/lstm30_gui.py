@@ -163,8 +163,12 @@ class _LSTM30AutoTrader(AutoTrader):
         reject_closing_buy()
         # The closing calendar check follows the parent's final guard. Preserve
         # its freshness/stop guarantees if that additional local work took time.
-        if not 0 <= (self.clock()-fresh.fetched_at).total_seconds() <= 15:
+        now = self.clock()
+        if not 0 <= (now-fresh.fetched_at).total_seconds() <= 15:
             raise OrderNotSent("마감 확인 후 시세가 15초를 초과했거나 미래 시각이므로 전송하지 않습니다.")
+        checked = self._historical_sell_checks.get(rule.id)
+        if checked is not None and not 0 <= (now-checked[0]).total_seconds() <= 15:
+            raise OrderNotSent("최종 마감 확인 후 잔고·미체결 근거가 15초를 넘어 매도를 전송하지 않습니다.")
         if self._stop.is_set() or self.external_stop.is_set() or not self.orders_enabled:
             raise OrderNotSent("최종 마감 확인 중 자동주문이 OFF 또는 중지되었습니다.")
 

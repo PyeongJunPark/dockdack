@@ -210,7 +210,7 @@ class CloseLiquidator:
                              (instrument.market.value, day, WatchItem(instrument).id)).fetchone()
         return dict(row) if row else None
 
-    def _claim(self, instrument, request, holding, reference, account_at, quote_at):
+    def _claim(self, instrument, request, holding, reference, account_at, quote_at, *, historical_buys=frozenset()):
         day, rule_id = self._day_id(instrument, self.clock())
         item = WatchItem(instrument, holding.get("name", ""), 31)
         rule = TriggerRule(rule_id, item.id, TriggerKind.PRICE_GE, OrderSide.SELL, request.quantity,
@@ -220,7 +220,9 @@ class CloseLiquidator:
             if db.execute("SELECT 1 FROM lstm30_close_intents WHERE market=? AND session_day=? AND watch_id=?",
                           (instrument.market.value, day, item.id)).fetchone():
                 return None
-            if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (item.id,)).fetchone():
+            allowed = historical_buys & self.store._historical_buy_attempt_ids(db, item.id, self.clock()) if historical_buys else frozenset()
+            if any(row["rule_id"] not in allowed for row in db.execute(
+                    "SELECT rule_id FROM attempts WHERE watch_id=? AND status IN ('submitting','accepted','unknown')", (item.id,))):
                 raise OrderNotSent("기존 미확정/미체결 주문이 있어 마감 청산을 전송하지 않습니다.")
             from dockdack.persistence.close_allocations import plan_close_allocations, persist_close_allocations
             plan = plan_close_allocations(self.store, db, item.id, request.quantity, holding["quantity"])
@@ -239,9 +241,14 @@ class CloseLiquidator:
             self.store._insert_event(db, item.id,
                 f"마감 청산 전송 의도 기록 · {rule.id} · sell {request.quantity}주 · 전체 모의계좌 매도가능 수량 · 일반 수량/금액 상한 예외",
                 category="order", at=self.clock())
+            if allowed:
+                self.store._insert_event(db, item.id,
+                    "과거 매수 기록은 미확정으로 보존 · 현재 미체결 없음/실제 매도가능수량 확인 후 마감 매도 진행",
+                    category="order", at=self.clock())
         return rule
 
-    def _before_send(self, instrument, rule, request, sellable, account_at, quote_at):
+    def _before_send(self, instrument, rule, request, sellable, account_at, quote_at, *,
+                     historical_buys=frozenset(), broker_checked_at=None):
         try:
             self._permission(instrument, closing=True)
             now = self.clock()
@@ -263,8 +270,10 @@ class CloseLiquidator:
                         or row["watch_id"] != WatchItem(instrument).id or Decimal(row["limit_price"]) != request.price
                         or row["session_day"] != market_time(instrument.market, now).date().isoformat()):
                     raise ValueError("마감 청산의 불변 승인/전송 의도 기록을 확인할 수 없습니다.")
-                if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND rule_id!=? AND status IN ('submitting','accepted','unknown')",
-                              (rule.watch_id, rule.id)).fetchone():
+                allowed = historical_buys & self.store._historical_buy_attempt_ids(db, rule.watch_id, now) if historical_buys else frozenset()
+                if any(row["rule_id"] not in allowed for row in db.execute(
+                        "SELECT rule_id FROM attempts WHERE watch_id=? AND rule_id!=? AND status IN ('submitting','accepted','unknown')",
+                        (rule.watch_id, rule.id))):
                     raise ValueError("다른 미확정/미체결 주문이 생겨 청산을 전송하지 않습니다.")
             self._permission(instrument, closing=True)
             try:
@@ -282,6 +291,8 @@ class CloseLiquidator:
             now = self.clock()
             if not 0 <= (now-account_at).total_seconds() <= 15 or not 0 <= (now-quote_at).total_seconds() <= 15:
                 raise ValueError("최종 검증 후 잔고/시세가 15초를 넘어 청산을 전송하지 않습니다.")
+            if historical_buys and (broker_checked_at is None or not 0 <= (now-broker_checked_at).total_seconds() <= 15):
+                raise ValueError("과거 매수와 별도 청산을 위한 미체결/잔고 검증이 15초를 넘어 전송하지 않습니다.")
             if not (session and max(session.opened, session.closed-timedelta(minutes=self.minutes_before_close)) <= now < session.closed):
                 raise OrderNotSent("최종 검증 중 해당 시장의 마감 전 청산 시간이 종료되었습니다.")
             if not self._running():
@@ -304,8 +315,10 @@ class CloseLiquidator:
             return "UNKNOWN_ORDER_REQUIRES_REVIEW"
         if rejected_today(self.store, instrument, self.clock()):
             return "REJECTED_TODAY"
-        if pending:
+        historical_buys = self.store.historical_buy_attempt_ids(WatchItem(instrument).id, self.clock())
+        if any(row["rule_id"] not in historical_buys for row in pending):
             return "PENDING_ORDER"
+        broker_checked_at = self.clock()
         orders = self.service.safety_orders(instrument)
         self._permission(instrument, closing=True)
         for order in orders:
@@ -338,12 +351,15 @@ class CloseLiquidator:
         self._permission(instrument, closing=True)
         if not 0 <= (self.clock()-account_at).total_seconds() <= 15:
             return "ACCOUNT_EXPIRED_BEFORE_INTENT"
-        rule = self._claim(instrument, request, current, reference, account_at, quote_at)
+        rule = self._claim(instrument, request, current, reference, account_at, quote_at, historical_buys=historical_buys)
         if rule is None:
             return "ALREADY_ATTEMPTED"
         try:
-            self._before_send(instrument, rule, request, sellable, account_at, quote_at)
-            with order_send_guard(lambda: self._before_send(instrument, rule, request, sellable, account_at, quote_at)):
+            def before_send():
+                self._before_send(instrument, rule, request, sellable, account_at, quote_at,
+                                  historical_buys=historical_buys, broker_checked_at=broker_checked_at)
+            before_send()
+            with order_send_guard(before_send):
                 result = self.service.submit(request)
             if (not isinstance(result, OrderResult) or result.mode is not TradingMode.DEMO
                     or result.request != request or result.accepted is not True

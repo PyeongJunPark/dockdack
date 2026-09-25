@@ -14,7 +14,8 @@ HAS_QT = importlib.util.find_spec('PySide6') is not None
 if HAS_QT:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
-    from dockdack.v00_app import DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER, MARK11_TRIGGER, V00Window
+    from dockdack.v00_app import (DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER,
+                                 MARK11_TRIGGER, MARK12_TRIGGER, V00Window)
 
 from dockdack.models import TradingMode
 from dockdack.watchlist import WatchItem, WatchStore
@@ -93,6 +94,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.model_trigger.count(), 2)
         self.assertEqual(self.window.model_trigger.findData(MARK1_TRIGGER), -1)
         self.assertEqual(self.window.model_trigger.findData(MARK11_TRIGGER), -1)
+        self.assertEqual(self.window.model_trigger.findData(MARK12_TRIGGER), -1)
         notice_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_notice))[0]
         sources_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.additional_sources))[0]
         self.assertEqual(self.window.external_grid.indexOf(self.window.model_trigger), -1)
@@ -347,8 +349,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.service.submitted)
 
     def test_both_external_models_can_be_enabled_with_separate_files_and_validators(self):
-        for check in self.window.external_model_checks.values():
-            check.setChecked(True)
+        for model in (MARK1_TRIGGER, MARK11_TRIGGER):
+            self.window.external_model_checks[model].setChecked(True)
         self.window.configure_external()
         self.assertEqual(set(self.window._prototype_feeds), {MARK1_TRIGGER, MARK11_TRIGGER})
         feeds = list(self.window._prototype_feeds.values())
@@ -362,8 +364,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.service.submitted)
 
     def test_disabled_feed_closes_and_cannot_leave_active_validator(self):
-        for check in self.window.external_model_checks.values():
-            check.setChecked(True)
+        for model in (MARK1_TRIGGER, MARK11_TRIGGER):
+            self.window.external_model_checks[model].setChecked(True)
         self.window.configure_external()
         feeds = list(self.window._prototype_feeds.values())
         self.window.external_model_checks[MARK1_TRIGGER].setChecked(False)
@@ -373,6 +375,29 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.window.configure_external()
         self.assertEqual(set(self.window._prototype_feeds), {MARK11_TRIGGER})
         self.assertEqual(set(self.window.engine.source_validators), {'mark1-1-prototype-demo-trigger'})
+
+    def test_third_research_model_is_opt_in_and_all_three_remain_separate_and_off(self):
+        self.assertFalse(self.window.external_model_checks[MARK12_TRIGGER].isChecked())
+        self.select(MARK12_TRIGGER)
+        self.assertEqual(self.window._chosen_external_models(), (MARK12_TRIGGER,))
+        self.assertIn('연구 검증 미통과', self.window.model_notice.text())
+        self.assertIn('−6.90%', self.window.model_notice.text())
+        self.window.configure_external()
+        feed = self.window._prototype_feeds[MARK12_TRIGGER]
+        self.assertEqual(feed.source_id, 'mark1-2-prototype-demo-trigger')
+        self.assertEqual(set(self.window.engine.source_validators), {feed.source_id})
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        for check in self.window.external_model_checks.values():
+            check.setChecked(True)
+        self.window.configure_external()
+        feeds = list(self.window._prototype_feeds.values())
+        self.assertEqual(len(feeds), 3)
+        self.assertEqual(len({feed.source_id for feed in feeds}), 3)
+        self.assertEqual(len({feed.path for feed in feeds}), 3)
+        self.assertEqual(set(self.window.engine.source_validators), {feed.source_id for feed in feeds})
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
 
     def test_duplicate_managed_source_or_path_rejected_without_arming(self):
         self.select(MARK1_TRIGGER)

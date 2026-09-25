@@ -27,9 +27,15 @@ from test_mark1_adapter import mark1_chart, prediction
 
 def fake_predictor(model_id, market="domestic", probability=.7):
     result = prediction(probability)
-    result.update(strategy_id=model_id, take_profit_pct=1. if model_id == MODEL_IDS[0] else .5,
-                  stop_loss_pct=.9 if model_id == MODEL_IDS[0] else .4,
+    mark11 = model_id == MODEL_IDS[1]
+    result.update(strategy_id=model_id, take_profit_pct=.5 if mark11 else 1.,
+                  stop_loss_pct=.4 if mark11 else .9,
                   version="fixture-v1", bundle_manifest_sha256="a" * 64)
+    if model_id == MODEL_IDS[2]:
+        from dockdack.mark1_2_inference import SEMANTICS
+        result.update(title="mark1.2 prototype", target=SEMANTICS["target"],
+                      research_only=True, research_qualified=False,
+                      deployment_allowed=False, intraday_path_verified=False)
     return SimpleNamespace(metadata={"market": market, "strategy_id": model_id,
                                      "version": "fixture-v1", "bundle_manifest_sha256": "a" * 64},
                            predict=Mock(return_value=result))
@@ -43,9 +49,10 @@ def request_for(model_id, chart=None):
 
 
 class WorkerTests(unittest.TestCase):
-    def test_both_models_emit_distinct_buy_provenance_and_exit_brackets(self):
+    def test_all_models_emit_distinct_buy_provenance_and_exit_brackets(self):
         results = []
-        for model_id, take, stop in ((MODEL_IDS[0], "101", "99.1"), (MODEL_IDS[1], "100.5", "99.6")):
+        for model_id, take, stop in ((MODEL_IDS[0], "101", "99.1"), (MODEL_IDS[1], "100.5", "99.6"),
+                                     (MODEL_IDS[2], "101", "99.1")):
             worker = PrototypeWorker(model_id, predictors={"domestic": fake_predictor(model_id)})
             response = worker.dispatch(request_for(model_id))
             results.append(response)
@@ -55,7 +62,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(row["strategy_id"], model_id)
             self.assertTrue(row["signal_id"].startswith(model_id + ":"))
             self.assertEqual(row["model_manifest_sha256"], "a" * 64)
-        self.assertNotEqual(results[0]["payload"]["source_id"], results[1]["payload"]["source_id"])
+        self.assertEqual(len({result["payload"]["source_id"] for result in results}), len(MODEL_IDS))
 
     def test_real_or_wrong_model_request_rejected(self):
         worker = PrototypeWorker(MODEL_IDS[0], predictors={})
@@ -167,13 +174,14 @@ class ProcessTests(unittest.TestCase):
         for client in clients:
             self.addCleanup(client.close)
         self.assertFalse(any(client.is_alive for client in clients))
-        first, second = [client.request("health") for client in clients]
-        self.assertNotEqual(first["pid"], second["pid"])
-        self.assertNotIn(os.getpid(), (first["pid"], second["pid"]))
+        replies = [client.request("health") for client in clients]
+        self.assertEqual(len({reply["pid"] for reply in replies}), len(MODEL_IDS))
+        self.assertNotIn(os.getpid(), (reply["pid"] for reply in replies))
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             clients[0].request("arbitrary-python-code")
         self.assertFalse(clients[0].is_alive)
-        self.assertEqual(clients[1].request("health")["pid"], second["pid"])
+        self.assertEqual(clients[1].request("health")["pid"], replies[1]["pid"])
+        self.assertEqual(clients[2].request("health")["pid"], replies[2]["pid"])
 
     def test_stopped_process_cannot_restart_for_revalidation(self):
         client = PrototypeProcessClient(MODEL_IDS[0])
@@ -268,13 +276,14 @@ class FeedTests(unittest.TestCase):
         self.addCleanup(result.close)
         return result
 
-    def test_two_feeds_use_separate_files_state_and_model_identity(self):
-        feeds = [self.feed(MODEL_IDS[0], "old.json"), self.feed(MODEL_IDS[1], "new.json")]
+    def test_three_feeds_use_separate_files_state_and_model_identity(self):
+        feeds = [self.feed(model_id, f"{model_id}.json") for model_id in MODEL_IDS]
         for feed in feeds:
             feed.publish(mark1_chart())
             self.assertEqual(read_json(feed.output_path)["source_id"], feed.source_id)
             self.assertTrue(feed._ready)
-        self.assertNotEqual(feeds[0].client.worker.state_path, feeds[1].client.worker.state_path)
+        self.assertEqual(len({feed.client.worker.state_path for feed in feeds}), len(MODEL_IDS))
+        self.assertEqual(len({feed.source_id for feed in feeds}), len(MODEL_IDS))
         self.service.submit.assert_not_called()
         self.engine.enable_orders.assert_not_called()
 

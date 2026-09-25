@@ -171,9 +171,9 @@ class GuiOptimizationTests(unittest.TestCase):
         self.window._external_feed_factory = None
         with patch('dockdack.prototype_external.ExternalPrototypeFeed', side_effect=lambda *a, **kw: FakeExternalFeed(*a, bundle_root=kw['bundle_root'])) as factory:
             self.window.configure_external()
-        self.assertEqual(factory.call_count, 2)
-        first, second = [call.kwargs['account_snapshots'] for call in factory.call_args_list]
-        self.assertIs(first, second)
+        self.assertEqual(factory.call_count, 3)
+        accounts = [call.kwargs['account_snapshots'] for call in factory.call_args_list]
+        self.assertTrue(all(cache is accounts[0] for cache in accounts))
 
     def test_legacy_migration_requires_explicit_choice_before_target_creation(self):
         from dockdack.v00_app import prepare_legacy_ledger

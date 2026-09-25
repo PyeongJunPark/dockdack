@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import sys
 from time import monotonic
@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid5
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QHBoxLayout, QMessageBox, QLabel,
+    QApplication, QCheckBox, QComboBox, QHeaderView, QHBoxLayout, QMessageBox, QLabel,
     QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,7 @@ from dockdack.branding import apply_branding, set_windows_app_id
 from dockdack.version import APP_RELEASE
 from dockdack.environment_store import selected_mode, scoped_store_path, store_for_service
 from dockdack.gui_service import Instrument, TradingService
+from dockdack.lstm30_adapter import MAX_QUOTE_AGE
 from dockdack.models import Market, TradingMode
 from dockdack.portfolio import PortfolioCache
 from dockdack.signal_bridge import atomic_json, ExternalPolicy, SignalFileReader
@@ -125,6 +126,7 @@ class DesktopModelBridge:
 
 MARK1_TRIGGER = 'mark1-prototype'
 MARK11_TRIGGER = 'mark1-1-prototype'
+MARK12_TRIGGER = 'mark1-2-prototype'
 MARK1_NOTICE = (
     'mark1 prototype · 모의투자 전용 · 과거 30일봉 + 현재가 · 모델 추정 확률 50% 초과일 때 매수\n'
     '이 트리거의 새 매수 목표: +1% 익절 / −0.9% 손절 · 기존 보유분의 저장된 목표는 유지\n'
@@ -136,10 +138,22 @@ MARK11_NOTICE = (
     '연구 검증 미통과 · 미국 과거 시가 검증 매수 신호 123건 · 비용 반영 손실 · '
     '주식분할 가격단위 문제와 장중 진입 성과 미검증 · 수익 보장 없음'
 )
-PROTOTYPE_NOTICES = {MARK1_TRIGGER: MARK1_NOTICE, MARK11_TRIGGER: MARK11_NOTICE}
-PROTOTYPE_TITLES = {MARK1_TRIGGER: 'mark1 prototype', MARK11_TRIGGER: 'mark1.1 prototype'}
+MARK12_NOTICE = (
+    'mark1.2 prototype · 모의투자 전용 · 과거 완료 30일봉 + 현재가 · 모델 추정 확률 50% 초과일 때 매수\n'
+    '이 트리거의 새 매수 목표: +1% 익절 / −0.9% 손절 · 기존 보유분의 저장된 목표는 유지\n'
+    '딥러닝 연구 검증 미통과 · 재사용 과거 평가 국내 473신호/미국 1,712신호 · '
+    '왕복 20bp 가정 비용 후 보유형 국내 −5.86%/미국 −6.90% · '
+    '장중 선후관계·실제 체결 미검증 · 수익 보장 없음'
+)
+PROTOTYPE_NOTICES = {MARK1_TRIGGER: MARK1_NOTICE, MARK11_TRIGGER: MARK11_NOTICE,
+                     MARK12_TRIGGER: MARK12_NOTICE}
+PROTOTYPE_TITLES = {MARK1_TRIGGER: 'mark1 prototype', MARK11_TRIGGER: 'mark1.1 prototype',
+                    MARK12_TRIGGER: 'mark1.2 prototype'}
+PROTOTYPE_TARGETS = {MARK1_TRIGGER: '+1% / −0.9%', MARK11_TRIGGER: '+0.5% / −0.4%',
+                     MARK12_TRIGGER: '+1% / −0.9%'}
 PROTOTYPE_SOURCES = {MARK1_TRIGGER: 'mark1-prototype-demo-trigger',
-                     MARK11_TRIGGER: 'mark1-1-prototype-demo-trigger'}
+                     MARK11_TRIGGER: 'mark1-1-prototype-demo-trigger',
+                     MARK12_TRIGGER: 'mark1-2-prototype-demo-trigger'}
 
 
 class ExternalFeedGroup:
@@ -157,6 +171,10 @@ class ExternalFeedGroup:
         for feed in self.feeds.values():
             # Each external adapter publishes HOLD on its own failures. It
             # cannot overwrite another source's file or account for an order.
+            if isinstance(chart, dict) and isinstance(chart.get('stocks'), list):
+                for stock in chart['stocks']:
+                    if isinstance(stock, dict) and stock.get('status') == 'ok' and isinstance(stock.get('watch_id'), str):
+                        feed.diagnostics.pop(stock['watch_id'], None)
             try:
                 feed.publish(chart)
             except Exception as exc:
@@ -164,6 +182,28 @@ class ExternalFeedGroup:
                 # validator usable or starve the other independent feed.
                 feed.close()
                 feed.status = f'{feed.source_id} 외부 전달 실패 · 이 모델 차단: {exc}'
+                if isinstance(chart, dict) and isinstance(chart.get('stocks'), list):
+                    for stock in chart['stocks']:
+                        if isinstance(stock, dict) and stock.get('status') == 'ok' and isinstance(stock.get('watch_id'), str):
+                            feed.diagnostics[stock['watch_id']] = {
+                                'watch_id': stock['watch_id'], 'reason': 'MODEL_DELIVERY_UNAVAILABLE', 'error': str(exc)}
+            # Display provenance is intentionally separate from the order
+            # JSON. A score may only be paired with the exact quote used for
+            # this model's latest completed decision.
+            if isinstance(chart, dict) and isinstance(chart.get('stocks'), list):
+                for stock in chart['stocks']:
+                    if not isinstance(stock, dict) or stock.get('status') != 'ok':
+                        continue
+                    key = stock.get('watch_id')
+                    if not isinstance(key, str):
+                        continue
+                    diagnostic = feed.diagnostics.get(key)
+                    if diagnostic is None or not getattr(feed, '_ready', True):
+                        diagnostic = {'watch_id': key, 'reason': 'MODEL_RESULT_UNAVAILABLE',
+                                      'error': str(getattr(feed, 'status', '모델 판단 실패'))}
+                    feed.diagnostics[key] = {
+                        **diagnostic, '_display_quote_fetched_at': stock.get('quote_fetched_at'),
+                        '_display_price': stock.get('price')}
 
     @property
     def status(self):
@@ -183,6 +223,7 @@ class V00Window(WatchlistDialog):
     def __init__(self, service=None, store=None, *, builtin=True, predictors=None,
                  trigger=None, mark1_predictors=None, mark1_bundle=None,
                  mark11_predictors=None, mark11_bundle=None,
+                 mark12_bundle=None,
                  external_models=None, external_feed_factory=None, session_lock=None):
         choice = trigger if trigger is not None else 'lstm30' if builtin else 'none'
         if choice not in {'none', 'lstm30', *PROTOTYPE_NOTICES}:
@@ -202,9 +243,25 @@ class V00Window(WatchlistDialog):
         self._model_predictors = predictors
         self._mark1_bundle = mark1_bundle
         self._mark11_bundle = mark11_bundle
+        self._mark12_bundle = mark12_bundle
         self._external_feed_factory = external_feed_factory
         self._prototype_feeds = {}
         super().__init__(service or TradingService(), store, defer_workspace=True, session_lock=session_lock)
+        for view in self.watch_tables.values():
+            view.setColumnCount(7)
+            view.setHorizontalHeaderLabels(('종목', '현재가', 'N일', '상태/조회시각',
+                                            'MK1 추정확률', 'MK1.1 추정확률', 'MK1.2 추정확률'))
+            view.setMinimumWidth(610)
+            for column, width in ((0, 110), (1, 100), (2, 40), (3, 115), (4, 140), (5, 140), (6, 140)):
+                view.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+                view.setColumnWidth(column, width)
+        self.model_score_summary = QLabel('모델 판단 전 · 추정확률은 실제 수익률이나 검증된 적중률이 아닙니다.')
+        self.model_score_summary.setObjectName('modelScoreSummary')
+        self.model_score_summary.setWordWrap(True)
+        self.model_score_summary.setToolTip('MK1과 MK1.2는 +1%/−0.9%, MK1.1은 +0.5%/−0.4% 일봉 조건의 모델 추정값입니다. 모두 연구 검증 미통과.')
+        self.chart_title.parentWidget().layout().insertWidget(1, self.model_score_summary)
+        self.health_timer.timeout.connect(self._refresh_model_scores)
+        self._refresh_model_scores()
         # A disabled BUY feed must not change the ownership or exit policy of
         # already filled model lots. REAL use is separately blocked below.
         self.engine.prototype_lots_enabled = True
@@ -218,12 +275,11 @@ class V00Window(WatchlistDialog):
             position = self.external_grid.getItemPosition(0)
             settings_items.append((self.external_grid.takeAt(0), position))
         for item, (row, column, row_span, column_span) in settings_items:
-            self.external_grid.addItem(item, row + 8, column, row_span, column_span)
-        self.external_grid.addWidget(QLabel('외부 AI 매수 신호기 · 두 모델 동시 연결 가능'), 0, 0, 1, 5)
+            self.external_grid.addItem(item, row + 9, column, row_span, column_span)
+        self.external_grid.addWidget(QLabel('외부 AI 매수 신호기 · 세 모델 동시 연결 가능'), 0, 0, 1, 5)
         self.external_model_checks = {}
         for row, model in enumerate(PROTOTYPE_NOTICES, 1):
-            targets = '+1% / −0.9%' if model == MARK1_TRIGGER else '+0.5% / −0.4%'
-            checkbox = QCheckBox(f'{PROTOTYPE_TITLES[model]} · {targets} · 외부 프로세스')
+            checkbox = QCheckBox(f'{PROTOTYPE_TITLES[model]} · {PROTOTYPE_TARGETS[model]} · 외부 프로세스')
             checkbox.setObjectName('external-' + model)
             checkbox.setChecked(model in enabled_models)
             self.external_model_checks[model] = checkbox
@@ -239,24 +295,24 @@ class V00Window(WatchlistDialog):
         self.model_trigger.addItem('LSTM30 mark0 · 기존 내장 매수 트리거', 'lstm30')
         self.model_trigger.setCurrentIndex(self.model_trigger.findData(choice))
         self.legacy_trigger_label = QLabel('기존 내장 트리거')
-        self.external_grid.addWidget(self.legacy_trigger_label, 5, 0)
-        self.external_grid.addWidget(self.model_trigger, 5, 1, 1, 4)
+        self.external_grid.addWidget(self.legacy_trigger_label, 6, 0)
+        self.external_grid.addWidget(self.model_trigger, 6, 1, 1, 4)
         self.model_status = QLabel('내장 LSTM · 첫 장중 조회 시 모델 확인')
         self.model_status.setWordWrap(True)
-        self.external_grid.addWidget(self.model_status, 4, 0, 1, 5)
+        self.external_grid.addWidget(self.model_status, 5, 0, 1, 5)
         self.model_notice = QLabel(MARK1_NOTICE)
         self.model_notice.setWordWrap(True)
         self.model_notice.setStyleSheet('color: #ffda91;')
-        self.external_grid.addWidget(self.model_notice, 3, 0, 1, 5)
+        self.external_grid.addWidget(self.model_notice, 4, 0, 1, 5)
         self.close_all_at_market_end = QCheckBox('장마감 5분 전 모의계좌 전체 매도')
         self.close_all_at_market_end.setChecked(selected_mode(self.service) is TradingMode.DEMO)
         self.close_all_at_market_end.setToolTip(
             '기존 보유분을 포함한 국내·미국 전체 매도가능 수량 대상. 마감 5분 전 신규 매수를 차단하며, '
             '마감 매도에만 평소 수량·금액 한도를 적용하지 않습니다. 주문 ON 확인이 필요하며 체결은 보장되지 않습니다.')
-        self.external_grid.addWidget(self.close_all_at_market_end, 6, 0, 1, 5)
+        self.external_grid.addWidget(self.close_all_at_market_end, 7, 0, 1, 5)
         self.close_liquidation_label = QLabel('마감 청산 대기 · 모의계좌 전체 · 감시 및 주문 ON 필요 · 체결 보장 없음')
         self.close_liquidation_label.setWordWrap(True)
-        self.external_grid.addWidget(self.close_liquidation_label, 7, 0, 1, 5)
+        self.external_grid.addWidget(self.close_liquidation_label, 8, 0, 1, 5)
         self.close_all_at_market_end.toggled.connect(self._close_policy_changed)
         self.model_trigger.currentIndexChanged.connect(self._model_trigger_changed)
         for checkbox in self.external_model_checks.values():
@@ -266,7 +322,7 @@ class V00Window(WatchlistDialog):
         self.external_krw.setValue(10_000_000)
         self.external_usd.setValue(10_000)
         self.hourly_ranking.setChecked(True)
-        self.hourly_ranking.setText('국내·미국 거래량 TOP100 · 개장 10분 전 / 장중 매 정시')
+        self.hourly_ranking.setText('국내·미국 거래량 TOP100 · 개장 10분 전 / 개장 / 매 정시')
         self.ranking_button.setText('현재 선정 가능한 시장 · 거래량 TOP100')
         self.days_input.setValue(31)
         self.environment_caption.setText('모의 / 실전 · 기본 주문 OFF')
@@ -281,6 +337,116 @@ class V00Window(WatchlistDialog):
         self.close_maintenance_timer.setInterval(5000)
         self.close_maintenance_timer.timeout.connect(self._close_wakeup)
         self.close_maintenance_timer.start()
+
+    def _model_score_display(self, model, item):
+        """GUI-only decision view; never a permission or order-wire input."""
+        title = PROTOTYPE_TITLES[model]
+        target = PROTOTYPE_TARGETS[model]
+        note = (f'{title} · {target} · 표시된 현재가 조회 시점의 일봉 기반 모델 추정확률입니다. '
+                '실제 적중률·수익률 보장 아님 / 연구 검증 미통과. '
+                '실제 주문 직전에는 새 시세로 재판단되며 주문 허용 여부와 다를 수 있습니다.')
+        checks = getattr(self, 'external_model_checks', {})
+        if model not in checks or not checks[model].isChecked():
+            return '연결 꺼짐', note + '\n이 모델은 연결되어 있지 않습니다.', '꺼짐'
+        feed = self._prototype_feeds.get(model)
+        if feed is None:
+            return '판단 전', note + '\n외부 모델 연결 또는 첫 조회를 기다립니다.', '판단 전'
+        if item.id in self.errors:
+            return '시세 오류\n확률 —', note + '\n현재 시세 조회 오류: ' + str(self.errors[item.id]), '시세 오류'
+        snapshot = self.snapshots.get(item.id)
+        if snapshot is None:
+            return '현재가 없음\n확률 —', note + '\n현재가 조회 전입니다.', '현재가 없음'
+        age = (self.engine.clock() - snapshot.fetched_at).total_seconds()
+        fetched = snapshot.fetched_at.astimezone().strftime('%m/%d %H:%M:%S')
+        quote = f'{snapshot.quote.price} {item.instrument.currency}'
+        context = f'\n판단 기준 현재가 {quote} · 조회 {fetched}'
+        if not 0 <= age <= MAX_QUOTE_AGE or item.id not in self.fresh_ids:
+            return '이전 시세\n확률 —', note + context + '\n15초 이내의 새 시세가 없어 예전 모델 점수를 숨겼습니다.', '이전 시세'
+        row = feed.diagnostics.get(item.id)
+        if not isinstance(row, dict):
+            return '판단 전\n확률 —', note + context + '\n이 시세의 모델 판단이 아직 없습니다.', '판단 전'
+        if (row.get('_display_quote_fetched_at') != snapshot.fetched_at.isoformat()
+                or row.get('_display_price') != str(snapshot.quote.price)):
+            return '재판단 대기\n확률 —', note + context + '\n모델 판단과 현재가의 시각·가격이 일치하지 않습니다.', '재판단 대기'
+        reason = row.get('reason', '')
+        prediction = row.get('prediction')
+        if not isinstance(prediction, dict) or row.get('error'):
+            state = '보유 중' if reason == 'POSITION_EXIT_MANAGED_BY_GUI' else '판단 불가'
+            return state + '\n확률 —', note + context + '\n' + str(row.get('error') or reason), state
+        try:
+            value = prediction.get('probability_success')
+            if isinstance(value, bool):
+                raise ValueError('Boolean is not a probability')
+            probability = Decimal(str(value))
+            reference_price = Decimal(str(row.get('reference_price')))
+            if not probability.is_finite() or not 0 <= probability <= 1 or reference_price != snapshot.quote.price:
+                raise ValueError('Prediction and quote do not match')
+        except (InvalidOperation, TypeError, ValueError):
+            return '판단 불가\n확률 —', note + context + '\n유효한 모델 추정값을 확인하지 못했습니다.', '판단 불가'
+        if reason in {'QUOTE_OR_POSITION_UNAVAILABLE', 'PREDICTION_UNAVAILABLE',
+                      'QUOTE_EXPIRED_DURING_INFERENCE', 'POSITION_EXPIRED_DURING_INFERENCE',
+                      'MARK1_UNAVAILABLE', 'MODEL_RESULT_UNAVAILABLE', 'MODEL_DELIVERY_UNAVAILABLE'}:
+            return '판단 불가\n확률 —', note + context + '\n' + reason, '판단 불가'
+        if reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' and probability <= Decimal('0.5'):
+            return '판단 불가\n확률 —', note + context + '\n모델 확률과 매수 판정이 일치하지 않습니다.', '판단 불가'
+        decision = '매수 판정' if reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '대기'
+        pct = f'{probability:.1%}'
+        return f'{decision}\n{pct}', note + context + f'\n{decision} · 추정 성공확률 {pct} · 사유 {reason}', f'{decision} {pct}'
+
+    def _watch_values(self, item):
+        return (*super()._watch_values(item),
+                *(self._model_score_display(model, item)[0] for model in PROTOTYPE_NOTICES))
+
+    def _update_model_score_row(self, key):
+        item = self._items_by_id.get(key)
+        row = self._watch_rows.get(key)
+        if item is None or row is None:
+            return
+        view = self.watch_tables[item.instrument.market]
+        for column, model in enumerate(PROTOTYPE_NOTICES, 4):
+            cell = view.item(row, column)
+            if cell is None:
+                continue
+            value, tip, _ = self._model_score_display(model, item)
+            if cell.text() != value:
+                cell.setText(value)
+            if cell.toolTip() != tip:
+                cell.setToolTip(tip)
+
+    def _refresh_model_scores(self):
+        if not hasattr(self, 'model_score_summary'):
+            return
+        for key in tuple(getattr(self, '_watch_rows', ())):
+            self._update_model_score_row(key)
+        self._update_selected_model_scores()
+
+    def _update_selected_model_scores(self):
+        if not hasattr(self, 'model_score_summary'):
+            return
+        item = self.selected_item()
+        if item is None:
+            self.model_score_summary.setText('종목을 선택하면 모델별 매수 판정과 추정확률이 표시됩니다. 실제 수익률·적중률 보장 아님.')
+            return
+        snapshot = self.snapshots.get(item.id)
+        quote = (f'{snapshot.quote.price} {item.instrument.currency} · {snapshot.fetched_at.astimezone():%m/%d %H:%M:%S}'
+                 if snapshot is not None and item.id not in self.errors else '현재가 확인 불가')
+        scores = ' · '.join(f'{PROTOTYPE_TITLES[model]} {self._model_score_display(model, item)[2]}'
+                            for model in PROTOTYPE_NOTICES)
+        self.model_score_summary.setText(
+            f'{item.instrument.symbol} · 현재가 {quote}\n{scores} · 조회 시점 추정확률 / 주문 직전 재판단 · 실제 적중률·수익률 아님')
+
+    def select_item(self, *_):
+        super().select_item(*_)
+        self._update_selected_model_scores()
+
+    def _update_watch_row(self, key):
+        super()._update_watch_row(key)
+        self._update_model_score_row(key)
+        self._update_selected_model_scores()
+
+    def reload_tables(self, *, items=None, rules=None):
+        super().reload_tables(items=items, rules=rules)
+        self._refresh_model_scores()
 
     def _move_legacy_settings(self):
         """Move controls only; opening this area never changes trading policy."""
@@ -498,6 +664,7 @@ class V00Window(WatchlistDialog):
         self.model_notice.setVisible(bool(enabled_models))
         self._sync_model_mode_controls()
         self._update_connection()
+        self._refresh_model_scores()
 
     def _sync_model_mode_controls(self):
         if not hasattr(self, 'model_trigger'):
@@ -506,7 +673,7 @@ class V00Window(WatchlistDialog):
             self.close_all_at_market_end.setEnabled(selected_mode(self.service) is TradingMode.DEMO)
         if self._chosen_external_models():
             self.environment_selector.buttons[TradingMode.REAL].setEnabled(False)
-            self.environment_selector.buttons[TradingMode.REAL].setToolTip('prototype 외부 신호기는 모의투자 전용입니다. 두 연결을 끄면 환경 전환할 수 있습니다.')
+            self.environment_selector.buttons[TradingMode.REAL].setToolTip('prototype 외부 신호기는 모의투자 전용입니다. 모든 모델 연결을 끄면 환경 전환할 수 있습니다.')
         else:
             self.environment_selector.apply(selected_mode(self.service), pending=self._pending_environment is not None)
         if hasattr(self, 'advanced_mode_panel'):
@@ -519,7 +686,7 @@ class V00Window(WatchlistDialog):
     def request_environment(self, mode):
         if TradingMode(mode) is TradingMode.REAL and self._chosen_external_models():
             self.engine.disarm()
-            self.message.setText('prototype 외부 신호기는 모의투자 전용입니다. 실전 전환 전에 두 연결을 끄세요.')
+            self.message.setText('prototype 외부 신호기는 모의투자 전용입니다. 실전 전환 전에 모든 모델 연결을 끄세요.')
             return
         return super().request_environment(mode)
 
@@ -633,7 +800,9 @@ class V00Window(WatchlistDialog):
                     if source in seen_sources or path.resolve() in seen_paths:
                         raise ValueError('외부 AI 신호 출처/파일이 다른 연결과 중복됩니다.')
                     extra = ExternalPolicy(source, policy.max_quantity, policy.max_krw, policy.max_usd)
-                    bundle = self._mark1_bundle if model == MARK1_TRIGGER else self._mark11_bundle
+                    bundle = {MARK1_TRIGGER: self._mark1_bundle,
+                              MARK11_TRIGGER: self._mark11_bundle,
+                              MARK12_TRIGGER: self._mark12_bundle}[model]
                     kwargs = {'bundle_root': bundle}
                     if self._external_feed_factory is None:
                         kwargs['account_snapshots'] = shared
@@ -651,6 +820,7 @@ class V00Window(WatchlistDialog):
                 raise
         self.test_producer = (ExternalFeedGroup(self._prototype_feeds, builtin) if self._prototype_feeds else builtin)
         self._update_connection()
+        self._refresh_model_scores()
         return result
 
     def closeEvent(self, event):
@@ -681,7 +851,9 @@ def default_desktop_store(root):
 def desktop_model_choices(trigger, no_model, external_models):
     models = list(external_models)
     if trigger is None and not no_model and not models:
-        return 'none', list(PROTOTYPE_NOTICES)
+        # New research models are opt-in; the existing two-model startup
+        # selection remains unchanged and still starts with orders OFF.
+        return 'none', [MARK1_TRIGGER, MARK11_TRIGGER]
     if trigger is None and models:
         return 'none', models
     return trigger, models
@@ -722,11 +894,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     trigger_options = parser.add_mutually_exclusive_group()
     trigger_options.add_argument('--no-model', action='store_true')
-    trigger_options.add_argument('--trigger', choices=('none', 'lstm30', MARK1_TRIGGER, MARK11_TRIGGER))
+    trigger_options.add_argument('--trigger', choices=('none', 'lstm30', *PROTOTYPE_NOTICES))
     parser.add_argument('--mark1-bundle', type=Path, help='mark1 prototype 저장 모델 폴더')
     parser.add_argument('--mark11-bundle', type=Path, help='mark1.1 prototype 저장 모델 폴더')
+    parser.add_argument('--mark12-bundle', type=Path, help='mark1.2 prototype 저장 모델 폴더')
     parser.add_argument('--external-model', action='append', choices=tuple(PROTOTYPE_NOTICES), default=[],
-                        help='외부 AI 신호기. 두 모델을 함께 쓰려면 각각 지정 (자동주문은 OFF)')
+                        help='외부 AI 신호기. 세 모델을 함께 쓰려면 각각 지정 (자동주문은 OFF)')
     ledger_options = parser.add_mutually_exclusive_group()
     ledger_options.add_argument('--store', type=Path, help='현재 계정에 이미 귀속된 장부 경로 (범위 검사 유지, 이관하지 않음)')
     ledger_options.add_argument('--legacy-store', type=Path,
@@ -773,7 +946,8 @@ def main(argv=None):
         trigger, models = desktop_model_choices(args.trigger, args.no_model, args.external_model)
         window = V00Window(service=service, store=store, builtin=not args.no_model,
                            trigger=trigger, mark1_bundle=args.mark1_bundle,
-                           mark11_bundle=args.mark11_bundle, external_models=models, session_lock=lock)
+                           mark11_bundle=args.mark11_bundle, mark12_bundle=args.mark12_bundle,
+                           external_models=models, session_lock=lock)
         if legacy_notice:
             window.message.setText(legacy_notice)
         window.show()

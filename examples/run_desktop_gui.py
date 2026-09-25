@@ -47,10 +47,12 @@ def main(argv=None):
         # Explicitly offline: verify model loading, not credentials or an account.
         from dockdack.mark1_prototype_inference import PrototypePredictor
         from dockdack.mark1_1_prototype_inference import Mark11PrototypePredictor
+        from dockdack.signals.mark1_2_trigger import Mark12PrototypePredictor
         for market in ("domestic", "us"):
             PrototypePredictor(ROOT / "models/mark1_prototype", market)
             Mark11PrototypePredictor(ROOT / "models/mark1_1_prototype", market)
-        print("Unified GUI + saved KR/US mark1 prototype and mark1.1 prototype models: OK; no monitoring, orders or network")
+            Mark12PrototypePredictor(ROOT / "models/mark1_2_prototype", market)
+        print("Unified GUI + saved KR/US mark1 prototype, mark1.1 prototype and mark1.2 prototype models: OK; no monitoring, orders or network")
         return 0
     return desktop_main(desktop_arguments(args))
 

@@ -18,7 +18,9 @@ if HAS_QT:
 def performance_report(*, mode="demo", unknown=0, no_sales=False, unassigned=False):
     rows = []
     for market, currency in (("domestic", "KRW"), ("us", "USD")):
-        for strategy, title in (("mark1-prototype", "mark1 prototype"), ("mark1-1-prototype", "mark1.1 prototype")):
+        for strategy, title in (("mark1-prototype", "mark1 prototype"),
+                                ("mark1-1-prototype", "mark1.1 prototype"),
+                                ("mark1-2-prototype", "mark1.2 prototype")):
             rows.append({"strategy_id": strategy, "model_title": title, "market": market, "currency": currency,
                          "known_sell_count": 0 if no_sales else 1, "unknown_sell_count": unknown,
                          "known_quantity": D(0 if no_sales else 2), "unknown_quantity": D(unknown),
@@ -28,7 +30,7 @@ def performance_report(*, mode="demo", unknown=0, no_sales=False, unassigned=Fal
     if unassigned:
         rows.append({**rows[0], "strategy_id": "unassigned", "model_title": "미확인 / 수동·외부", "attribution_complete": False})
     return {"mode": mode, "rows": tuple(rows), "complete": not (unknown or unassigned), "warnings": (), "gross": True,
-            "coverage": {"ledger_order_count": 0 if no_sales else 8, "incomplete_sell_count": unknown * 4,
+            "coverage": {"ledger_order_count": 0 if no_sales else 8, "incomplete_sell_count": unknown * 6,
                          "unassigned_sell_count": int(unassigned)}}
 
 
@@ -51,22 +53,23 @@ class ModelPerformanceGuiTests(unittest.TestCase):
     def test_starts_with_unknown_collection_not_zero_percent(self):
         self.assertIn("DEMO", self.panel.mode_badge.text())
         for market in ("domestic", "us"):
-            self.assertEqual(self.panel.tables[market].rowCount(), 2)
+            self.assertEqual(self.panel.tables[market].rowCount(), 3)
             self.assertEqual(self.panel.tables[market].item(0, 1).text(), "—")
             self.assertEqual(self.panel.tables[market].item(0, 5).text(), "집계 대기")
         self.store.order_history.assert_not_called()
 
-    def test_two_models_in_separate_currencies_and_execution_return(self):
+    def test_three_models_in_separate_currencies_and_execution_return(self):
         self.panel.apply_report(performance_report())
         self.assertEqual(self.panel.market_tabs.count(), 2)
         for market, currency in (("domestic", "KRW"), ("us", "USD")):
             view = self.panel.tables[market]
-            self.assertEqual(view.rowCount(), 2)
+            self.assertEqual(view.rowCount(), 3)
             self.assertEqual(view.item(0, 1).text(), "+1.00%")
             self.assertIn(currency, view.item(0, 2).text())
             self.assertIn(currency, view.item(0, 3).text())
             self.assertEqual(view.item(0, 4).text(), "1건")
             self.assertIn("수수료·세금 제외", view.item(0, 1).toolTip())
+            self.assertEqual(view.item(2, 0).text(), "mark1.2 prototype")
         self.assertIn("KRW와 USD는 합산하지 않습니다", self.panel.explanation.text())
         self.store.order_history.assert_not_called()
 
@@ -79,6 +82,19 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         self.assertEqual(self.panel.tables["domestic"].item(0, 3).text(), "+2 KRW")
         self.assertEqual(self.panel.tables["us"].item(0, 5).text(), "매도 체결 없음")
         self.assertIn("전체 주문 2건", self.panel.coverage_label.text())
+        self.store.order_history.assert_not_called()
+
+    def test_mark12_realized_return_appears_only_in_its_own_row(self):
+        from dockdack.model_performance import model_realized_performance
+        from test_model_performance import order
+        records = (order(1, "buy", model="mark1-2-prototype"), order(2, "sell", price="103"))
+        self.panel.apply_report(model_realized_performance(records, mode="demo"))
+        view = self.panel.tables["domestic"]
+        self.assertEqual(view.item(0, 5).text(), "매도 체결 없음")
+        self.assertEqual(view.item(1, 5).text(), "매도 체결 없음")
+        self.assertEqual(view.item(2, 0).text(), "mark1.2 prototype")
+        self.assertEqual(view.item(2, 1).text(), "+3.00%")
+        self.assertEqual(view.item(2, 3).text(), "+3 KRW")
         self.store.order_history.assert_not_called()
 
     def test_missing_sales_are_not_zero_performance(self):
@@ -97,11 +113,11 @@ class ModelPerformanceGuiTests(unittest.TestCase):
     def test_incomplete_and_unassigned_are_explicit_not_folded_into_model(self):
         self.panel.apply_report(performance_report(unknown=1, unassigned=True))
         view = self.panel.tables["domestic"]
-        self.assertEqual(view.rowCount(), 3)
+        self.assertEqual(view.rowCount(), 4)
         self.assertIn("전체 미확인", view.item(0, 1).text())
         self.assertIn("확인분 +1.00%", view.item(0, 1).text())
-        self.assertEqual(view.item(2, 0).text(), "미확인 / 수동·외부")
-        self.assertIn("모델 출처 미확인", view.item(2, 5).text())
+        self.assertEqual(view.item(3, 0).text(), "미확인 / 수동·외부")
+        self.assertIn("모델 출처 미확인", view.item(3, 5).text())
         self.assertIn("모델 미분류 매도 1건", self.panel.warning.text())
 
     def test_provenance_warning_codes_have_distinct_human_explanations(self):

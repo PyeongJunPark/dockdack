@@ -201,6 +201,12 @@ class ScopedRankingSchedulerTests(unittest.TestCase):
 
     def test_bootstrap_records_current_slot_without_an_immediate_second_fetch(self):
         self.now = self.session.opened
+        # The earlier bootstrap completed only the pre-open slot. Opening
+        # needs its own fetch; once that finishes it must not repeat.
+        self.assertTrue(self.scheduler.due())
+        self.universe.bootstrap()
+        self.service.top_volume.assert_called_once_with(Market.US, 100)
+        self.service.top_volume.reset_mock()
         self.scheduler.record_bootstrap()
         self.assertFalse(self.scheduler.due())
         self.assertFalse(self.scheduler.tick())

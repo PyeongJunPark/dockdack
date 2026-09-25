@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 import tempfile
 from decimal import Decimal as D
@@ -19,12 +20,14 @@ HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     from PySide6.QtCore import QTimer, Qt
     from PySide6.QtWidgets import QApplication, QLabel
-    from dockdack.v00_app import DesktopModelBridge, V00Window
+    from dockdack.v00_app import (DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER,
+                                 MARK11_TRIGGER, MARK12_TRIGGER, V00Window)
     from dockdack.v00_widgets import OrderToast, SourceList
 
-from dockdack.models import AccountSnapshot, Market, TradingMode
+from dockdack.history import DailyHistory
+from dockdack.models import AccountSnapshot, Market, Quote, TradingMode
 from dockdack.portfolio import PortfolioMarketState
-from dockdack.watchlist import WatchItem, WatchStore
+from dockdack.watchlist import MarketSnapshot, WatchItem, WatchStore
 from test_autotrade import FakeTradingService, position
 from test_lstm30_adapter import NOW, chart, prediction
 
@@ -80,6 +83,9 @@ class V00GuiTests(unittest.TestCase):
     def test_default_ten_percent_and_off_without_any_broker_read_or_order(self):
         from dockdack.version import APP_RELEASE
         self.assertIn(APP_RELEASE, self.window.message.text())
+        self.assertIn('개장 10분 전 / 개장 / 매 정시', self.window.hourly_ranking.text())
+        self.assertIn('거래량 TOP100', self.window.ranking_button.text())
+        self.assertIn('09:30', self.window.hourly_ranking.toolTip())
         self.assertTrue(any(f'DOCKDACK  ver {APP_RELEASE}' == widget.text()
                             for widget in self.window.findChildren(QLabel)))
         self.assertEqual(self.window.buy_percent.value(), 10)
@@ -136,6 +142,110 @@ class V00GuiTests(unittest.TestCase):
         self.assertIsNone(self.window.test_producer)
         self.assertEqual(set(self.window.engine.external_sources), {"custom-main"})
         self.assertEqual(self.window.engine.equity_buy_percent, D("17.25"))
+
+    def _score_snapshot(self, *, price='100', fetched_at=NOW):
+        inst = self.item.instrument
+        quote = Quote(inst.market, inst.symbol, self.item.name, inst.exchange, D(price), inst.currency)
+        history = DailyHistory(inst.market, inst.symbol, inst.exchange, inst.currency, 0, ())
+        return MarketSnapshot(quote, history, fetched_at)
+
+    def _score_feeds(self, *, mark1='0.638', mark11='0.412', mark12=None):
+        feeds = {}
+        decisions = [(MARK1_TRIGGER, mark1, 'PREDICTED_DAILY_BARRIER_SUCCESS'),
+                     (MARK11_TRIGGER, mark11, 'BELOW_OR_EQUAL_BUY_THRESHOLD')]
+        if mark12 is not None:
+            decisions.append((MARK12_TRIGGER, mark12, 'PREDICTED_DAILY_BARRIER_SUCCESS'))
+        for model, probability, reason in decisions:
+            check = self.window.external_model_checks[model]
+            check.blockSignals(True)
+            check.setChecked(True)
+            check.blockSignals(False)
+            diagnostics = {}
+            def publish(exported, *, data=diagnostics, value=probability, result=reason):
+                stock = exported['stocks'][0]
+                data[stock['watch_id']] = {
+                    'watch_id': stock['watch_id'], 'reason': result,
+                    'reference_price': stock['price'],
+                    'prediction': {'probability_success': value}}
+            feeds[model] = SimpleNamespace(source_id=model, diagnostics=diagnostics, status=model + ' connected',
+                                           _ready=True, publish=Mock(side_effect=publish), close=Mock())
+        self.window._prototype_feeds = feeds
+        self.window.test_producer = ExternalFeedGroup(feeds)
+        return feeds
+
+    def test_model_scores_show_distinct_buy_and_hold_after_each_symbol_progress(self):
+        feeds = self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertIn('MK1 추정확률', table.horizontalHeaderItem(4).text())
+        self.assertIn('MK1.1 추정확률', table.horizontalHeaderItem(5).text())
+        self.assertEqual(table.item(0, 4).text(), '매수 판정\n63.8%')
+        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertIn('현재가 100 KRW', self.window.model_score_summary.text())
+        self.assertIn('63.8%', self.window.model_score_summary.text())
+        self.assertIn('41.2%', self.window.model_score_summary.text())
+        self.assertIn('조회', table.item(0, 4).toolTip())
+        self.assertIn('실제 적중률·수익률 보장 아님', table.item(0, 4).toolTip())
+        other = WatchItem(self.service.resolve('000660'), 'SK하이닉스')
+        self.store.save_item(other)
+        self.window.reload_tables(items=self.store.items(), rules=[])
+        self.assertEqual(table.item(self.window._watch_rows[self.item.id], 4).text(), '매수 판정\n63.8%')
+        self.assertIn('현재가 없음', table.item(self.window._watch_rows[other.id], 4).text())
+        self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1])
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_third_model_score_is_distinct_and_hides_stale_quote(self):
+        feeds = self._score_feeds(mark12='0.552')
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertIn('MK1.2 추정확률', table.horizontalHeaderItem(6).text())
+        self.assertEqual(table.item(0, 4).text(), '매수 판정\n63.8%')
+        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertEqual(table.item(0, 6).text(), '매수 판정\n55.2%')
+        self.assertIn('55.2%', self.window.model_score_summary.text())
+        self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
+        self.assertIn('재판단 대기', table.item(0, 6).text())
+        self.assertNotIn('55.2%', self.window.model_score_summary.text())
+        self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1, 1])
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_model_score_hides_old_unmatched_and_invalid_probabilities(self):
+        feeds = self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertIn('63.8%', table.item(0, 4).text())
+        self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
+        self.assertIn('재판단 대기', table.item(0, 4).text())
+        self.assertNotIn('63.8%', self.window.model_score_summary.text())
+        self.window._progress((self.item.id, ValueError('quote unavailable'), 1, 1))
+        self.assertIn('시세 오류', table.item(0, 4).text())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        self.window.engine.clock = lambda: NOW + timedelta(seconds=16)
+        self.window._refresh_model_scores()
+        self.assertIn('이전 시세', table.item(0, 4).text())
+        self.window.engine.clock = lambda: NOW
+        feeds[MARK1_TRIGGER].diagnostics[self.item.id]['prediction']['probability_success'] = 'NaN'
+        self.window._refresh_model_scores()
+        self.assertIn('판단 불가', table.item(0, 4).text())
+        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertFalse(self.service.submitted)
+
+    def test_failed_one_model_clears_its_score_without_erasing_other_model(self):
+        feeds = self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        feeds[MARK1_TRIGGER].publish.side_effect = RuntimeError('model child stopped')
+        self.window.test_producer.publish(chart())
+        self.window._refresh_model_scores()
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertIn('판단 불가', table.item(0, 4).text())
+        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertFalse(self.service.submitted)
 
     def test_duplicate_sources_and_output_as_input_are_rejected_without_orders(self):
         for source, path in ((self.window.external_source.text(), self.folder / "another.json"),

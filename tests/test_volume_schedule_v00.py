@@ -1,6 +1,6 @@
 """Offline contract tests for exchange-scoped, durable volume TOP100 refreshes."""
 
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import tempfile
@@ -112,7 +112,7 @@ class RankingBoundaryTests(unittest.TestCase):
         self.assertEqual(next(summer.slots()).astimezone(seoul).strftime("%H:%M"), "22:20")
         self.assertEqual(next(winter.slots()).astimezone(seoul).strftime("%H:%M"), "23:20")
         half = session_on(Market.US, date(2026, 11, 27))
-        self.assertEqual([x.strftime("%H:%M") for x in half.slots()], ["09:20", "10:00", "11:00", "12:00"])
+        self.assertEqual([x.strftime("%H:%M") for x in half.slots()], ["09:20", "09:30", "10:00", "11:00", "12:00"])
         self.assertEqual(ranking_slot(Market.US, half.closed-timedelta(seconds=1)).hour, 12)
         self.assertIsNone(ranking_slot(Market.US, half.closed))
 
@@ -139,6 +139,83 @@ class DurableScheduleTests(unittest.TestCase):
         self.assertTrue(self.scheduler.tick())
         self.assertFalse(self.scheduler.tick())
         self.assertEqual(self.service.top_volume.call_count, 3)
+
+    def test_us_preopen_done_does_not_skip_actual_open_with_dst_or_halfday(self):
+        for day in (date(2026, 9, 24), date(2026, 11, 27), date(2026, 11, 30)):
+            with self.subTest(day=day):
+                session = session_on(Market.US, day)
+                self.now = session.opened - timedelta(minutes=10)
+                before = self.service.top_volume.call_count
+                self.assertTrue(self.scheduler.tick())
+                self.now = session.opened - timedelta(microseconds=1)
+                self.assertFalse(self.scheduler.due())
+                self.now = session.opened
+                self.assertEqual(ranking_slot(Market.US, self.now), session.opened)
+                self.assertTrue(self.scheduler.due())
+                self.assertTrue(self.scheduler.tick())
+                self.assertFalse(self.scheduler.tick())
+                restarted = RankingScheduler(self.service, self.store, clock=lambda: self.now)
+                restarted.start()
+                self.assertFalse(restarted.tick())
+                self.now = session.opened + timedelta(minutes=12)
+                self.assertFalse(restarted.due())
+                self.now = session.opened.replace(hour=10, minute=0)
+                self.assertTrue(restarted.tick())
+                self.assertEqual(self.service.top_volume.call_count - before, 3)
+                self.assertEqual(list(session.slots()).count(session.opened), 1)
+
+    def test_us_start_after_open_catches_open_slot_even_when_preopen_done(self):
+        session = session_on(Market.US, date(2026, 9, 24))
+        self.now = session.opened - timedelta(minutes=10)
+        self.assertTrue(self.scheduler.tick())
+        self.now = session.opened + timedelta(minutes=9)
+        restarted = RankingScheduler(self.service, self.store, clock=lambda: self.now)
+        restarted.start()
+        self.assertTrue(restarted.due())
+        self.assertTrue(restarted.tick())
+        self.assertEqual(self.service.top_volume.call_count, 2)
+        with self.store.connection() as db:
+            rows = db.execute("SELECT slot,status FROM ranking_runs WHERE market='us' ORDER BY slot").fetchall()
+        self.assertEqual([row[1] for row in rows], ['done', 'done'])
+        self.assertEqual(rows[-1][0], session.opened.astimezone(timezone.utc).isoformat())
+
+    def test_preopen_response_crossing_open_never_overwrites_newer_slot(self):
+        session = session_on(Market.US, date(2026, 9, 24))
+        self.now = session.opened - timedelta(minutes=1)
+        def delayed(market, limit):
+            self.now = session.opened + timedelta(seconds=1)
+            return ranks(market)
+        self.service.top_volume.side_effect = delayed
+        self.assertFalse(self.scheduler.tick())
+        self.assertEqual(self.store.items(), ())
+        self.assertFalse(self.scheduler.errors)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM ranking_runs WHERE market='us'").fetchone()[0], 'superseded')
+        self.service.top_volume.side_effect = lambda market, limit: ranks(market)
+        self.assertTrue(self.scheduler.due())
+        self.assertTrue(self.scheduler.tick())
+        self.assertEqual(len(self.store.items()), 100)
+
+    def test_superseded_preopen_is_not_a_legacy_order_disarming_error(self):
+        session = session_on(Market.US, date(2026, 9, 24))
+        self.now = session.opened - timedelta(minutes=1)
+        universe = LSTM30Universe(self.service, self.store, ranked_markets=(Market.US,),
+                                  baseline_items=(), clock=lambda: self.now)
+        errors = Mock()
+        scheduler = ScopedRankingScheduler(self.service, self.store, universe=universe,
+                                           clock=lambda: self.now, on_error=errors)
+        scheduler.start()
+        def delayed(market, limit):
+            self.now = session.opened + timedelta(seconds=1)
+            return ranks(market)
+        self.service.top_volume.side_effect = delayed
+        self.assertFalse(scheduler.tick())
+        errors.assert_not_called()
+        self.assertFalse(scheduler.errors)
+        self.service.top_volume.side_effect = lambda market, limit: ranks(market)
+        self.assertTrue(scheduler.due())
+        self.assertTrue(scheduler.tick())
+        errors.assert_not_called()
 
     def test_restart_retains_dedupe_and_mid_hour_recovers_missing_slot(self):
         self.assertTrue(self.scheduler.tick())
