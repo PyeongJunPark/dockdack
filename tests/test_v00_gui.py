@@ -143,9 +143,10 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(set(self.window.engine.external_sources), {"custom-main"})
         self.assertEqual(self.window.engine.equity_buy_percent, D("17.25"))
 
-    def _score_snapshot(self, *, price='100', fetched_at=NOW):
-        inst = self.item.instrument
-        quote = Quote(inst.market, inst.symbol, self.item.name, inst.exchange, D(price), inst.currency)
+    def _score_snapshot(self, *, item=None, price='100', fetched_at=NOW):
+        item = item or self.item
+        inst = item.instrument
+        quote = Quote(inst.market, inst.symbol, item.name, inst.exchange, D(price), inst.currency)
         history = DailyHistory(inst.market, inst.symbol, inst.exchange, inst.currency, 0, ())
         return MarketSnapshot(quote, history, fetched_at)
 
@@ -196,7 +197,7 @@ class V00GuiTests(unittest.TestCase):
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
 
-    def test_third_model_score_is_distinct_and_hides_stale_quote(self):
+    def test_third_model_score_is_distinct_and_keeps_last_valid_probability(self):
         feeds = self._score_feeds(mark12='0.552')
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
@@ -206,36 +207,43 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
         self.assertEqual(table.item(0, 6).text(), '매수 판정\n55.2%')
         self.assertIn('55.2%', self.window.model_score_summary.text())
+        self.assertIn('53.4%', self.window.latest_model_summary.text())
         self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
-        self.assertIn('재판단 대기', table.item(0, 6).text())
-        self.assertNotIn('55.2%', self.window.model_score_summary.text())
+        self.assertIn('55.2%', table.item(0, 6).text())
+        self.assertIn('최근 추정', table.item(0, 6).text() + table.item(0, 6).toolTip())
+        self.assertIn('100 KRW', table.item(0, 6).toolTip())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertIn('0/3', self.window.latest_model_summary.text())
+        self.assertNotIn('53.4%', self.window.latest_model_summary.text())
         self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1, 1])
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
 
-    def test_model_score_hides_old_unmatched_and_invalid_probabilities(self):
+    def test_model_score_keeps_last_valid_across_quote_error_age_and_invalid_result(self):
         feeds = self._score_feeds()
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
         self.assertIn('63.8%', table.item(0, 4).text())
         self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
-        self.assertIn('재판단 대기', table.item(0, 4).text())
-        self.assertNotIn('63.8%', self.window.model_score_summary.text())
+        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('최근 추정', table.item(0, 4).text() + table.item(0, 4).toolTip())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
         self.window._progress((self.item.id, ValueError('quote unavailable'), 1, 1))
-        self.assertIn('시세 오류', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 4).text())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         self.window.engine.clock = lambda: NOW + timedelta(seconds=16)
         self.window._refresh_model_scores()
-        self.assertIn('이전 시세', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('조회', table.item(0, 4).toolTip())
         self.window.engine.clock = lambda: NOW
         feeds[MARK1_TRIGGER].diagnostics[self.item.id]['prediction']['probability_success'] = 'NaN'
         self.window._refresh_model_scores()
-        self.assertIn('판단 불가', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 4).text())
         self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
         self.assertFalse(self.service.submitted)
 
-    def test_failed_one_model_clears_its_score_without_erasing_other_model(self):
+    def test_failed_one_model_keeps_its_last_valid_score_and_other_model(self):
         feeds = self._score_feeds()
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
@@ -243,9 +251,134 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._refresh_model_scores()
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('판단 불가', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 4).text())
         self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
         self.assertFalse(self.service.submitted)
+
+    def test_invalid_probability_without_prior_valid_score_is_not_displayed(self):
+        feeds = self._score_feeds(mark1='NaN')
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertNotIn('%', table.item(0, 4).text())
+        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertIn('1/2', self.window.latest_model_summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_latest_query_summary_requires_every_enabled_model_on_same_quote(self):
+        feeds = self._score_feeds(mark12='0.552')
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        summary = self.window.latest_model_summary
+        self.assertLess(self.window.layout().indexOf(summary),
+                        self.window.layout().indexOf(self.window.sweep_progress))
+        self.assertIn('005930', summary.text())
+        self.assertIn('53.4%', summary.text())  # (63.8 + 41.2 + 55.2) / 3
+        self.assertFalse(self.window.engine.orders_enabled)
+
+        self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
+        self.assertIn('평균 대기', summary.text())
+        self.assertIn('0/3', summary.text())
+        for index, (model, probability) in enumerate(((MARK1_TRIGGER, '0.700'),
+                                                      (MARK11_TRIGGER, '0.500'),
+                                                      (MARK12_TRIGGER, '0.900')), 1):
+            feeds[model].diagnostics[self.item.id] = {
+                'watch_id': self.item.id,
+                'reason': 'PREDICTED_DAILY_BARRIER_SUCCESS' if probability != '0.500' else 'BELOW_OR_EQUAL_BUY_THRESHOLD',
+                'reference_price': '101',
+                'prediction': {'probability_success': probability},
+                '_display_quote_fetched_at': NOW.isoformat(),
+                '_display_price': '101',
+            }
+            self.window._refresh_model_scores()
+            if index < 3:
+                self.assertIn('평균 대기', summary.text())
+                self.assertIn(f'{index}/3', summary.text())
+                self.assertNotIn('70.0%', summary.text())
+        self.assertIn('70.0%', summary.text())  # (70.0 + 50.0 + 90.0) / 3
+        self.assertNotIn('평균 대기', summary.text())
+
+        # An unchecked model must not count toward coverage or the arithmetic mean.
+        check = self.window.external_model_checks[MARK12_TRIGGER]
+        check.blockSignals(True)
+        check.setChecked(False)
+        check.blockSignals(False)
+        self.window._refresh_model_scores()
+        self.assertIn('60.0%', summary.text())  # (70.0 + 50.0) / 2
+        self.assertNotIn('평균 대기', summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_same_price_newer_quote_does_not_reuse_old_model_average(self):
+        feeds = self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        self.assertIn('52.5%', self.window.latest_model_summary.text())
+        refreshed = NOW + timedelta(seconds=1)
+        self.window.engine.clock = lambda: refreshed
+        self.window._progress((self.item.id, self._score_snapshot(fetched_at=refreshed), 1, 1))
+        self.assertIn('최근 추정', self.window.watch_tables[Market.DOMESTIC].item(0, 4).text())
+        self.assertIn('63.8%', self.window.watch_tables[Market.DOMESTIC].item(0, 4).text())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertIn('0/2', self.window.latest_model_summary.text())
+        for feed in feeds.values():
+            feed.diagnostics[self.item.id]['_display_quote_fetched_at'] = refreshed.isoformat()
+        self.window._refresh_model_scores()
+        self.assertIn('52.5%', self.window.latest_model_summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_latest_query_summary_ignores_selected_chart_and_failed_query(self):
+        self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 2))
+        other = WatchItem(self.service.resolve('000660'), 'SK하이닉스')
+        self.store.save_item(other)
+        self.window.reload_tables(items=self.store.items(), rules=[])
+        table = self.window.watch_tables[Market.DOMESTIC]
+        table.setCurrentCell(self.window._watch_rows[other.id], 0)
+        self.app.processEvents()
+        self.assertEqual(self.window.selected_item().id, other.id)
+        self.assertIn('005930', self.window.latest_model_summary.text())
+        self.assertIn('52.5%', self.window.latest_model_summary.text())
+        self.window._progress((other.id, ValueError('quote unavailable'), 2, 2))
+        self.assertIn('005930', self.window.latest_model_summary.text())
+        self.window._progress((other.id, self._score_snapshot(item=other, price='200'), 2, 2))
+        self.assertIn('000660', self.window.latest_model_summary.text())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertIn('0/2', self.window.latest_model_summary.text())
+        table.setCurrentCell(self.window._watch_rows[self.item.id], 0)
+        self.app.processEvents()
+        self.assertIn('000660', self.window.latest_model_summary.text())
+        american = WatchItem(self.service.resolve('AAPL'), 'Apple')
+        self.store.save_item(american)
+        self.window.reload_tables(items=self.store.items(), rules=[])
+        self.window._progress((american.id, self._score_snapshot(item=american, price='250'), 3, 3))
+        self.assertIn('AAPL', self.window.latest_model_summary.text())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+
+    def test_changing_model_connection_discards_old_display_scores_without_orders(self):
+        feeds = self._score_feeds()
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        table = self.window.watch_tables[Market.DOMESTIC]
+        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('52.5%', self.window.latest_model_summary.text())
+
+        # This is an actual user-level connection change, unlike the signal-blocked
+        # checkbox in the mean-only test. Old model scores must not cross it.
+        self.window.external_model_checks[MARK11_TRIGGER].setChecked(False)
+        self.window._refresh_model_scores()
+        self.assertNotIn('63.8%', table.item(0, 4).text())
+        self.assertIn('연결 꺼짐', table.item(0, 5).text())
+        self.assertIn('평균 대기', self.window.latest_model_summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.service.submitted)
+        self.assertTrue(all(feed.close.called for feed in feeds.values()))
 
     def test_duplicate_sources_and_output_as_input_are_rejected_without_orders(self):
         for source, path in ((self.window.external_source.text(), self.folder / "another.json"),

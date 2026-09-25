@@ -246,6 +246,10 @@ class V00Window(WatchlistDialog):
         self._mark12_bundle = mark12_bundle
         self._external_feed_factory = external_feed_factory
         self._prototype_feeds = {}
+        # Display history only. Neither external JSON nor order validation
+        # reads this cache; old probabilities cannot authorize a trade.
+        self._last_model_scores = {}
+        self._last_queried_watch_id = None
         super().__init__(service or TradingService(), store, defer_workspace=True, session_lock=session_lock)
         for view in self.watch_tables.values():
             view.setColumnCount(7)
@@ -260,6 +264,13 @@ class V00Window(WatchlistDialog):
         self.model_score_summary.setWordWrap(True)
         self.model_score_summary.setToolTip('MK1과 MK1.2는 +1%/−0.9%, MK1.1은 +0.5%/−0.4% 일봉 조건의 모델 추정값입니다. 모두 연구 검증 미통과.')
         self.chart_title.parentWidget().layout().insertWidget(1, self.model_score_summary)
+        self.latest_model_summary = QLabel('최근 조회 종목 — · 활성 외부 AI 모델 평균 대기')
+        self.latest_model_summary.setObjectName('latestModelSummary')
+        self.latest_model_summary.setAccessibleName('마지막 조회 종목과 활성 외부 AI 모델 추정확률 평균')
+        self.latest_model_summary.setWordWrap(True)
+        self.latest_model_summary.setStyleSheet('color: #aee4d4; font-weight: 600;')
+        self.latest_model_summary.setToolTip('같은 종목·같은 조회 시세에서 활성화된 모든 외부 prototype 모델이 판단했을 때만 산술평균을 표시합니다. 모델별 목표 조건이 달라 매매 판단에 쓰지 않습니다.')
+        self.layout().insertWidget(self.layout().indexOf(self.sweep_progress), self.latest_model_summary)
         self.health_timer.timeout.connect(self._refresh_model_scores)
         self._refresh_model_scores()
         # A disabled BUY feed must not change the ownership or exit policy of
@@ -338,60 +349,83 @@ class V00Window(WatchlistDialog):
         self.close_maintenance_timer.timeout.connect(self._close_wakeup)
         self.close_maintenance_timer.start()
 
-    def _model_score_display(self, model, item):
-        """GUI-only decision view; never a permission or order-wire input."""
-        title = PROTOTYPE_TITLES[model]
-        target = PROTOTYPE_TARGETS[model]
-        note = (f'{title} · {target} · 표시된 현재가 조회 시점의 일봉 기반 모델 추정확률입니다. '
-                '실제 적중률·수익률 보장 아님 / 연구 검증 미통과. '
-                '실제 주문 직전에는 새 시세로 재판단되며 주문 허용 여부와 다를 수 있습니다.')
-        checks = getattr(self, 'external_model_checks', {})
-        if model not in checks or not checks[model].isChecked():
-            return '연결 꺼짐', note + '\n이 모델은 연결되어 있지 않습니다.', '꺼짐'
+    def _current_model_score(self, model, item):
+        """Accept only a valid display diagnostic for this exact quote."""
         feed = self._prototype_feeds.get(model)
-        if feed is None:
-            return '판단 전', note + '\n외부 모델 연결 또는 첫 조회를 기다립니다.', '판단 전'
-        if item.id in self.errors:
-            return '시세 오류\n확률 —', note + '\n현재 시세 조회 오류: ' + str(self.errors[item.id]), '시세 오류'
         snapshot = self.snapshots.get(item.id)
-        if snapshot is None:
-            return '현재가 없음\n확률 —', note + '\n현재가 조회 전입니다.', '현재가 없음'
-        age = (self.engine.clock() - snapshot.fetched_at).total_seconds()
-        fetched = snapshot.fetched_at.astimezone().strftime('%m/%d %H:%M:%S')
-        quote = f'{snapshot.quote.price} {item.instrument.currency}'
-        context = f'\n판단 기준 현재가 {quote} · 조회 {fetched}'
-        if not 0 <= age <= MAX_QUOTE_AGE or item.id not in self.fresh_ids:
-            return '이전 시세\n확률 —', note + context + '\n15초 이내의 새 시세가 없어 예전 모델 점수를 숨겼습니다.', '이전 시세'
+        if (feed is None or not getattr(feed, '_ready', True) or snapshot is None
+                or item.id in self.errors):
+            return None
         row = feed.diagnostics.get(item.id)
-        if not isinstance(row, dict):
-            return '판단 전\n확률 —', note + context + '\n이 시세의 모델 판단이 아직 없습니다.', '판단 전'
-        if (row.get('_display_quote_fetched_at') != snapshot.fetched_at.isoformat()
+        if (not isinstance(row, dict) or row.get('error')
+                or row.get('_display_quote_fetched_at') != snapshot.fetched_at.isoformat()
                 or row.get('_display_price') != str(snapshot.quote.price)):
-            return '재판단 대기\n확률 —', note + context + '\n모델 판단과 현재가의 시각·가격이 일치하지 않습니다.', '재판단 대기'
-        reason = row.get('reason', '')
+            return None
+        reason = row.get('reason')
+        if reason not in {'PREDICTED_DAILY_BARRIER_SUCCESS', 'BELOW_OR_EQUAL_BUY_THRESHOLD',
+                          'USER_QUANTITY_OR_NOTIONAL_CAP', 'QUOTE_EXPIRED_DURING_INFERENCE'}:
+            return None
         prediction = row.get('prediction')
-        if not isinstance(prediction, dict) or row.get('error'):
-            state = '보유 중' if reason == 'POSITION_EXIT_MANAGED_BY_GUI' else '판단 불가'
-            return state + '\n확률 —', note + context + '\n' + str(row.get('error') or reason), state
+        if not isinstance(prediction, dict):
+            return None
         try:
             value = prediction.get('probability_success')
             if isinstance(value, bool):
-                raise ValueError('Boolean is not a probability')
+                return None
             probability = Decimal(str(value))
             reference_price = Decimal(str(row.get('reference_price')))
-            if not probability.is_finite() or not 0 <= probability <= 1 or reference_price != snapshot.quote.price:
-                raise ValueError('Prediction and quote do not match')
+            if (not probability.is_finite() or not 0 <= probability <= 1
+                    or reference_price != snapshot.quote.price
+                    or (reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' and probability <= Decimal('0.5'))
+                    or (reason == 'BELOW_OR_EQUAL_BUY_THRESHOLD' and probability > Decimal('0.5'))):
+                return None
         except (InvalidOperation, TypeError, ValueError):
-            return '판단 불가\n확률 —', note + context + '\n유효한 모델 추정값을 확인하지 못했습니다.', '판단 불가'
-        if reason in {'QUOTE_OR_POSITION_UNAVAILABLE', 'PREDICTION_UNAVAILABLE',
-                      'QUOTE_EXPIRED_DURING_INFERENCE', 'POSITION_EXPIRED_DURING_INFERENCE',
-                      'MARK1_UNAVAILABLE', 'MODEL_RESULT_UNAVAILABLE', 'MODEL_DELIVERY_UNAVAILABLE'}:
-            return '판단 불가\n확률 —', note + context + '\n' + reason, '판단 불가'
-        if reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' and probability <= Decimal('0.5'):
-            return '판단 불가\n확률 —', note + context + '\n모델 확률과 매수 판정이 일치하지 않습니다.', '판단 불가'
-        decision = '매수 판정' if reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '대기'
-        pct = f'{probability:.1%}'
-        return f'{decision}\n{pct}', note + context + f'\n{decision} · 추정 성공확률 {pct} · 사유 {reason}', f'{decision} {pct}'
+            return None
+        score = {'probability': probability, 'price': reference_price,
+                 'fetched_at': snapshot.fetched_at, 'reason': reason}
+        self._last_model_scores[(model, item.id)] = score
+        return score
+
+    def _model_score_display(self, model, item):
+        """Keep the last valid display score; execution still uses fresh quotes."""
+        title = PROTOTYPE_TITLES[model]
+        target = PROTOTYPE_TARGETS[model]
+        note = (f'{title} · {target} · 일봉 기반 모델 추정확률이며 실제 적중률·수익률 보장 아님. '
+                '연구 검증 미통과. 과거 표시값은 매매 판단에 사용하지 않고 주문 직전 새 시세로 재판단합니다.')
+        checks = getattr(self, 'external_model_checks', {})
+        if model not in checks or not checks[model].isChecked():
+            return '연결 꺼짐', note + '\n이 모델은 연결되어 있지 않습니다.', '꺼짐'
+        current = self._current_model_score(model, item)
+        snapshot = self.snapshots.get(item.id)
+        if current is not None and snapshot is not None:
+            age = (self.engine.clock() - snapshot.fetched_at).total_seconds()
+            if (0 <= age <= MAX_QUOTE_AGE and item.id in self.fresh_ids
+                    and current['reason'] != 'QUOTE_EXPIRED_DURING_INFERENCE'):
+                decision = '매수 판정' if current['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '대기'
+                pct = f"{current['probability']:.1%}"
+                context = (f"\n판단 기준 현재가 {current['price']} {item.instrument.currency}"
+                           f" · 조회 {current['fetched_at'].astimezone():%m/%d %H:%M:%S}")
+                return (f'{decision}\n{pct}',
+                        note + context + f"\n{decision} · 추정 성공확률 {pct} · 사유 {current['reason']}",
+                        f'{decision} {pct}')
+        saved = self._last_model_scores.get((model, item.id))
+        if saved is not None:
+            pct = f"{saved['probability']:.1%}"
+            prior_time = saved['fetched_at'].astimezone().strftime('%m/%d %H:%M:%S')
+            context = (f"마지막 판단 {prior_time}"
+                       f" · 당시 현재가 {saved['price']} {item.instrument.currency}")
+            return (f'최근 추정\n{pct}', note + '\n' + context
+                    + '\n이전 조회값 · 현재 시세의 매수 판정이나 주문 허가가 아닙니다.',
+                    f"최근 {pct} ({saved['price']} {item.instrument.currency} · {prior_time} 기준)")
+        if item.id in self.errors:
+            return '시세 오류\n확률 —', note + '\n현재 시세 조회 오류: ' + str(self.errors[item.id]), '시세 오류'
+        if snapshot is None:
+            return '현재가 없음\n확률 —', note + '\n현재가 조회 전입니다.', '현재가 없음'
+        row = getattr(self._prototype_feeds.get(model), 'diagnostics', {}).get(item.id)
+        state = ('보유 중' if isinstance(row, dict) and row.get('reason') == 'POSITION_EXIT_MANAGED_BY_GUI'
+                 else '판단 불가' if isinstance(row, dict) and (row.get('error') or row.get('prediction'))
+                 else '판단 전')
+        return f'{state}\n확률 —', note + f'\n현재가 {snapshot.quote.price} {item.instrument.currency} · 이 시세의 유효한 모델 확률이 없습니다.', state
 
     def _watch_values(self, item):
         return (*super()._watch_values(item),
@@ -419,6 +453,34 @@ class V00Window(WatchlistDialog):
         for key in tuple(getattr(self, '_watch_rows', ())):
             self._update_model_score_row(key)
         self._update_selected_model_scores()
+        self._update_latest_model_summary()
+
+    def _update_latest_model_summary(self):
+        """Global display of the last queried symbol, never an order gate."""
+        if not hasattr(self, 'latest_model_summary'):
+            return
+        item = getattr(self, '_items_by_id', {}).get(self._last_queried_watch_id)
+        snapshot = self.snapshots.get(self._last_queried_watch_id)
+        if item is None or snapshot is None:
+            self.latest_model_summary.setText('최근 조회 종목 — · 활성 외부 AI 모델 평균 대기')
+            return
+        stamp = snapshot.fetched_at.astimezone().strftime('%m/%d %H:%M:%S')
+        prefix = (f'마지막 조회 {item.name or item.instrument.symbol} ({item.instrument.symbol}) · {stamp}'
+                  f' · 당시가 {snapshot.quote.price} {item.instrument.currency}')
+        models = self._chosen_external_models()
+        if not models:
+            self.latest_model_summary.setText(prefix + ' · 활성 외부 AI 모델 없음')
+            return
+        scores = [self._current_model_score(model, item) for model in models]
+        available = [score for score in scores if score is not None]
+        if len(available) != len(models):
+            self.latest_model_summary.setText(
+                prefix + f' · 모델 단순 평균 대기 ({len(available)}/{len(models)}개 결과)')
+            return
+        average = sum((score['probability'] for score in available), Decimal(0)) / Decimal(len(models))
+        self.latest_model_summary.setText(
+            prefix + f' · 활성 모델 단순 평균 {average:.1%} ({len(models)}/{len(models)})'
+            + ' · 목표 조건 상이·매매 판단에 사용 안 함')
 
     def _update_selected_model_scores(self):
         if not hasattr(self, 'model_score_summary'):
@@ -446,6 +508,11 @@ class V00Window(WatchlistDialog):
 
     def reload_tables(self, *, items=None, rules=None):
         super().reload_tables(items=items, rules=rules)
+        valid_ids = set(getattr(self, '_items_by_id', {}))
+        self._last_model_scores = {key: score for key, score in self._last_model_scores.items()
+                                   if key[1] in valid_ids}
+        if self._last_queried_watch_id not in valid_ids:
+            self._last_queried_watch_id = None
         self._refresh_model_scores()
 
     def _move_legacy_settings(self):
@@ -563,6 +630,7 @@ class V00Window(WatchlistDialog):
         for feed in self._prototype_feeds.values():
             feed.close()
         self._prototype_feeds = {}
+        self._last_model_scores.clear()
 
     @property
     def builtin_confirmation_notice(self):
@@ -606,7 +674,11 @@ class V00Window(WatchlistDialog):
                 f"주문 기록 {len(status.get('attempts', ()))}건 · 오류 {len(status.get('errors', ()))}건 · 접수는 체결이 아님")
             self.close_liquidation_label.setToolTip(str(status))
             return
-        return super()._progress(data)
+        result = super()._progress(data)
+        if len(data) == 4 and not isinstance(data[1], Exception):
+            self._last_queried_watch_id = data[0]
+            self._update_latest_model_summary()
+        return result
 
     def _label_inputs(self):
         for name, text in {
@@ -720,6 +792,8 @@ class V00Window(WatchlistDialog):
         before = self.service
         super()._finish_environment_switch()
         if self.service is not before:
+            self._last_model_scores.clear()
+            self._last_queried_watch_id = None
             self.external_quantity.setValue(999999999)
             self._apply_execution_preferences()
             self.close_all_at_market_end.blockSignals(True)
@@ -727,6 +801,7 @@ class V00Window(WatchlistDialog):
             self.close_all_at_market_end.setEnabled(selected_mode(self.service) is TradingMode.DEMO)
             self.close_all_at_market_end.blockSignals(False)
             self._configure_close_policy()
+            self._refresh_model_scores()
 
     def update_controls(self):
         super().update_controls()
