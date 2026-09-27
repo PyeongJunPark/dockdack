@@ -514,7 +514,13 @@ class LSTM30GuiTests(unittest.TestCase):
         self.service.top_volume.return_value = ranked_common_stocks(101)
         window.lstm_universe.refresh(Market.US)
         window.engine._ensure_environment()
-        window.store.save_item(WatchItem(Instrument(Market.US, "FOREIGN", "ND"), "Not approved", 31))
+        foreign = WatchItem(Instrument(Market.US, "FOREIGN", "ND"), "Not approved", 31)
+        with self.assertRaisesRegex(ValueError, "TOP100"):
+            window.store.save_item(foreign)
+        # An out-of-band writer is still detected by the engine's allowlist.
+        with window.store.connection() as db:
+            db.execute("INSERT INTO watchlist VALUES(?,?,?,?,?,?,1)",
+                       (foreign.id, "us", "FOREIGN", "ND", "Not approved", 31))
         with self.assertRaises(ValueError):
             window.engine._ensure_environment(orders=True)
         self.assertFalse(window.engine.orders_enabled)

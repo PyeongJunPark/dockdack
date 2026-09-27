@@ -535,6 +535,34 @@ class AutoTrader:
                 self._message(attempt["rule_id"] + ":unfilled", item.id,
                               f"접수 후 체결 확인 대기 · 주문번호 {attempt['order_number']} · 이번 조회에 주문 행 없음(체결 실패 확정 아님), 중복 재주문하지 않음", category="order")
 
+    def _reconcile_inactive_pending(self):
+        """Keep checking old orders after a stock leaves the TOP100 watchlist.
+
+        Ranking changes only stop new entry scans. They must not hide an
+        accepted, unknown or in-flight order from the existing safety path.
+        This method never submits or cancels an order.
+        """
+        with self.store.connection() as db:
+            rows = db.execute(
+                """SELECT DISTINCT w.* FROM watchlist w
+                   JOIN attempts a ON a.watch_id=w.id
+                   WHERE w.active=0 AND a.status IN ('submitting','unknown','accepted')
+                   ORDER BY w.rowid"""
+            ).fetchall()
+        for row in rows:
+            if self._stop.is_set():
+                return
+            try:
+                item = WatchItem(Instrument(Market(row["market"]), row["symbol"], row["exchange"]),
+                                 row["name"], row["days"])
+                if self.session_only_poll and not regular_session(item.instrument.market, self.clock()):
+                    continue
+                self._ensure_environment(item.instrument)
+                self._reconcile(item)
+            except Exception as exc:
+                self._message(row["id"] + ":inactive-order", row["id"],
+                              f"순위 밖 종목 주문 확인 보류: {exc}", category="order")
+
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
         self._lot_sellable_checks.pop(rule.id, None)
         self._historical_sell_checks.pop(rule.id, None)
@@ -1054,6 +1082,7 @@ class AutoTrader:
             priority = getattr(self, 'poll_priority_watch_ids', None)
             priority_ids = frozenset(priority()) if priority is not None else frozenset()
             items = {item.id: item for item in ordered_items()}
+            self._reconcile_inactive_pending()
             deferred_sells = []
             remaining, seen_external, sent = list(items), set(), set()
             if self.enable_holdings_exits and not self._stop.is_set():

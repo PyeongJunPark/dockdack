@@ -282,7 +282,7 @@ class EnvironmentGuiTests(unittest.TestCase):
             texts = [label.text() for label in view.findChildren(QLabel)]
             self.assertFalse(any("모의계좌" in text for text in texts), texts)
             self.assertTrue(any("실전" in text or "실제투자" in text for text in texts), texts)
-        self.assertIn("REAL", self.window.trade_journal_panel.mode_badge.text())
+        self.assertEqual(self.window.trade_journal_panel.mode_badge.text(), "실전")
 
     def seed_displayed_demo_logs(self):
         views = {**self.window.operations_panel.logs, "order": self.window.order_history_panel.audit}
@@ -344,8 +344,8 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertIn("3/10종목", progress.text())
         self.assertIn("30%", progress.text())
         self.assertIn("체결", progress.toolTip())
-        self.assertIs(self.window.workspace_tabs.widget(2), self.window.trade_journal_panel)
-        self.assertEqual(self.window.workspace_tabs.tabText(2), "매매일지")
+        self.assertIs(self.window.workspace_tabs.widget(1), self.window.trade_journal_panel)
+        self.assertEqual(self.window.workspace_tabs.tabText(1), "매매일지")
         self.assertEqual(self.window.trade_journal_panel.market_tabs.count(), 2)
 
     def test_real_warning_defaults_no_and_warns_about_money_and_existing_orders(self):

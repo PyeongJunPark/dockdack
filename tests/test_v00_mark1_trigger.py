@@ -99,7 +99,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.external_grid.indexOf(self.window.additional_sources), -1)
         self.assertTrue(self.window.advanced_mode_panel.isAncestorOf(self.window.model_trigger))
         self.assertTrue(self.window.advanced_sources_panel.isAncestorOf(self.window.additional_sources))
-        self.assertFalse(self.window.workspace_tabs.isTabVisible(self.window.workspace_tabs.indexOf(self.window.tabs)))
+        self.assertTrue(self.window.workspace_tabs.isTabVisible(self.window.workspace_tabs.indexOf(self.window.tabs)))
         self.assertTrue(self.window.mark14_panel.isAncestorOf(self.window.external_model_checks[MARK1_TRIGGER]))
         self.assertFalse(self.window.builtin_lstm.isVisible())
         self.assertEqual(self.window.external_source.text(), 'external-model')

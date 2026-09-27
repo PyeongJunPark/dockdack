@@ -42,7 +42,10 @@ class WatchGuiTests(unittest.TestCase):
         self.service = FakeTradingService()
         self.item = WatchItem(self.service.resolve("005930"), "삼성전자")
         self.store.save_item(self.item)
-        self.window = WatchlistDialog(self.service, self.store)
+        # Legacy dialogs without a session lock must not mutate a shared
+        # account's persisted ranking merely by opening a window.
+        with patch.object(self.store, "prune_ranked_extras", side_effect=AssertionError("needs lock")):
+            self.window = WatchlistDialog(self.service, self.store)
         # These legacy interaction tests use fixed one-share rules. Percentage
         # sizing is covered with complete valuation fixtures in v0.0 tests.
         self.window.percent_sizing.setChecked(False)
@@ -89,9 +92,19 @@ class WatchGuiTests(unittest.TestCase):
         self.wait_idle()
         self.assertEqual(len(self.window.chart.bars), 30)
         self.assertEqual(self.window.bar_table.rowCount(), 30)
-        self.assertIn("100 KRW", self.window.watch_table.item(0, 1).text())
+        price_cell = self.window.watch_table.item(0, 1)
+        self.assertEqual(price_cell.text(), '100')
+        self.assertIn('100 KRW', price_cell.toolTip())
+        self.assertEqual(price_cell.textAlignment() & Qt.AlignmentFlag.AlignRight,
+                         Qt.AlignmentFlag.AlignRight)
+        self.assertNotIn('\n', price_cell.text())
+        self.assertEqual(self.window.chart_title.text(), self.item.instrument.symbol)
+        self.assertIn('30/30 거래일', self.window.chart_title.toolTip())
         self.assertEqual(self.service.submitted, [])
-        self.window.chart.grab()  # Exercise the actual painter, including constant close values.
+        image = self.window.chart.grab().toImage()  # Painter still draws bars and OHLCV hover details.
+        backdrop = image.pixelColor(20, 10)
+        self.assertEqual(backdrop.name(), '#101724')  # No overlay prose inside the chart.
+        self.assertEqual(image.pixelColor(80, 10), backdrop)
 
     def test_add_and_persist_interest_then_change_n_days(self):
         self.window.symbol_input.setText("AAPL")
@@ -144,8 +157,9 @@ class WatchGuiTests(unittest.TestCase):
         self.service.fail_history = True
         self.window.refresh_all()
         self.wait_idle()
-        self.assertIn("조회 실패", self.window.watch_table.item(0, 3).text())
-        self.assertIn("이전 조회값", self.window.chart_title.text())
+        self.assertIn("조회 실패", self.window.watch_table.item(0, 2).text())
+        self.assertEqual(self.window.chart_title.text(), self.item.instrument.symbol)
+        self.assertIn("이전 조회값", self.window.chart_title.toolTip())
         self.assertEqual(self.service.submitted, [])
 
     def test_edit_controls_disable_while_monitoring_but_stop_remains_available(self):
@@ -204,24 +218,26 @@ class WatchGuiTests(unittest.TestCase):
             return tuple(RankedStock(market, f"S{i}", "ND", f"Common {i}", i+1,
                                      Decimal(100), "USD", 1000-i, "volume") for i in range(100))
         self.service.top_volume = ranked
-        self.service.protected_symbols = lambda market: {"100000"}  # Held outside ranks is not a buy interest.
+        def reject_account_lookup(market):
+            raise AssertionError("TOP100 selection must not request account protection")
+        self.service.protected_symbols = reject_account_lookup
         self.window.ranking_button.click()
         self.wait_idle()
         self.assertEqual(calls, [Market.DOMESTIC])
-        self.assertEqual(len(self.store.items()), 101)
+        self.assertEqual(len(self.store.items()), 100)
         self.assertEqual(self.window.watch_tables[Market.US].rowCount(), 0)
         start = 200000
         self.window.ranking_button.click()
         self.wait_idle()
-        self.assertEqual(len(self.store.items()), 101)
+        self.assertEqual(len(self.store.items()), 100)
         self.assertNotIn("100000", {item.instrument.symbol for item in self.store.items()})
-        self.assertIn("005930", {item.instrument.symbol for item in self.store.items()})
+        self.assertNotIn("005930", {item.instrument.symbol for item in self.store.items()})
         self.window.engine.clock = lambda: datetime(2026, 9, 14, 14, tzinfo=timezone.utc)
         self.window.ranking_button.click()
         self.wait_idle()
         self.assertEqual(calls, [Market.DOMESTIC, Market.DOMESTIC, Market.US])
-        self.assertEqual(len(self.store.items()), 201)
-        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 101)
+        self.assertEqual(len(self.store.items()), 200)
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 100)
         self.assertEqual(self.window.watch_tables[Market.US].rowCount(), 100)
         self.assertEqual(self.service.submitted, [])
 
@@ -261,6 +277,36 @@ class WatchGuiTests(unittest.TestCase):
         self.wait_idle()
         self.assertTrue(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
+
+    def test_visible_order_badge_stops_monitoring_when_turned_off(self):
+        self.window.external_mode.setChecked(True)
+        self.window.external_krw.setValue(1000)
+        self.window.start_monitoring()
+        self.wait_idle()
+        with patch.object(self.window, 'confirm_automation', return_value=True):
+            self.window.mode_label.click()
+        self.wait_idle()
+        self.assertTrue(self.window.monitoring)
+        self.assertTrue(self.window.engine.orders_enabled)
+        self.assertEqual(self.window.mode_label.text(), '자동주문 ON')
+        self.window.mode_label.click()
+        self.assertFalse(self.window.monitoring)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.pending_auto_arm)
+        self.assertEqual(self.window.mode_label.text(), '자동주문 OFF')
+        self.assertEqual(self.service.submitted, [])
+
+    def test_programmatic_disarm_keeps_read_only_monitoring(self):
+        self.window.external_mode.setChecked(True)
+        self.window.external_krw.setValue(1000)
+        self.window.start_monitoring()
+        self.wait_idle()
+        with patch.object(self.window, 'confirm_automation', return_value=True):
+            self.window.toggle_orders()
+        self.wait_idle()
+        self.window.disable_auto_orders()
+        self.assertTrue(self.window.monitoring)
+        self.assertFalse(self.window.engine.orders_enabled)
 
     def test_monitor_start_enables_hourly_scheduler_without_arming_orders(self):
         self.window.hourly_ranking.setChecked(True)
@@ -333,7 +379,7 @@ class WatchGuiTests(unittest.TestCase):
         self.assertEqual(self.window.chart.currency, "")
         self.assertEqual(self.service.submitted, [])
 
-    def test_market_tab_separates_ranked_and_other_watch_items(self):
+    def test_market_tab_shows_only_ranked_watch_items(self):
         self.store.save_item(WatchItem(self.service.resolve("000660"), "SK하이닉스"))
         ranks = (RankedStock(Market.DOMESTIC, "005930", "KRX", "삼성전자", 1,
                              Decimal(100), "KRW", 1000, "volume"),)
@@ -341,9 +387,10 @@ class WatchGuiTests(unittest.TestCase):
                                    Decimal(100), "KRW", 999 - index, "volume") for index in range(99))
         self.store.replace_ranked(Market.DOMESTIC, ranks, set())
         self.window.reload_tables()
-        self.assertIn("순위 100 + 기타 1", self.window.watch_market_tabs.tabText(0))
+        self.assertIn("(100)", self.window.watch_market_tabs.tabText(0))
+        self.assertNotIn("기타", self.window.watch_market_tabs.tabText(0))
         self.assertIn("장전 모델 후보는 선정 순위만", self.window.watch_market_tabs.tabToolTip(0))
-        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 101)
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 100)
 
     def test_market_tab_does_not_mislabel_legacy_turnover_as_volume_top100(self):
         ranks = tuple(RankedStock(Market.DOMESTIC, f"{100000 + index}", "KRX", f"종목 {index}", index + 1,

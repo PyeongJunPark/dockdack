@@ -1,9 +1,9 @@
 """Explicit-market TOP100 ownership for the DEMO LSTM dashboard.
 
 The broker's top_volume contract already verifies common-equity classification
-and refuses a short result. Ranking refreshes preserve the existing WatchStore
-ledger, manual interests and pending/unresolved orders. Holdings outside the
-ranking are monitored by the independent exit scan, not retained as buy interests.
+and refuses a short result. Ranking refreshes keep exactly 100 active interests
+per selected market while preserving the full order ledger. Holdings outside
+the ranking are monitored by the independent exit scan, not as buy interests.
 """
 
 from decimal import Decimal
@@ -96,10 +96,6 @@ class LSTM30Universe:
             # Classification and pagination are fail-closed in the service's
             # top_volume implementation; never make up the missing names.
             rankings, incoming = self._validate_rankings(market, self.service.top_volume(market, 100))
-            protected = self.service.protected_symbols(market)
-            if (not isinstance(protected, (set, frozenset))
-                    or any(not isinstance(symbol, str) or not symbol for symbol in protected)):
-                raise ValueError("전체 보유/미체결 보호 종목을 확인할 수 없습니다.")
             if self.stopped():
                 raise InterruptedError("중지 요청으로 순위 결과를 적용하지 않습니다.")
             if not ranking_allowed(market, self.clock()) or (require_open and not is_open(market, self.clock())):
@@ -107,11 +103,13 @@ class LSTM30Universe:
             if guard is not None:
                 guard()
             self.validate_active()
-            allowed = self.approved_ids | incoming
-            self.store.replace_ranked(market, rankings, set(protected), days=31, separate_holdings=True)
+            # Holdings/order history are retained independently of exact TOP100 membership.
+            self.store.replace_ranked(market, rankings, set(), days=31, separate_holdings=True)
             current = self.items()
-            if not {item.id for item in current} <= allowed:
-                raise ValueError("순위 교체 중 승인되지 않은 종목이 추가되었습니다.")
+            if {item.id for item in current if item.instrument.market is market} != incoming:
+                raise ValueError("순위 교체 후 해당 시장 관심종목이 정확히 100개가 아닙니다.")
+            if not {item.id for item in current} <= self.approved_ids | incoming:
+                raise ValueError("순위 교체 중 승인되지 않은 다른 시장 종목이 추가되었습니다.")
             # replace_ranked preserves existing N. Upgrade legacy N without
             # save_item(), which would turn all managed stocks into manual pins.
             with self.store.connection() as db:
@@ -139,6 +137,12 @@ class LSTM30Universe:
         second request for an already completed slot.
         """
         self.validate_active()
+        # Existing ledgers can have 100 ranked rows plus old manual/pending
+        # interests. Prune only when a complete persisted rank identifies the
+        # chosen 100; turnover ranks never count as a fresh volume approval.
+        for market in self.ranked_markets:
+            self.store.prune_ranked_extras(market)
+        self.approved_ids = frozenset(item.id for item in self.items())
         self._restore_ranked_state()
         scheduler = ScopedRankingScheduler(self.service, self.store, universe=self,
                                            clock=self.clock, stopped=self.stopped)

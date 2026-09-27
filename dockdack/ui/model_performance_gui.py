@@ -109,6 +109,7 @@ class ModelPerformancePanel(QWidget):
             self.tables[market] = view
             content.addWidget(view, 1)
             content.addWidget(summary)
+            summary.hide()
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -119,8 +120,11 @@ class ModelPerformancePanel(QWidget):
         layout.addWidget(self.market_tabs, 1)
         layout.addWidget(self.coverage_label)
         layout.addWidget(self.explanation)
+        self.coverage_label.hide()
+        self.explanation.hide()
         self.warning = label("", "error", wrap=True)
         layout.addWidget(self.warning)
+        self.warning.hide()
         self.read_only_notice = label("", "muted", wrap=True)
         self.read_only_notice.setToolTip("성과 조회는 주문을 켜지 않습니다. 계정별 저장 장부에서 전체 이력을 다시 집계합니다.")
         self.set_context(store, mode=mode)
@@ -143,6 +147,7 @@ class ModelPerformancePanel(QWidget):
         self.warning.clear()
         self.warning.hide()
         for market, _, _ in MARKETS:
+            self.tables[market].setToolTip("")
             populate(self.tables[market], [(title, "—", "—", "—", "—", "집계 대기") for _, title in MODELS], [model for model, _ in MODELS])
             self.summaries[market].setText("집계 대기 · 거래 없음과 구분합니다.")
         return True
@@ -177,7 +182,11 @@ class ModelPerformancePanel(QWidget):
         self.coverage_label.setToolTip("전체 장부를 집계하며 최근 화면 표시 건수 제한과 무관합니다. 기간은 저장된 주문시각 기준입니다.")
         rows = tuple(report.get("rows", ()))
         for market, _, currency in MARKETS:
-            selected = tuple(row for row in rows if row.get("market") == market and row.get("currency") == currency)
+            # The table is for named AI models. Keep unassigned/manual fills in
+            # the report and audit ledger, but do not show an extra pseudo-model.
+            selected = tuple(row for row in rows if row.get("market") == market
+                             and row.get("currency") == currency
+                             and row.get("strategy_id") != "unassigned")
             cells = []
             for row in selected:
                 known = row.get("known_sell_count", 0)
@@ -224,5 +233,14 @@ class ModelPerformancePanel(QWidget):
             warning += "\n" + " · ".join(messages)
         self.warning.setText(warning)
         self.warning.setToolTip("\n".join(details))
-        self.warning.setVisible(bool(warning))
+        # Per-model table states preserve uncertainty without a duplicate
+        # paragraph below the table. The read-only table tooltip still makes
+        # globally omitted/unassigned records discoverable on demand.
+        audit_hint = (f"모델 출처 미확인 {unassigned}건 · 손익 미확인 {incomplete}건"
+                      if unassigned or incomplete else "")
+        if details:
+            audit_hint = "\n".join(filter(None, (audit_hint, *details)))
+        for view in self.tables.values():
+            view.setToolTip(audit_hint)
+        self.warning.hide()
         return True

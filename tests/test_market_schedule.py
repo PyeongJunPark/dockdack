@@ -106,7 +106,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len(self.calls),3)
         self.assertEqual(self.store.items(),previous)
 
-    def test_rotation_preserves_manual_held_pending_and_rules_other_market(self):
+    def test_rotation_uses_exact_100_and_keeps_pending_history_other_market(self):
         self.store.add_ranked(ranks())
         self.store.add_ranked(ranks(market=Market.US))
         original = self.store.items()[0]
@@ -120,14 +120,14 @@ class SchedulerTests(unittest.TestCase):
         self.now += timedelta(minutes=1)
         self.assertTrue(self.scheduler.tick())
         active = {i.instrument.symbol for i in self.store.items() if i.instrument.market is Market.DOMESTIC}
-        self.assertEqual(len(active),102)
-        self.assertTrue({"000001","000002"}.issubset(active))
+        self.assertEqual(len(active),100)
+        self.assertTrue({"000001","000002"}.isdisjoint(active))
         self.assertNotIn("000003",active)  # Holdings have their own exit scan.
         self.assertNotIn("000004",active)
         self.assertEqual(sum(i.instrument.market is Market.US for i in self.store.items()),100)
         self.assertEqual(self.store.attempts()[0]["status"],"submitting")
 
-    def test_prepared_open_selection_survives_only_the_opening_rotation(self):
+    def test_prepared_open_selection_outside_new_rank_is_not_a_101st_interest(self):
         self.store.add_ranked(ranks())
         frozen = self.store.items()[0].id
         removed = self.store.items()[1].id
@@ -138,18 +138,19 @@ class SchedulerTests(unittest.TestCase):
             else ())
         self.assertTrue(self.scheduler.tick())
         active = {item.id for item in self.store.items()}
-        self.assertIn(frozen, active)
+        self.assertNotIn(frozen, active)
         self.assertNotIn(removed, active)
-        self.assertEqual(len(active), 101)
+        self.assertEqual(len(active), 100)
         self.now = self.now.replace(hour=10, minute=0)
         self.assertTrue(self.scheduler.tick())
         self.assertNotIn(frozen, {item.id for item in self.store.items()})
 
-    def test_protection_lookup_failure_rolls_back_and_close_blocks_apply(self):
+    def test_ranking_does_not_request_account_protection_and_close_blocks_apply(self):
         self.now += timedelta(minutes=1)
-        with patch.object(self.service,"protected_symbols",side_effect=ValueError("bad account")):
-            self.assertFalse(self.scheduler.tick())
-        self.assertEqual(self.store.items(),())
+        with patch.object(self.service,"protected_symbols",side_effect=AssertionError("account lookup")) as protected:
+            self.assertTrue(self.scheduler.tick())
+            protected.assert_not_called()
+        self.assertEqual(len(self.store.items()),100)
         self.now = self.now.replace(hour=15,minute=30)
         self.assertFalse(self.scheduler.tick())
 

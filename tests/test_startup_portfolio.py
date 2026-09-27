@@ -43,16 +43,30 @@ class StartupPortfolioTests(unittest.TestCase):
             observed = []
 
             def run_events(app):
-                window = next(widget for widget in app.topLevelWidgets() if isinstance(widget, V00Window))
-                deadline = time.monotonic() + 10
+                # Other GUI tests can leave closed top-level windows alive until
+                # Qt/Python collects them. Select this startup's window, not the
+                # first V00Window returned by Qt's unspecified widget order.
+                windows = [widget for widget in app.topLevelWidgets()
+                           if isinstance(widget, V00Window) and widget.service is service]
+                self.assertEqual(len(windows), 1)
+                window = windows[0]
+                # CI may be running the other GUI shards concurrently. Wait
+                # for the Qt delivery as well as the broker calls, not just
+                # the worker object briefly becoming idle.
+                deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     app.processEvents()
                     if (window.worker is None and window._workspace_worker is None
-                            and window._activity_worker is None):
+                            and window._activity_worker is None
+                            and len(account_calls) == 2
+                            and window.portfolio_panel.tables[Market.DOMESTIC].rowCount() == 1):
                         break
                     time.sleep(.01)
                 else:
-                    self.fail("Startup portfolio refresh did not complete")
+                    self.fail(f"Startup portfolio refresh did not complete: calls={account_calls}, "
+                              f"worker={window.worker is not None}, "
+                              f"rows={window.portfolio_panel.tables[Market.DOMESTIC].rowCount()}, "
+                              f"windows={len(windows)}")
                 app.processEvents()
                 observed.append((window.portfolio_panel.tables[Market.DOMESTIC].rowCount(),
                                  window.portfolio_panel.tables[Market.US].rowCount(),

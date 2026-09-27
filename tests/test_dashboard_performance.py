@@ -76,7 +76,8 @@ class DashboardPerformanceTests(unittest.TestCase):
             chart.assert_not_called()
         self.assertIs(self.window.watch_table.item(0, 1), untouched)
         self.assertIs(self.window.watch_table.item(1, 1), changed)
-        self.assertEqual(changed.text(), "123 KRW")
+        self.assertEqual(changed.text(), "123")
+        self.assertIn("KRW", changed.toolTip())
         self.assertIn(target.id, self.window.fresh_ids)
 
     def test_hidden_logs_do_no_periodic_database_work_and_opening_updates_them(self):

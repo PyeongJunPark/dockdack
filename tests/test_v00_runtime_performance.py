@@ -146,6 +146,22 @@ class BackgroundUiTests(unittest.TestCase):
         self.assertIn('독립 매도 감시', panel.table.item(0, 5).toolTip())
         self.assertFalse(self.service.submitted)
 
+    def test_health_tick_never_repaints_every_model_row_and_hidden_pages_skip_it(self):
+        window = self.window
+        self.assertEqual(window.model_display_timer.interval(), 30_000)
+        with patch.object(window, '_update_model_score_row') as row_update:
+            window.health_timer.timeout.emit()
+            row_update.assert_not_called()
+            window.workspace_tabs.setCurrentWidget(window.trade_journal_panel)
+            window._refresh_visible_model_display()
+            row_update.assert_not_called()
+            window.workspace_tabs.setCurrentWidget(window.watch_page)
+            self.assertGreater(row_update.call_count, 0)
+            row_update.reset_mock()
+            window._refresh_visible_model_display()
+            self.assertGreater(row_update.call_count, 0)
+        self.assertFalse(self.service.submitted)
+
 
 if __name__ == '__main__':
     unittest.main()

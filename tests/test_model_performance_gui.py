@@ -46,6 +46,17 @@ class ModelPerformanceGuiTests(unittest.TestCase):
                                      order_history=Mock(side_effect=AssertionError("UI must not read ledger")))
         self.panel = ModelPerformancePanel(self.store)
 
+    def test_redundant_explanations_are_hidden_while_model_rows_remain(self):
+        self.panel.apply_report(performance_report(unknown=1, unassigned=True))
+        self.panel.show()
+        self.app.processEvents()
+        self.assertFalse(self.panel.coverage_label.isVisible())
+        self.assertFalse(self.panel.explanation.isVisible())
+        self.assertFalse(self.panel.warning.isVisible())
+        self.assertTrue(all(not value.isVisible() for value in self.panel.summaries.values()))
+        self.assertTrue(self.panel.tables["domestic"].isVisible())
+        self.assertEqual(self.panel.tables["domestic"].rowCount(), 3)
+
     def tearDown(self):
         self.panel.close()
         self.panel.deleteLater()
@@ -127,15 +138,18 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         self.assertEqual(self.panel.tables["domestic"].item(0, 4).text(), "1건")
         self.assertIn("합산하지 않습니다", self.panel.summaries["domestic"].text())
 
-    def test_incomplete_and_unassigned_are_explicit_not_folded_into_model(self):
-        self.panel.apply_report(performance_report(unknown=1, unassigned=True))
+    def test_unassigned_trade_is_kept_in_report_but_not_shown_as_a_model(self):
+        report = performance_report(unknown=1, unassigned=True)
+        self.panel.apply_report(report)
         view = self.panel.tables["domestic"]
-        self.assertEqual(view.rowCount(), 4)
+        self.assertEqual(view.rowCount(), 3)
         self.assertIn("전체 미확인", view.item(0, 1).text())
         self.assertIn("확인분 +1.00%", view.item(0, 1).text())
-        self.assertEqual(view.item(3, 0).text(), "미확인 / 수동·외부")
-        self.assertIn("모델 출처 미확인", view.item(3, 5).text())
+        self.assertTrue(all("미확인 / 수동·외부" not in view.item(index, 0).text()
+                            for index in range(view.rowCount())))
+        self.assertIn("unassigned", [row["strategy_id"] for row in self.panel.report["rows"]])
         self.assertIn("모델 미분류 매도 1건", self.panel.warning.text())
+        self.assertIn("모델 출처 미확인 1건", view.toolTip())
 
     def test_provenance_warning_codes_have_distinct_human_explanations(self):
         report = performance_report(unassigned=True)

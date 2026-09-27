@@ -107,7 +107,8 @@ class RankingScheduler:
         self.service, self.store, self.clock, self.stopped = service, store, clock, stopped
         self.days = days
         # Only a caller with a prepared, DEMO-only pre-open plan supplies this.
-        # Ordinary rank rotation and manually pinned interests are unchanged.
+        # A frozen choice outside the new 100 remains recorded in that plan,
+        # but does not stay in the active watchlist as a 101st buy interest.
         self.preserve_watch_ids = preserve_watch_ids
         self.started = None
         self.errors = {}
@@ -188,12 +189,12 @@ class RankingScheduler:
 
     def _refresh_market(self, market, guard):
         rankings = self.service.top_volume(market, 100)
-        protected = self.service.protected_symbols(market)
         guard()
         frozen = (self.preserve_watch_ids(market, self.clock())
                   if self.preserve_watch_ids is not None else ())
         guard()
-        self.store.replace_ranked(market, rankings, protected, days=self.days,
+        # Exact TOP100 membership no longer depends on account/open-order data.
+        self.store.replace_ranked(market, rankings, set(), days=self.days,
                                   separate_holdings=True, preserve_watch_ids=frozen)
 
     def due(self):

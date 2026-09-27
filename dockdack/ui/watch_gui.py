@@ -104,7 +104,6 @@ class DailyChart(QWidget):
         painter.setPen(QColor("#95a4bb"))
         for index in sorted({0, len(self.bars) // 2, len(self.bars) - 1}):
             painter.drawText(QPointF(max(4, min(x(index) - 22, area.right() - 35)), self.height() - 6), self.bars[index].day.strftime("%m/%d"))
-        painter.drawText(14, 14, f"{self.currency} · {'일봉' if len(self.bars) <= 180 else '종가선'} / 하단 거래량 · 마우스로 OHLCV 확인")
 
     def mouseMoveEvent(self, event):
         if self.bars:
@@ -135,6 +134,11 @@ class WatchlistDialog(QDialog):
         if session_lock is not None and (session_lock.stream is None or
                 session_lock.path.resolve() != (self.store.path.parent / 'session.lock').resolve()):
             raise ValueError('현재 장부에 대해 획득한 실행 잠금이 필요합니다.')
+        # Only the launcher that owns this ledger's session lock may perform
+        # startup cleanup. Legacy/embedded dialogs without the lock stay read-only.
+        if session_lock is not None:
+            for market in Market:
+                self.store.prune_ranked_extras(market)
         self._pending_environment = None
         self._confirming_environment = False
         self.engine = AutoTrader(service, self.store)
@@ -204,7 +208,7 @@ class WatchlistDialog(QDialog):
         self.schedule_timer = QTimer(self)
         self.schedule_timer.setInterval(1000)
         self.schedule_timer.timeout.connect(self._schedule_wakeup)
-        self.setWindowTitle(f"{APP_NAME} | 관심종목 · {environment_name(selected_mode(service))}")
+        self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
         self.resize(1360, 900)
         self.setMinimumSize(800, 520)
@@ -268,7 +272,7 @@ class WatchlistDialog(QDialog):
         self.environment_caption.setText(f'{TAGLINE}   /   {name}')
         self.portfolio_panel.heading.setText(f'현재 보유종목 · {name} 계좌')
         self.order_history_panel.heading.setText(f'주문·체결 · {name} 계좌')
-        self.setWindowTitle(f'{APP_NAME} | 관심종목 · {name}')
+        self.setWindowTitle(APP_NAME)
         self.environment_notice.setText(
             '실전 · 실제 자금 사용 / 내장 랜덤 모의 신호기 차단 / 실전 API 키와 DOCKDACK_ALLOW_LIVE_ORDERS=true 필요 / 전환만으로 주문 ON 안 됨'
             if mode is TradingMode.REAL else '모의 · 가상 자금 사용 / 실전과 잔고·규칙·매매일지 분리')
@@ -353,6 +357,8 @@ class WatchlistDialog(QDialog):
         try:
             if self._pending_session_lock is None:
                 self._pending_session_lock = self._acquire_environment_lock(store.path)
+            for market in Market:
+                store.prune_ranked_extras(market)
             engine = AutoTrader(service, store)
             collector = LedgerCollector(store)
             portfolio = PortfolioCache(service)
@@ -446,7 +452,7 @@ class WatchlistDialog(QDialog):
             self._adjust_watch_layout()
 
     def _adjust_watch_layout(self, *_):
-        """Give the watch rows priority when the window cannot fit two panes."""
+        """Keep the chart beside the watch rows, including on short desktops."""
         compact = self.width() < 1200 or self.height() < 700
         short = self.height() < 640
         if getattr(self, '_watch_short', None) != short:
@@ -455,31 +461,35 @@ class WatchlistDialog(QDialog):
             self.brand_mark.setFixedSize(side, side)
             self.brand_mark.setPixmap(app_icon().pixmap(side - 2, side - 2))
             self.title_layout.setSpacing(2 if short else 6)
+            self.chart.setMinimumHeight(130 if short else 220)
         if getattr(self, '_watch_compact', None) != compact:
             self._watch_compact = compact
             margins = (12, 4, 12, 4) if compact else (20, 14, 20, 12)
             self.layout().setContentsMargins(*margins)
             self.layout().setSpacing(4 if compact else 8)
-            self.watch_splitter.setOrientation(Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal)
+            self.watch_splitter.setOrientation(Qt.Orientation.Horizontal)
             self.watch_splitter.setMinimumHeight(0 if compact else 290)
-            self.watch_market_tabs.setMinimumHeight(225 if compact else 0)
-            self.watch_chart_box.setMinimumHeight(190 if compact else 290)
+            self.watch_market_tabs.setMinimumHeight(0)
+            self.watch_chart_box.setMinimumHeight(0 if compact else 290)
+            self.watch_chart_box.setMinimumWidth(270 if compact else 0)
             self.watch_chart_box.setMaximumWidth(16777215 if compact else 520)
-            self.chart.setMinimumHeight(150 if compact else 220)
-            self.watch_splitter.setSizes([250, 210] if compact else [760, 520])
+            for view in self.watch_tables.values():
+                # The table owns its horizontal scroll; the entire chart must
+                # not be pushed beyond the window by model-score columns.
+                view.setMinimumWidth(285 if compact else 680)
+            self.watch_splitter.setSizes([390, 370] if compact else [760, 520])
         if hasattr(self, 'data_controls'):
             stack_controls = compact
             if getattr(self, '_watch_stack_controls', None) != stack_controls:
                 self._watch_stack_controls = stack_controls
                 self.data_controls.setDirection(QBoxLayout.Direction.TopToBottom if stack_controls
                                                 else QBoxLayout.Direction.LeftToRight)
-        # The other pages keep their former horizontal scrolling; the narrow
-        # watch page itself fits the viewport and scrolls vertically instead.
+        # Every page fits the workspace width. Wide holdings/journal tables
+        # have their own horizontal scroll; letting the outer tab widget grow
+        # to their preferred width creates a second, confusing scrollbar.
         if hasattr(self, 'workspace_tabs'):
-            watch_active = self.workspace_tabs.currentWidget() is self.watch_page
             self.workspace_tabs.setSizePolicy(
-                QSizePolicy.Policy.Ignored if watch_active else QSizePolicy.Policy.Preferred,
-                QSizePolicy.Policy.Minimum if compact and watch_active else QSizePolicy.Policy.Preferred)
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         if hasattr(self, 'portfolio_panel'):
             self.portfolio_panel.set_compact(self.height() < 760)
 
@@ -503,28 +513,29 @@ class WatchlistDialog(QDialog):
         title.addStretch()
         self.environment_selector = EnvironmentSelector(selected_mode(self.service))
         self.environment_selector.requested.connect(self.request_environment)
-        self.mode_label = label("자동주문 OFF · 주문 차단", "badge")
+        self.mode_label = QPushButton("자동주문 OFF")
+        self.mode_label.setObjectName('orderToggleBadge')
+        self.mode_label.setAutoDefault(False)
+        self.mode_label.clicked.connect(self.toggle_orders)
         self.window_controls.add_to(title)
         layout.addLayout(title)
         self.environment_notice = label('', 'muted', wrap=True)
         layout.addWidget(self.environment_notice)
         self.environment_notice.hide()
-        status_line = QHBoxLayout()
         self.monitoring_label = label("감시 중지", "muted")
         self.order_status_detail = label("시세 감시와 자동주문이 중지되어 있습니다.", "muted", wrap=True)
-        status_line.addWidget(self.mode_label)
-        status_line.addWidget(self.monitoring_label)
-        status_line.addWidget(self.order_status_detail, 1)
-        layout.addLayout(status_line)
-        market_line = QHBoxLayout()
+        self.monitoring_label.setParent(self)
+        self.order_status_detail.setParent(self)
+        self.monitoring_label.hide()
+        self.order_status_detail.hide()
         self.market_labels = {}
         for market, title in ((Market.DOMESTIC, '한국'), (Market.US, '미국')):
             badge = label(f'{title} · 장 시간 확인 중', 'connectionMode')
             self.market_labels[market] = badge
-            market_line.addWidget(badge)
-        market_line.addWidget(label('정규장 기준 · 거래 시간은 마우스를 올려 확인', 'muted', wrap=True))
-        market_line.addStretch()
-        layout.addLayout(market_line)
+            badge.setMaximumWidth(125)
+            badge.setToolTip('정규장 기준 상태 · 상세 거래 시간은 마우스를 올려 확인')
+            title_layout_index = self.title_layout.count() - 2  # before stretch and full screen
+            self.title_layout.insertWidget(title_layout_index, badge)
         self.health_label = label("앱 응답 확인 중 · API 상태 미확인", "muted", wrap=True)
         layout.addWidget(self.health_label)
         self.health_label.hide()  # Full diagnostics live in the server/log page.
@@ -555,12 +566,23 @@ class WatchlistDialog(QDialog):
         for button in (self.refresh_button, self.start_button, self.arm_button,
                        self.disarm_button, self.stop_button):
             button.setAutoDefault(False)
-        self.title_layout.insertWidget(4, self.arm_button)
-        self.title_layout.insertWidget(5, self.disarm_button)
+        # Compatibility handles keep the same guarded callbacks, but the
+        # visible control is the single status badge above.
+        self.arm_button.setParent(self)
+        self.disarm_button.setParent(self)
+        self.arm_button.hide()
+        self.disarm_button.hide()
 
-        flow = QHBoxLayout()
-        self.connection_summary = label("신호 연결 미설정", "muted", wrap=True)
-        flow.addWidget(self.connection_summary, 1)
+        flow = self.connection_flow = QHBoxLayout()
+        flow.setSpacing(8)
+        self.mode_label.setFixedHeight(44)
+        self.mode_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        flow.addWidget(self.mode_label, 1)
+        self.connection_summary = label("신호 연결 미설정", "muted")
+        self.connection_summary.setFixedHeight(44)
+        self.connection_summary.setMaximumWidth(190)
+        self.connection_summary.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        flow.addWidget(self.connection_summary)
         layout.addLayout(flow)
         self.sweep_progress = ActivityProgressBar()
         self.sweep_progress.setObjectName("sweepProgress")
@@ -590,8 +612,8 @@ class WatchlistDialog(QDialog):
         self.watch_page = QWidget()
         watch_layout = QVBoxLayout(self.watch_page)
         self.workspace_tabs.addTab(self.portfolio_panel, "보유종목")
-        self.workspace_tabs.addTab(self.order_history_panel, "주문·체결")
         self.workspace_tabs.addTab(self.trade_journal_panel, "매매일지")
+        self.workspace_tabs.addTab(self.order_history_panel, "주문·체결")
         self.workspace_tabs.addTab(self.operations_panel, "서버·감시 로그")
         self.workspace_tabs.addTab(self.watch_page, "관심종목·차트")
         self.workspace_tabs.addTab(self.model_performance_panel, "모델 성과")
@@ -644,10 +666,10 @@ class WatchlistDialog(QDialog):
         self.watch_market_tabs = QTabWidget()
         self.watch_tables = {}
         for market, title in ((Market.DOMESTIC, "한국 · KRW"), (Market.US, "미국 · USD")):
-            view = table(["종목", "현재가", "N일", "조회"])
+            view = table(["종목", "현재가", "조회"])
             view.setMinimumWidth(480)
             view.verticalHeader().setDefaultSectionSize(52)
-            for column, width in ((0, 125), (1, 130), (2, 45)):
+            for column, width in ((0, 125), (1, 130), (2, 130)):
                 view.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
                 view.setColumnWidth(column, width)
             view.itemSelectionChanged.connect(self.select_item)
@@ -658,13 +680,14 @@ class WatchlistDialog(QDialog):
         watch_box_layout.addWidget(self.watch_market_tabs, 1)
         self.watch_market_hint = label("", "muted", wrap=True)
         watch_box_layout.addWidget(self.watch_market_hint)
+        self.watch_market_hint.hide()
         split.addWidget(watch_box)
         chart_box = self.watch_chart_box = QWidget()
         chart_layout = QVBoxLayout(chart_box)
         chart_layout.setContentsMargins(4, 0, 0, 0)
         self.chart_title = label("관심종목을 선택하세요", "section")
         chart_layout.addWidget(self.chart_title)
-        chart_tabs = QTabWidget()
+        chart_tabs = self.chart_tabs = QTabWidget()
         self.chart = DailyChart()
         self.bar_table = table(["거래일", "시가", "고가", "저가", "종가", "거래량"])
         chart_tabs.addTab(self.chart, "일봉 차트")
@@ -786,7 +809,7 @@ class WatchlistDialog(QDialog):
         self.workspace_tabs.addTab(self.signal_connection_page, "신호 연결")
         self.workspace_tabs.addTab(self.tabs, "고급·수동 규칙")
         self.workspace_tabs.currentChanged.connect(self._adjust_watch_layout)
-        self.message = label("감시는 꺼져 있습니다. 조건·수량·금액 상한을 직접 설정한 후 시작하세요.", "muted", wrap=True)
+        self.message = label("", "muted", wrap=True)
         layout.addWidget(self.message)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         self.operations_panel.tabs.currentChanged.connect(lambda _: self._reload_activity(visible_force=True))
@@ -835,32 +858,36 @@ class WatchlistDialog(QDialog):
                                    and not self._pending_environment and not self._confirming_environment
                                    and self._workspace_worker is None and not self._workspace_error)
         self.disarm_button.setEnabled(armed or self.pending_auto_arm)
+        self.mode_label.setEnabled(self.arm_button.isEnabled() or self.disarm_button.isEnabled())
         self.stop_button.setEnabled(busy or monitoring or armed or self.pending_auto_arm)
         if armed:
-            self.arm_button.setToolTip("현재 자동주문이 ON입니다. 끄려면 오른쪽 OFF 버튼을 누르세요.")
+            self.arm_button.setToolTip("현재 자동주문이 ON입니다. 상단 상태 버튼을 누르면 감시와 새 주문을 중지합니다.")
         elif self.pending_auto_arm:
-            self.arm_button.setToolTip("전체 조회 성공 후 자동으로 ON이 됩니다. 다시 누를 필요가 없으며 OFF 버튼으로 예약을 취소할 수 있습니다.")
+            self.arm_button.setToolTip("전체 조회 성공 후 주문을 허용합니다. 상단 상태 버튼을 누르면 예약과 감시를 중지합니다.")
         elif not monitoring:
             self.arm_button.setToolTip("한 번 확인하면 감시·전체 조회부터 시작하고 성공한 뒤 자동으로 ON이 됩니다.")
         elif busy:
             self.arm_button.setToolTip("조회 중에도 예약할 수 있습니다. 확인 후 전체 조회가 성공하면 자동으로 ON이 됩니다.")
         else:
             self.arm_button.setToolTip(f"확인 후 전체 조회를 한 번 진행하고 성공하면 {environment_name(selected_mode(self.service))} 주문 전송을 허용합니다.")
-        self.mode_label.setText("자동주문 ON · 주문 허용" if armed else "자동주문 OFF · 주문 차단")
+        self.mode_label.setText("자동주문 ON" if armed else
+                                "자동주문 ON · 준비 중" if pending else "자동주문 OFF")
         self.monitoring_label.setText("감시 중 · 시세/차트 갱신" if monitoring else "감시 중지")
         if armed:
             detail = f"정규장에 유효한 신호와 주문 조건을 충족하면 {environment_name(selected_mode(self.service))} 주문을 전송합니다."
-            colors = ("#78e6c7", "#173f3c", "#286357")
+            color = "#78e6c7"
             if selected_mode(self.service) is TradingMode.REAL:
-                colors = ('#ffbfad', '#4b2625', '#aa685c')
+                color = '#ffbfad'
         elif pending:
             detail = "전체 조회 완료 후 ON 예정 · 다시 누를 필요 없음 · OFF로 예약 취소 · 조회 실패 시 OFF 유지"
-            colors = ("#ffda91", "#41341e", "#80683c")
+            color = "#ffda91"
         else:
             detail = "조회만 진행합니다. 새 자동주문은 차단하며, 이미 요청한 주문은 체결될 수 있습니다." if monitoring else "시세 감시와 자동주문이 중지되어 있습니다."
-            colors = ("#c0c9d8", "#263140", "#46546a")
+            color = "#c0c9d8"
         self.order_status_detail.setText(detail)
-        self.mode_label.setStyleSheet(f"color: {colors[0]}; background: {colors[1]}; border: 1px solid {colors[2]}; border-radius: 8px; padding: 7px 12px; font-weight: 700;")
+        self.mode_label.setToolTip(detail + '\n' + (self.disarm_button.toolTip() if armed or pending else self.arm_button.toolTip()))
+        self.mode_label.setStyleSheet(f"color: {color}; background: #193148; border: 1px solid #31536d; "
+                                      "border-radius: 6px; padding: 6px 8px; font-weight: 600; font-size: 14px;")
         self.mode_label.setAccessibleName(self.mode_label.text())
 
     def _tab_changed(self, index):
@@ -1161,10 +1188,8 @@ class WatchlistDialog(QDialog):
                     ranks = self.service.top_volume(market, 100)
                     if not ranking_allowed(market, self.engine.clock()):
                         raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
-                    protected = self.service.protected_symbols(market)
-                    if not ranking_allowed(market, self.engine.clock()):
-                        raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
-                    self.store.replace_ranked(market, ranks, protected, days=days, separate_holdings=True)
+                    # Exact TOP100 ranking needs no account/open-order lookup.
+                    self.store.replace_ranked(market, ranks, set(), days=days, separate_holdings=True)
             return {}
         self._run(collect, done="선정 가능한 시장만 거래량 TOP100 갱신 · 장외/휴장 시장은 조회하지 않았습니다.")
 
@@ -1247,8 +1272,19 @@ class WatchlistDialog(QDialog):
         snapshot = self.snapshots.get(item.id)
         status = self.errors.get(item.id) or (
             snapshot.fetched_at.astimezone().strftime("%m/%d %H:%M:%S") if snapshot else "—")
-        price = f"{number(snapshot.quote.price, 0 if market is Market.DOMESTIC else 4)} {item.instrument.currency}" if snapshot else "—"
-        return (f"{item.name or item.instrument.symbol}\n{item.instrument.symbol}", price, item.days, status)
+        price = number(snapshot.quote.price, 0 if market is Market.DOMESTIC else 4) if snapshot else "—"
+        return (f"{item.name or item.instrument.symbol}\n{item.instrument.symbol}", price, status)
+
+    def _format_watch_price_cell(self, view, row, item):
+        cell = view.item(row, view.columnCount() - 2)
+        if cell is None:
+            return
+        cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        tip = (f'{cell.text()} {item.instrument.currency}' if cell.text() != '—'
+               else f'현재가 조회 전 · {item.instrument.currency}')
+        if cell.text() != '—' and (item.id not in self.fresh_ids or item.id in self.errors):
+            tip += ' · 이전 조회값'
+        cell.setToolTip(tip)
 
     def _update_watch_row(self, key):
         """One quote changes one row, never hundreds of rows or hidden logs."""
@@ -1265,6 +1301,7 @@ class WatchlistDialog(QDialog):
             if cell.text() != text:
                 cell.setText(text)
                 cell.setToolTip(text)
+        self._format_watch_price_cell(view, row, item)
         if self.selected_item() is item:
             self.select_item()
 
@@ -1347,6 +1384,8 @@ class WatchlistDialog(QDialog):
             view.blockSignals(True)
             try:
                 self.set_rows(view, rows, [item.id for item in market_items])
+                for row, item in enumerate(market_items):
+                    self._format_watch_price_cell(view, row, item)
                 if market_items:
                     selected_index = next((i for i, item in enumerate(market_items) if item.id == selected_id), 0)
                     view.selectRow(selected_index)
@@ -1355,13 +1394,11 @@ class WatchlistDialog(QDialog):
                 view.blockSignals(False)
             rank_set = ranked_ids.get(market, set())
             ranked = sum(item.id in rank_set for item in market_items)
-            extra = len(market_items) - ranked
             name = '한국 · KRW' if market is Market.DOMESTIC else '미국 · USD'
-            self.watch_market_tabs.setTabText(index, f"{name} (순위 {ranked} + 기타 {extra})"
-                                              if rank_set else f"{name} ({len(market_items)})")
+            self.watch_market_tabs.setTabText(index, f"{name} ({len(market_items)})")
             self.watch_market_tabs.setTabToolTip(
-                index, f"거래량 선정 {ranked}개 · 순위 외 관심/보호 {extra}개. 장전 모델 후보는 선정 순위만 사용합니다."
-                if rank_set else f"관심종목 {len(market_items)}개 · 거래량 TOP100 미확정")
+                index, f"거래량 선정 {ranked}개 · 장전 모델 후보는 선정 순위만 사용합니다."
+                if rank_set else f"활성 관심종목 {len(market_items)}개 · 거래량 TOP100 미확정")
         rules = self.store.rules(limit=500) if rules is None else rules
         self.rules_table.setToolTip('최근 규칙 최대 500개 표시 · 전체 주문 기록은 주문·체결 및 매매일지에서 확인하세요.')
         item_map = {i.id: i for i in items}
@@ -1572,15 +1609,15 @@ class WatchlistDialog(QDialog):
                                      + (f"조회 실패 · {state.error}" if state.error else f"조회 완료 · 보유 {len(state.positions)}종목"), category="system")
             progress(("portfolio", payload))
             return {}
-        self._run(refresh, streaming=True, done="잔고 조회 처리 완료 · 결과/오류와 기준 시각은 보유종목 탭에서 확인하세요. 재조회는 시장별 최소 60초 간격입니다.")
+        self._run(refresh, streaming=True,
+                  done="잔고 조회 처리 완료 · 결과/오류와 기준 시각은 보유종목 탭에서 확인하세요. 재조회는 시장별 최소 60초 간격입니다.",
+                  show_done=False)
 
     def select_item(self, *_):
         item = self.selected_item()
         market_name = "한국" if self.watch_market is Market.DOMESTIC else "미국"
         count = self.watch_table.rowCount()
-        self.watch_market_hint.setText(
-            f"{market_name} 관심종목 {count}개 · 탭 전환과 무관하게 양쪽 시장 감시" if count else
-            f"{market_name} 관심종목이 없습니다. 종목을 추가하거나 TOP100 재선정을 이용하세요.")
+        self.watch_market_hint.setText('')
         if (item.id if item else None) != self._rule_watch_id:
             self._rule_watch_id = item.id if item else None
             # Prices and caps must never carry over silently between instruments/currencies.
@@ -1605,11 +1642,13 @@ class WatchlistDialog(QDialog):
         if not snapshot:
             self.chart.set_history((), "")
             self.bar_table.setRowCount(0)
-            self.chart_title.setText("종목을 조회해 주세요" if item else f"{market_name} 관심종목 없음")
+            self.chart_title.setText(item.instrument.symbol if item else f"{market_name} 관심종목 없음")
+            self.chart_title.setToolTip('아직 일봉을 조회하지 않았습니다.' if item else '')
             return
         bars = snapshot.history.bars[-item.days:]
         warning = " · 이전 조회값" if item.id not in self.fresh_ids or item.id in self.errors else ""
-        self.chart_title.setText(f"{item.instrument.symbol} · {len(bars)}/{item.days} 거래일 · 수정주가{warning}")
+        self.chart_title.setText(item.instrument.symbol)
+        self.chart_title.setToolTip(f"{len(bars)}/{item.days} 거래일 · 수정주가{warning}")
         self.chart.set_history(bars, item.instrument.currency)
         self.set_rows(self.bar_table, [(b.day, b.open, b.high, b.low, b.close, b.volume) for b in reversed(bars)])
 
@@ -1634,10 +1673,12 @@ class WatchlistDialog(QDialog):
             return {}
         self._run(refresh, streaming=True, done="가격 확인 조회 완료 · 주문·체결 화면을 확인하세요.")
 
-    def _run(self, operation, *, streaming=False, done=None, focus_result=False, job_kind="task"):
+    def _run(self, operation, *, streaming=False, done=None, focus_result=False,
+             job_kind="task", show_done=True):
         if self.worker:
             return False
         self._done_message = done
+        self._show_done_message = show_done
         self._focus_result = focus_result
         self._account_stop.clear()
         if streaming:
@@ -1655,7 +1696,7 @@ class WatchlistDialog(QDialog):
         self.worker.signals.progress.connect(self._progress)
         self.worker.signals.completed.connect(self._completed)
         self.update_controls()
-        self.message.setText("API 조회 중… 호출 간격을 지키며 순서대로 처리합니다. 중지 버튼은 사용할 수 있습니다.")
+        self.message.setText("")
         self.pool.start(self.worker)
         return True
 
@@ -1684,7 +1725,6 @@ class WatchlistDialog(QDialog):
             return
         if len(data) == 2 and data[0] == 'phase':
             self._progress_text = str(data[1])
-            self.message.setText(str(data[1]))
             self.sweep_progress.set_activity(str(data[1]) + ' · 현재가로 상방/하방 확인', waiting=True)
             return
         if len(data) == 2 and data[0] == 'holding_quote':
@@ -1714,7 +1754,6 @@ class WatchlistDialog(QDialog):
             self.snapshots[key] = value
             self.errors.pop(key, None)
             self.fresh_ids.add(key)
-        self.message.setText(f"조회 {count}/{total} · {key.split(':')[-1]} · 외부 모드에서는 새 신호를 우선 확인합니다.")
         self._progress_text = f"시세·차트 {count}/{total} · {key.split(':')[-1]}"
         self.sweep_progress.set_activity('관심종목 시세·차트 조회 %v/%m종목 · %p%', completed=count, total=total)
         self.sweep_progress.setToolTip(f"이번 순회 {count}/{total} · 조회 시도 진행률이며 매수·매도·체결 또는 오류 없음의 표시가 아닙니다.")
@@ -1798,7 +1837,7 @@ class WatchlistDialog(QDialog):
                     self.snapshots[key] = value
                     self.errors.pop(key, None)
                     self.fresh_ids.add(key)
-            self.message.setText(self._done_message or "조회 완료 · 규칙 상태와 기록을 확인하세요. 당일 일봉은 장중에 변하며, 시세는 API 제공값입니다.")
+            self.message.setText((self._done_message or '') if getattr(self, '_show_done_message', True) else '')
             if not self._done_message:
                 success = sum(not isinstance(v, Exception) for v in (results or {}).values())
                 failed = sum(isinstance(v, Exception) for v in (results or {}).values())
@@ -2007,7 +2046,10 @@ class WatchlistDialog(QDialog):
 
     def toggle_orders(self):
         if self.engine.orders_enabled or self.pending_auto_arm:
-            self.disable_auto_orders()
+            # The visible ON/OFF badge is also the monitor stop control.
+            # Keep the lower-level disarm API independent for programmatic
+            # safety paths that only need to block new orders.
+            self.stop_monitoring()
         else:
             self.enable_auto_orders()
 

@@ -19,14 +19,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtWidgets import QApplication, QLabel
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QScrollArea
     from dockdack.v00_app import (DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER,
                                  MARK11_TRIGGER, MARK12_TRIGGER, MARK14_TRIGGER,
                                  PREOPEN_MODEL_IDS, PROTOTYPE_NOTICES, V00Window,
                                  desktop_model_choices)
     from dockdack.v00_widgets import OrderToast, SourceList
 
-from dockdack.history import DailyHistory
+from dockdack.history import DailyBar, DailyHistory
 from dockdack.models import AccountSnapshot, Market, Quote, TradingMode
 from dockdack.portfolio import PortfolioMarketState
 from dockdack.watchlist import MarketSnapshot, WatchItem, WatchStore
@@ -84,7 +85,7 @@ class V00GuiTests(unittest.TestCase):
 
     def test_default_ten_percent_and_off_without_any_broker_read_or_order(self):
         from dockdack.version import APP_RELEASE
-        self.assertIn(APP_RELEASE, self.window.message.text())
+        self.assertEqual(self.window.message.text(), '')
         self.assertIn('개장 10분 전 / 개장 / 매 정시', self.window.hourly_ranking.text())
         self.assertIn('거래량 TOP100', self.window.ranking_button.text())
         self.assertIn('09:30', self.window.hourly_ranking.toolTip())
@@ -108,24 +109,39 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(trigger, 'none')
         self.assertEqual(models, list(PROTOTYPE_NOTICES))
         self.assertEqual(self.window.signal_connection_page.tabText(
-            self.window.signal_connection_page.indexOf(self.window.mark14_panel)), '전체 모델')
+            self.window.signal_connection_page.indexOf(self.window.mark14_panel)), '모델 선택')
         self.assertEqual(self.window.signal_connection_page.count(), 2)
         self.assertEqual(self.window.signal_connection_page.tabText(
-            self.window.signal_connection_page.indexOf(self.window.external_panel)), '공통 주문·연결')
+            self.window.signal_connection_page.indexOf(self.window.model_performance_panel)), '모델 성과')
+        self.assertEqual(self.window.signal_connection_page.indexOf(self.window.external_panel), -1)
+        self.assertEqual(self.window.tabs.tabText(self.window.tabs.indexOf(self.window.external_panel)),
+                         '공통 주문·연결')
+        self.assertEqual(self.window.workspace_tabs.indexOf(self.window.model_performance_panel), -1)
         self.assertEqual(self.window.workspace_tabs.tabText(
-            self.window.workspace_tabs.indexOf(self.window.signal_connection_page)), 'AI 추론모델 연결')
+            self.window.workspace_tabs.indexOf(self.window.signal_connection_page)), 'AI 추론 모델')
         self.assertEqual(self.window.workspace_tabs.currentWidget(), self.window.watch_page)
         self.assertEqual([self.window.workspace_tabs.tabText(index)
-                          for index in range(self.window.workspace_tabs.count())][:7],
-                         ['관심종목·차트', '보유종목', '주문·체결', '매매일지',
-                          '모델 성과', 'AI 추론모델 연결', '기타·고급'])
-        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].columnCount(), 7)
+                          for index in range(self.window.workspace_tabs.count())][:6],
+                         ['관심종목', '보유종목', '매매일지', '주문·체결',
+                          'AI 추론 모델', '고급설정'])
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].columnCount(), 3 + len(PROTOTYPE_NOTICES))
+        self.assertTrue(self.window.percent_sizing.isChecked())
+        self.assertTrue(self.window.percent_sizing.isHidden())
+        self.assertTrue(self.window.mark14_panel.isAncestorOf(self.window.buy_percent))
+        self.assertEqual(self.window.external_grid.indexOf(self.window.buy_percent), -1)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 
     def test_one_model_list_shows_method_phase_output_and_exit_without_repeated_demo_suffix(self):
         panel = self.window.mark14_panel
         self.assertEqual(panel.model_selector.count(), len(PROTOTYPE_NOTICES))
+        self.assertFalse(panel.heading.isVisible())
+        self.assertFalse(panel.notice.isVisible())
+        self.assertGreaterEqual(panel.findChild(QScrollArea, 'allModelChoices').minimumHeight(), 180)
+        self.assertTrue(panel.status.isHidden())
+        self.assertEqual(len(panel.model_detail_fields[MARK1_TRIGGER]), 3)
+        self.assertTrue(all(field.isAncestorOf(field.findChild(QLabel))
+                            for field in panel.model_detail_fields[MARK1_TRIGGER]))
         self.assertEqual([panel.model_selector.itemData(index)
                           for index in range(panel.model_selector.count())][:5],
                          [MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER,
@@ -139,6 +155,8 @@ class V00GuiTests(unittest.TestCase):
         self.assertIn('100종목의 다음 날 상대 수익 순위', mark14)
         self.assertIn('장마감 5분 전', mark14)
         self.assertTrue(self.window.environment_caption.isHidden())
+        self.assertEqual(self.window._model_sell_display(MARK14_TRIGGER, self.item), '—')
+        self.assertIn('매도: —', panel.selected_result.text())
 
     def test_preopen_chart_shows_frozen_candidate_and_score_only_for_current_session(self):
         from dockdack.market_schedule import session_on
@@ -154,10 +172,18 @@ class V00GuiTests(unittest.TestCase):
             'candidates': [{'watch_id': self.item.id, 'symbol': self.item.instrument.symbol,
                             'score': 0.82, 'score_unit': 'percent', 'selected': True}],
         }))
-        self.assertIn('mark1.4 prototype 매수 후보(0.820%)', self.window.model_score_summary.text())
+        self.assertIn('현재가 100 KRW', self.window.model_score_summary.text())
+        self.assertNotIn('매수 후보', self.window.model_score_summary.text())
+        self.assertIn('MK1.4 매수 후보(0.820%)', self.window.latest_model_summary.text())
+        self.assertIn('매수 후보(0.820%)', self.window.mark14_panel.selected_result.text())
+        candidate_table = self.window.mark14_panel.tables['domestic']
+        self.assertEqual(candidate_table.item(0, 3).text(), '매수 후보')
         self.window.engine.clock = lambda: NOW + timedelta(days=1)
-        self.window._update_selected_model_scores()
-        self.assertIn('mark1.4 prototype 이전 장 판단(—)', self.window.model_score_summary.text())
+        self.window._refresh_model_scores()
+        self.window.mark14_panel._show_selected_model()
+        self.assertIn('이전 장 매수 후보(0.820%)', self.window.latest_model_summary.text())
+        self.assertIn('이전 장', self.window.mark14_panel.status.text())
+        self.assertEqual(candidate_table.item(0, 3).text(), '이전 장 · 매수 후보')
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 
@@ -170,7 +196,7 @@ class V00GuiTests(unittest.TestCase):
         self.assertIn(['my-signal', str(self.folder / 'mine.json')],
                       self.window._capture_preferences()['additional_sources'])
         self.store.event('SYSTEM', 'advanced log refresh', category='system')
-        self.window.advanced_settings_button.setChecked(True)
+        self.window.workspace_tabs.setCurrentWidget(self.window.tabs)
         self.window.tabs.setCurrentWidget(self.window.operations_panel)
         self.drain_activity()
         self.assertIn('advanced log refresh', self.window.operations_panel.logs['system'].table.item(0, 2).text())
@@ -352,49 +378,96 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(self.service.quote_calls, 0)
         self.assertFalse(self.service.submitted)
 
-    def test_small_window_keeps_all_watch_columns_and_chart_reachable(self):
+    def test_small_window_shows_the_chart_without_scrolling(self):
         self.window.workspace_tabs.setCurrentWidget(self.window.watch_page)
-        self.window.resize(800, 520)
         self.window.show()
-        self.app.processEvents()
-        # Real status text can occupy two lines even before a price is loaded.
-        self.window.order_status_detail.setText('시세 감시는 계속됩니다.\n자동주문은 꺼져 있습니다.')
-        self.window.connection_summary.setText('외부 AI 모델 2개 · 감시 OFF\n모델별 연결은 신호 연결에서 확인')
-        self.window.latest_model_summary.setText('최근 완료 조회 삼성전자 · 09/15 10:00\n활성 모델 평균 52.5% · 매매 판단에 사용 안 함')
-        self.app.processEvents()
         view = self.window.watch_tables[Market.DOMESTIC]
-        viewport = self.window.workspace_scroll.viewport()
-        self.assertEqual(self.window.watch_splitter.orientation(), Qt.Orientation.Vertical)
-        self.assertEqual(self.window.workspace_scroll.horizontalScrollBar().maximum(), 0)
-        self.assertEqual(view.horizontalScrollBar().maximum(), 0)
-        self.assertEqual(view.columnCount(), 7)
-        self.assertFalse(hasattr(self.window, 'connection_shortcut'))
-        self.assertGreater(view.height(), 150)
-        first_row = view.visualItemRect(view.item(0, 0))
-        first_row_bottom = view.viewport().mapTo(viewport, first_row.bottomLeft()).y()
-        self.assertLess(first_row_bottom, viewport.height(), '첫 관심종목 행이 상단 화면에서 잘림')
-        self.assertGreaterEqual(self.window.ranking_button.width(), self.window.ranking_button.sizeHint().width())
-        self.assertGreaterEqual(self.window.hourly_ranking.width(), self.window.hourly_ranking.sizeHint().width())
-        self.assertGreaterEqual(self.window.environment_selector.badge.width(),
-                                self.window.environment_selector.badge.sizeHint().width())
-        for width in (900, 950, 1000):
-            self.window.resize(width, 520)
+        self.assertEqual(view.columnCount(), 3 + len(PROTOTYPE_NOTICES))
+        self.assertEqual(view.horizontalHeaderItem(view.columnCount() - 2).text(), '현재가')
+        self.assertEqual(view.horizontalHeaderItem(view.columnCount() - 1).text(), '조회')
+        for width, height, min_chart_height in ((800, 520, 120), (980, 620, 180), (1280, 720, 200)):
+            self.window.resize(width, height)
             self.app.processEvents()
-            self.assertGreaterEqual(self.window.ranking_button.width(), self.window.ranking_button.sizeHint().width())
-            self.assertGreaterEqual(self.window.hourly_ranking.width(), self.window.hourly_ranking.sizeHint().width())
-        self.window.resize(800, 520)
-        self.app.processEvents()
-        scroll = self.window.workspace_scroll.verticalScrollBar()
-        self.assertGreater(scroll.maximum(), 0)
-        chart_y = self.window.chart.mapTo(viewport, self.window.chart.rect().topLeft()).y()
-        scroll.setValue(min(scroll.maximum(), max(0, chart_y - 20)))
-        self.app.processEvents()
-        chart_y = self.window.chart.mapTo(viewport, self.window.chart.rect().topLeft()).y()
-        self.assertLess(chart_y, viewport.height())
-        self.assertGreater(chart_y + self.window.chart.height(), 0)
+            viewport = self.window.workspace_scroll.viewport()
+            chart = self.window.chart
+            chart_origin = chart.mapTo(viewport, chart.rect().topLeft())
+            visible_width = min(chart_origin.x() + chart.width(), viewport.width()) - max(0, chart_origin.x())
+            visible_height = min(chart_origin.y() + chart.height(), viewport.height()) - max(0, chart_origin.y())
+            self.assertEqual(self.window.watch_splitter.orientation(), Qt.Orientation.Horizontal)
+            self.assertEqual(self.window.workspace_scroll.horizontalScrollBar().maximum(), 0)
+            cards = (self.window.mode_label, self.window.ai_connection_card,
+                     self.window.latest_model_summary_area)
+            self.assertEqual({card.height() for card in cards}, {44})
+            self.assertLessEqual(max(card.width() for card in cards) - min(card.width() for card in cards), 1)
+            self.assertGreaterEqual(visible_width, 270, (width, height))
+            self.assertGreaterEqual(visible_height, min_chart_height, (width, height))
+            first_row = view.visualItemRect(view.item(0, 0))
+            first_row_bottom = view.viewport().mapTo(viewport, first_row.bottomLeft()).y()
+            self.assertLess(first_row_bottom, viewport.height(), (width, height))
+        self.assertGreater(view.horizontalScrollBar().maximum(), 0)
+        self.assertFalse(self.window.arm_button.isVisible())
+        self.assertFalse(self.window.disarm_button.isVisible())
+        self.assertTrue(self.window.mode_label.isVisible())
+        self.assertIs(self.window.title_layout.itemAt(self.window.title_layout.count() - 1).widget(),
+                      self.window.window_controls.fullscreen_button)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.quote_calls, 0)
         self.assertFalse(self.service.submitted)
+
+    def test_selected_price_uses_only_previous_completed_session(self):
+        prior = DailyBar(NOW.date() - timedelta(days=1), D('98'), D('99'), D('97'), D('98'), D('1000'))
+        unfinished = DailyBar(NOW.date(), D('500'), D('500'), D('500'), D('500'), D('1000'))
+        history = DailyHistory(Market.DOMESTIC, self.item.instrument.symbol,
+                               self.item.instrument.exchange, 'KRW', 2, (prior, unfinished))
+        snapshot = MarketSnapshot(Quote(Market.DOMESTIC, self.item.instrument.symbol, self.item.name,
+                                        self.item.instrument.exchange, D('100'), 'KRW'), history, NOW)
+        self.window._progress((self.item.id, snapshot, 1, 1))
+        self.assertIn('현재가 100 KRW', self.window.model_score_summary.text())
+        view = self.window.watch_tables[Market.DOMESTIC]
+        price_cell = view.item(0, view.columnCount() - 2)
+        self.assertEqual(price_cell.text(), '100')
+        self.assertIn('KRW', price_cell.toolTip())
+        self.assertTrue(price_cell.textAlignment() & Qt.AlignmentFlag.AlignRight)
+        self.assertIn('+2.04%', self.window.price_change_summary.text())
+        self.assertIn('98 KRW', self.window.price_change_summary.toolTip())
+        self.window._progress((self.item.id, ValueError('quote failed'), 1, 1))
+        self.assertEqual(self.window.model_score_summary.text(), '현재가 —')
+        self.assertEqual(self.window.price_change_summary.text(), '전일 대비 —')
+        self.assertFalse(self.service.submitted)
+
+    def test_every_active_model_has_a_watch_column_and_recent_verdict(self):
+        from dockdack.v00_app import ALL_MODEL_IDS
+        from dockdack.market_schedule import session_on
+        feeds = self._score_feeds(mark12='0.552')
+        for model, check in self.window.external_model_checks.items():
+            check.blockSignals(True)
+            check.setChecked(True)
+            check.blockSignals(False)
+        self.window.test_producer.publish(chart())
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        session = session_on(Market.DOMESTIC, NOW.date())
+        self.window._progress(('mark14_preopen', {
+            'model_id': MARK14_TRIGGER, 'market': 'domestic', 'state': 'prepared',
+            'session_open': session.opened.isoformat(),
+            'candidates': [{'watch_id': self.item.id, 'score': 0.82,
+                            'score_unit': 'percent', 'selected': True}],
+        }))
+        view = self.window.watch_tables[Market.DOMESTIC]
+        self.assertEqual(view.columnCount(), 3 + len(ALL_MODEL_IDS))
+        self.assertEqual(view.item(0, 1 + ALL_MODEL_IDS.index(MARK14_TRIGGER)).text(),
+                         '매수 후보(0.820%)')
+        summary = self.window.latest_model_summary.text()
+        for model in ALL_MODEL_IDS:
+            self.assertIn(self.window._model_name(model), summary)
+        self.assertIn('장중 확률 평균 53.4%', summary)
+        self.assertIn('MK1.4 매수 후보(0.820%)', summary)
+        self.assertIn('MK1.3 —', summary)
+        self.assertNotIn('0.820% / 13', summary)
+        self.window.resize(800, 520)
+        self.window.show()
+        self.app.processEvents()
+        self.assertGreater(self.window.latest_model_summary_area.horizontalScrollBar().maximum(), 0)
+        self.assertEqual(self.service.submitted, [])
 
     def test_optional_builtin_and_multiple_named_json_sources_can_coexist(self):
         self.window.builtin_lstm.setChecked(True)
@@ -415,6 +488,175 @@ class V00GuiTests(unittest.TestCase):
         self.assertIsNone(self.window.test_producer)
         self.assertEqual(set(self.window.engine.external_sources), {"custom-main"})
         self.assertEqual(self.window.engine.equity_buy_percent, D("17.25"))
+
+    def test_legacy_fixed_quantity_setting_is_normalized_to_visible_percentage(self):
+        saved = self.window._capture_preferences()
+        saved['percent_sizing'] = False
+        saved['buy_percent'] = 17.25
+        self.store.save_ui_preferences(saved)
+        self.window.percent_sizing.setChecked(False)
+        self.window._restore_preferences()
+        self.assertTrue(self.window.percent_sizing.isChecked())
+        self.assertTrue(self.window.percent_sizing.isHidden())
+        self.assertEqual(self.window.buy_percent.value(), 17.25)
+        self.assertEqual(self.window.engine.equity_buy_percent, D('17.25'))
+        self.assertTrue(self.window._capture_preferences()['percent_sizing'])
+        self.window.percent_sizing.setChecked(False)
+        self.window.configure_external()
+        self.assertTrue(self.window.percent_sizing.isChecked())
+        self.assertEqual(self.window.engine.equity_buy_percent, D('17.25'))
+        self.assertEqual(self.service.submitted, [])
+
+    def test_custom_buy_percent_is_accurate_in_order_confirmation(self):
+        self.window.buy_percent.setValue(15)
+        self.window.external_model_checks[MARK14_TRIGGER].setChecked(True)
+        with patch.object(self.window, '_prepare_builtin'), \
+                patch('dockdack.watch_gui.QMessageBox.question',
+                      return_value=QMessageBox.StandardButton.No) as question:
+            self.assertFalse(self.window.confirm_automation())
+        message = question.call_args.args[2]
+        self.assertIn('15%', message)
+        self.assertIn('1회 매수 비중은 모델 선택 화면 설정', message)
+        self.assertNotIn('종목당 평가자산 10%', message)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_ai_model_page_and_advanced_connection_navigation_are_read_only(self):
+        self.window.resize(800, 520)
+        self.window.show()
+        self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
+        self.app.processEvents()
+        self.assertEqual(self.window.signal_connection_page.currentWidget(), self.window.mark14_panel)
+        self.assertTrue(self.window.buy_percent.isVisible())
+        self.assertFalse(self.window.external_panel.isVisible())
+        self.assertEqual(self.window.ai_model_count.text(), '0')
+        self.assertEqual(self.window.mode_label.text(), '자동주문 OFF')
+        self.assertLessEqual(self.window.mark14_panel._detail_columns, 2)
+        self.window.external_model_checks[MARK14_TRIGGER].setChecked(True)
+        self.assertEqual(self.window.ai_model_count.text(), '1')
+        self.window.resize(1280, 720)
+        self.app.processEvents()
+        self.assertEqual(self.window.mark14_panel._detail_columns, 3)
+        self.window.open_connection_settings()
+        self.app.processEvents()
+        self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.tabs)
+        self.assertIs(self.window.tabs.currentWidget(), self.window.external_panel)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_model_selection_is_locked_during_monitoring_workers_and_pending_activation(self):
+        check = self.window.external_model_checks[MARK14_TRIGGER]
+        self.assertTrue(check.isEnabled())
+        self.assertFalse(check.isChecked())
+        for name, value in (('monitoring', True), ('worker', object()),
+                            ('pending_auto_arm', True), ('_confirming_orders', True),
+                            ('_pending_environment', object())):
+            before = getattr(self.window, name)
+            try:
+                setattr(self.window, name, value)
+                self.window.update_controls()
+                self.assertFalse(check.isEnabled(), name)
+                self.assertFalse(self.window.buy_percent.isEnabled(), name)
+                check.click()
+                self.assertFalse(check.isChecked(), name)
+                self.assertEqual(getattr(self.window, name), value)
+            finally:
+                setattr(self.window, name, before)
+                self.window.update_controls()
+        self.assertTrue(check.isEnabled())
+        self.assertTrue(self.window.buy_percent.isEnabled())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_ai_badge_counts_selections_and_flags_a_failed_feed(self):
+        check = self.window.external_model_checks[MARK14_TRIGGER]
+        check.setChecked(True)
+        self.assertEqual(self.window.ai_model_count.text(), '1')
+        self.assertIn('1개 선택', self.window.ai_connection_card.accessibleName())
+        self.assertTrue(any(label.text() == '개 선택'
+                            for label in self.window.ai_connection_card.findChildren(QLabel)))
+        self.assertTrue(self.window.ai_connection_warning.isHidden())
+        self.assertFalse(self.window._prototype_feeds)
+        self.window._prototype_feeds[MARK14_TRIGGER] = SimpleNamespace(
+            status='mark1.4 · 장전 준비 실패 · HOLD', close=Mock())
+        self.window._update_connection()
+        self.assertFalse(self.window.ai_connection_warning.isHidden())
+        self.assertIn('1개 신호 점검', self.window.ai_connection_card.accessibleName())
+        self.assertIn('장전 준비 실패', self.window.ai_connection_card.toolTip())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_small_workspace_avoids_nested_outer_horizontal_scroll(self):
+        self.window.resize(800, 520)
+        self.window.show()
+        for page in (self.window.watch_page, self.window.portfolio_panel,
+                     self.window.trade_journal_panel, self.window.order_history_panel,
+                     self.window.signal_connection_page, self.window.tabs):
+            self.window.workspace_tabs.setCurrentWidget(page)
+            self.app.processEvents()
+            self.assertEqual(self.window.workspace_scroll.horizontalScrollBar().maximum(), 0,
+                             self.window.workspace_tabs.tabText(self.window.workspace_tabs.currentIndex()))
+            self.assertLessEqual(self.window.workspace_tabs.width(), self.window.workspace_scroll.viewport().width())
+        self.assertGreater(self.window.portfolio_panel.table.horizontalScrollBar().maximum(), 0)
+        self.assertGreater(self.window.trade_journal_panel.tables['domestic'].horizontalScrollBar().maximum(), 0)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_ai_performance_subtab_restores_and_legacy_main_tab_migrates(self):
+        saved = self.window._capture_preferences()
+        saved['workspace_tab_id'] = 'ai'
+        saved['ai_subtab'] = 'performance'
+        self.store.save_ui_preferences(saved)
+        self.window._restore_preferences()
+        self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.signal_connection_page)
+        self.assertIs(self.window.signal_connection_page.currentWidget(), self.window.model_performance_panel)
+        self.assertEqual(self.window._activity_page(), self.window.model_performance_panel)
+        self.assertEqual(self.window._capture_preferences()['ai_subtab'], 'performance')
+        saved.pop('ai_subtab')
+        saved['workspace_tab_id'] = 'performance'
+        self.store.save_ui_preferences(saved)
+        self.window.signal_connection_page.setCurrentWidget(self.window.mark14_panel)
+        self.window._restore_preferences()
+        self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.signal_connection_page)
+        self.assertIs(self.window.signal_connection_page.currentWidget(), self.window.model_performance_panel)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_entering_holdings_tab_refreshes_account_without_bypassing_throttle(self):
+        calls = []
+        self.service.on_account = lambda: calls.append('account')
+        self.window.show()
+        self.app.processEvents()
+        self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.watch_page)
+        self.window.workspace_tabs.setCurrentWidget(self.window.portfolio_panel)
+        for _ in range(20):
+            self.window.pool.waitForDone(1000)
+            self.app.processEvents()
+            if self.window.worker is None:
+                break
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.window.message.text(), '')
+        index = self.window.workspace_tabs.indexOf(self.window.portfolio_panel)
+        tabbar = self.window.workspace_tabs.tabBar()
+        with patch.object(self.window, 'refresh_portfolio', wraps=self.window.refresh_portfolio) as refresh:
+            QTest.mouseClick(tabbar, Qt.MouseButton.LeftButton, pos=tabbar.tabRect(index).center())
+            self.assertEqual(refresh.call_count, 1)  # Re-click of the active holdings tab.
+        self.window.pool.waitForDone(5000)
+        self.app.processEvents()
+        self.assertEqual(len(calls), 2)
+        self.window.workspace_tabs.setCurrentWidget(self.window.watch_page)
+        with patch.object(self.window, 'refresh_portfolio', wraps=self.window.refresh_portfolio) as refresh:
+            QTest.mouseClick(tabbar, Qt.MouseButton.LeftButton, pos=tabbar.tabRect(index).center())
+            self.assertEqual(refresh.call_count, 1)  # Current-changed path, not a duplicate click request.
+        for _ in range(20):
+            self.window.pool.waitForDone(1000)
+            self.app.processEvents()
+            if self.window.worker is None:
+                break
+        self.assertEqual(len(calls), 2)  # Same-market attempts stay throttled for 60 s.
+        self.assertFalse(self.window.monitoring)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
 
     def _score_snapshot(self, *, item=None, price='100', fetched_at=NOW):
         item = item or self.item
@@ -452,23 +694,24 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('MK1.0 추정확률', table.horizontalHeaderItem(4).text())
-        self.assertIn('MK1.1 추정확률', table.horizontalHeaderItem(5).text())
+        self.assertIn('MK1.0 추정확률', table.horizontalHeaderItem(1).text())
+        self.assertIn('MK1.1 추정확률', table.horizontalHeaderItem(2).text())
         self.assertIn('mark1.0 prototype', self.window.external_model_checks[MARK1_TRIGGER].text())
-        self.assertIn('장중 모델은 장벽 선후 확률', self.window.model_score_summary.toolTip())
-        self.assertEqual(table.item(0, 4).text(), '매수 판정\n63.8%')
-        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertIn('조회', self.window.model_score_summary.toolTip())
+        self.assertEqual(table.item(0, 1).text(), '매수 판정\n63.8%')
+        self.assertEqual(table.item(0, 2).text(), '대기\n41.2%')
         self.assertIn('현재가 100 KRW', self.window.model_score_summary.text())
-        self.assertIn('63.8%', self.window.model_score_summary.text())
-        self.assertIn('41.2%', self.window.model_score_summary.text())
-        self.assertIn('조회', table.item(0, 4).toolTip())
-        self.assertIn('실제 적중률·수익률 보장 아님', table.item(0, 4).toolTip())
+        self.assertNotIn('63.8%', self.window.model_score_summary.text())
+        self.assertIn('63.8%', self.window.latest_model_summary.text())
+        self.assertIn('41.2%', self.window.latest_model_summary.text())
+        self.assertIn('조회', table.item(0, 1).toolTip())
+        self.assertIn('실제 적중률·수익률 보장 아님', table.item(0, 1).toolTip())
         other = WatchItem(self.service.resolve('000660'), 'SK하이닉스')
         self.store.save_item(other)
         self.window.reload_tables(items=self.store.items(), rules=[])
-        self.assertEqual(table.item(self.window._watch_rows[self.item.id], 4).text(), '매수 판정\n63.8%')
-        self.assertEqual(table.item(self.window._watch_rows[other.id], 4).text(), '—')
-        self.assertIn('현재가 조회 전', table.item(self.window._watch_rows[other.id], 4).toolTip())
+        self.assertEqual(table.item(self.window._watch_rows[self.item.id], 1).text(), '매수 판정\n63.8%')
+        self.assertEqual(table.item(self.window._watch_rows[other.id], 1).text(), '—')
+        self.assertIn('현재가 조회 전', table.item(self.window._watch_rows[other.id], 1).toolTip())
         self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1])
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
@@ -478,17 +721,17 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('MK1.2 추정확률', table.horizontalHeaderItem(6).text())
-        self.assertEqual(table.item(0, 4).text(), '매수 판정\n63.8%')
-        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
-        self.assertEqual(table.item(0, 6).text(), '매수 판정\n55.2%')
-        self.assertIn('55.2%', self.window.model_score_summary.text())
+        self.assertIn('MK1.2 추정확률', table.horizontalHeaderItem(3).text())
+        self.assertEqual(table.item(0, 1).text(), '매수 판정\n63.8%')
+        self.assertEqual(table.item(0, 2).text(), '대기\n41.2%')
+        self.assertEqual(table.item(0, 3).text(), '매수 판정\n55.2%')
+        self.assertIn('55.2%', self.window.latest_model_summary.text())
         self.assertIn('53.4%', self.window.latest_model_summary.text())
         previous = self.window.latest_model_summary.text()
         self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
-        self.assertIn('55.2%', table.item(0, 6).text())
-        self.assertIn('최근 추정', table.item(0, 6).text() + table.item(0, 6).toolTip())
-        self.assertIn('100 KRW', table.item(0, 6).toolTip())
+        self.assertIn('55.2%', table.item(0, 3).text())
+        self.assertIn('최근 추정', table.item(0, 3).text() + table.item(0, 3).toolTip())
+        self.assertIn('100 KRW', table.item(0, 3).toolTip())
         self.assertEqual(self.window.latest_model_summary.text(), previous)
         self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1, 1])
         self.assertFalse(self.window.engine.orders_enabled)
@@ -499,24 +742,24 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 1).text())
         previous = self.window.latest_model_summary.text()
         self.window._progress((self.item.id, self._score_snapshot(price='101'), 1, 1))
-        self.assertIn('63.8%', table.item(0, 4).text())
-        self.assertIn('최근 추정', table.item(0, 4).text() + table.item(0, 4).toolTip())
+        self.assertIn('63.8%', table.item(0, 1).text())
+        self.assertIn('최근 추정', table.item(0, 1).text() + table.item(0, 1).toolTip())
         self.assertEqual(self.window.latest_model_summary.text(), previous)
         self.window._progress((self.item.id, ValueError('quote unavailable'), 1, 1))
-        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 1).text())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         self.window.engine.clock = lambda: NOW + timedelta(seconds=16)
         self.window._refresh_model_scores()
-        self.assertIn('63.8%', table.item(0, 4).text())
-        self.assertIn('조회', table.item(0, 4).toolTip())
+        self.assertIn('63.8%', table.item(0, 1).text())
+        self.assertIn('조회', table.item(0, 1).toolTip())
         self.window.engine.clock = lambda: NOW
         feeds[MARK1_TRIGGER].diagnostics[self.item.id]['prediction']['probability_success'] = 'NaN'
         self.window._refresh_model_scores()
-        self.assertIn('63.8%', table.item(0, 4).text())
-        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertIn('63.8%', table.item(0, 1).text())
+        self.assertEqual(table.item(0, 2).text(), '대기\n41.2%')
         self.assertFalse(self.service.submitted)
 
     def test_failed_one_model_keeps_its_last_valid_score_and_other_model(self):
@@ -527,8 +770,8 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._refresh_model_scores()
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('63.8%', table.item(0, 4).text())
-        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertIn('63.8%', table.item(0, 1).text())
+        self.assertEqual(table.item(0, 2).text(), '대기\n41.2%')
         self.assertFalse(self.service.submitted)
 
     def test_invalid_probability_without_prior_valid_score_is_not_displayed(self):
@@ -536,8 +779,8 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertNotIn('%', table.item(0, 4).text())
-        self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
+        self.assertNotIn('%', table.item(0, 1).text())
+        self.assertEqual(table.item(0, 2).text(), '대기\n41.2%')
         self.assertIn('모델 추정확률 —', self.window.latest_model_summary.text())
         self.assertNotIn('%', self.window.latest_model_summary.text())
         self.assertFalse(self.window.engine.orders_enabled)
@@ -548,8 +791,9 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         summary = self.window.latest_model_summary
-        self.assertLess(self.window.layout().indexOf(summary),
-                        self.window.layout().indexOf(self.window.sweep_progress))
+        self.window.show()
+        self.app.processEvents()
+        self.assertLess(self.window.latest_model_summary_area.y(), self.window.sweep_progress.y())
         self.assertIn('005930', summary.text())
         self.assertIn('53.4%', summary.text())  # (63.8 + 41.2 + 55.2) / 3
         previous = summary.text()
@@ -593,8 +837,8 @@ class V00GuiTests(unittest.TestCase):
         refreshed = NOW + timedelta(seconds=1)
         self.window.engine.clock = lambda: refreshed
         self.window._progress((self.item.id, self._score_snapshot(fetched_at=refreshed), 1, 1))
-        self.assertIn('최근 추정', self.window.watch_tables[Market.DOMESTIC].item(0, 4).text())
-        self.assertIn('63.8%', self.window.watch_tables[Market.DOMESTIC].item(0, 4).text())
+        self.assertIn('최근 추정', self.window.watch_tables[Market.DOMESTIC].item(0, 1).text())
+        self.assertIn('63.8%', self.window.watch_tables[Market.DOMESTIC].item(0, 1).text())
         self.assertEqual(self.window.latest_model_summary.text(), previous)
         for feed in feeds.values():
             feed.diagnostics[self.item.id]['_display_quote_fetched_at'] = refreshed.isoformat()
@@ -637,15 +881,15 @@ class V00GuiTests(unittest.TestCase):
         self.window.test_producer.publish(chart())
         self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
         table = self.window.watch_tables[Market.DOMESTIC]
-        self.assertIn('63.8%', table.item(0, 4).text())
+        self.assertIn('63.8%', table.item(0, 1).text())
         self.assertIn('52.5%', self.window.latest_model_summary.text())
 
         # This is an actual user-level connection change, unlike the signal-blocked
         # checkbox in the mean-only test. Old model scores must not cross it.
         self.window.external_model_checks[MARK11_TRIGGER].setChecked(False)
         self.window._refresh_model_scores()
-        self.assertNotIn('63.8%', table.item(0, 4).text())
-        self.assertEqual(table.item(0, 5).text(), '—')
+        self.assertNotIn('63.8%', table.item(0, 1).text())
+        self.assertEqual(table.item(0, 2).text(), '꺼짐')
         self.assertIn('모델 추정확률 —', self.window.latest_model_summary.text())
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)

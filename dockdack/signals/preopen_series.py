@@ -53,11 +53,11 @@ PREOPEN_MODELS = {
                                             "최악 연도·40bp 견고성 유전탐색", "무단위 진화 점수"),
     "mark1-11-prototype": PreopenModelSpec(
         "mark1-11-prototype", "models/mark1_horizons",
-        "E4 동결 유전망 · 3거래 세션 보유", "무단위 동결 점수",
+        "완료 30봉 진화 신경망 · 3거래 세션 보유", "무단위 동결 점수",
         "매수 체결 세션=1일째 · 3번째 거래 세션 장중 기간 매도 · 종가 백테스트와 다름"),
     "mark1-12-prototype": PreopenModelSpec(
         "mark1-12-prototype", "models/mark1_horizons",
-        "E4 동결 유전망 · 5거래 세션 보유", "무단위 동결 점수",
+        "완료 30봉 진화 신경망 · 5거래 세션 보유", "무단위 동결 점수",
         "매수 체결 세션=1일째 · 5번째 거래 세션 장중 기간 매도 · 종가 백테스트와 다름"),
 }
 

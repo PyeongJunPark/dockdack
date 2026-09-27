@@ -109,14 +109,15 @@ class ModelPerformanceDesktopTests(unittest.TestCase):
             return records()
         with patch.object(self.store, 'order_history', side_effect=history), \
                 patch.object(self.store, 'ledger_revision', return_value='changed'):
-            self.window.workspace_tabs.setCurrentWidget(panel)
+            self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
+            self.window.signal_connection_page.setCurrentWidget(panel)
             self.drain()
             panel.refresh_button.click()
             self.drain()
         self.assertTrue(threads)
         self.assertTrue(all(thread != threading.get_ident() for thread in threads))
         self.assertEqual(panel.tables['domestic'].item(0, 1).text(), '+3.00%')
-        self.assertIn('DEMO', panel.mode_badge.text())
+        self.assertIn('모의투자', panel.mode_badge.text())
         self.assertFalse(self.window._chosen_external_models())
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
@@ -135,7 +136,8 @@ class ModelPerformanceDesktopTests(unittest.TestCase):
         self.window.resize(1280, 720)
         self.window.show()
         panel = self.window.model_performance_panel
-        self.window.workspace_tabs.setCurrentWidget(panel)
+        self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
+        self.window.signal_connection_page.setCurrentWidget(panel)
         self.drain()
         panel.apply_report(model_realized_performance(records(), mode='demo'))
         self.app.processEvents()
@@ -156,7 +158,7 @@ class ModelPerformanceDesktopTests(unittest.TestCase):
         panel.set_context(other)
         try:
             self.window._activity_completed((self.store, {'heads': {}, 'events': {}}, snapshot), None)
-            self.assertIn('REAL', panel.mode_badge.text())
+            self.assertIn('실전', panel.mode_badge.text())
             self.assertIsNone(panel.report)
             self.assertEqual(panel.tables['domestic'].item(0, 1).text(), '—')
         finally:

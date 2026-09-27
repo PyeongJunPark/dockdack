@@ -57,7 +57,7 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.assertTrue(all(item.instrument.market is Market.US for item in items))
         self.assertTrue(all(item.days >= 31 for item in items))
         self.service.top_volume.assert_called_once_with(Market.US, 100)
-        self.service.protected_symbols.assert_called_once_with(Market.US)
+        self.service.protected_symbols.assert_not_called()
         self.universe.validate_active()
 
     def test_selected_us_ranking_preserves_other_market_manual_watch(self):
@@ -70,7 +70,7 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.assertEqual(sum(item.instrument.market is Market.US for item in universe.items()), 100)
         self.service.top_volume.assert_called_once_with(Market.US, 100)
 
-    def test_rotation_preserves_manual_held_pending_and_ready_manual_rule(self):
+    def test_rotation_limits_active_to_100_and_preserves_manual_pending_history(self):
         self.universe.bootstrap()
         old = {item.instrument.symbol: item for item in self.store.items()}
         self.store.save_item(old["S1"])  # Explicit manual pin, same authorized identity.
@@ -78,19 +78,20 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.store.add_rule(pending)
         self.assertTrue(self.store.claim(pending, Decimal(100), self.now))
         self.store.finish(pending.id, "accepted", "fake accepted", "fake-pending")
-        self.service.protected[Market.US] = {"S3"}
         manual_rule = TriggerRule.create(old["S4"], "price_ge", "sell", 1, Decimal(1000), Decimal(101))
         self.store.add_rule(manual_rule)
         self.service.data[Market.US] = ranked_common_stocks(101)
         self.universe.refresh(Market.US)
         active = {item.instrument.symbol: item for item in self.universe.items()}
-        self.assertEqual(len(active), 103)
-        self.assertTrue({"S1", "S2", "S4"}.issubset(active))
+        self.assertEqual(len(active), 100)
+        self.assertTrue({"S1", "S2", "S4"}.isdisjoint(active))
         self.assertNotIn("S3", active)  # Holdings remain in the independent exit scan.
         self.assertNotIn("S5", active)
         self.assertTrue(all(item.days >= 31 for item in active.values()))
         self.assertEqual(self.store.attempts()[0]["status"], "accepted")
-        self.assertEqual(next(rule for rule in self.store.rules() if rule.id == manual_rule.id).status, "ready")
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("SELECT active FROM watchlist WHERE id=?", (old["S2"].id,)).fetchone()[0], 0)
+        self.assertEqual(next(rule for rule in self.store.rules(include_inactive=True) if rule.id == manual_rule.id).status, "paused")
         self.universe.validate_active()
 
     def test_rotation_keeps_filled_buy_history_used_by_durable_daily_cap(self):
@@ -134,16 +135,22 @@ class LSTM30UniverseTests(unittest.TestCase):
                 self.assertEqual(self.store.items(), before)
                 self.universe.validate_active()
 
-    def test_classification_or_account_failure_preserves_previous_approved_list(self):
+    def test_classification_failure_preserves_previous_approved_list(self):
         self.universe.bootstrap()
         before = self.store.items()
-        for method in ("top_volume", "protected_symbols"):
-            with self.subTest(method=method), patch.object(
-                    self.service, method, side_effect=BrokerAPIError("fake classification/account unavailable")):
-                with self.assertRaises(BrokerAPIError):
-                    self.universe.refresh(Market.US)
-            self.assertEqual(self.store.items(), before)
-            self.universe.validate_active()
+        with patch.object(self.service, "top_volume", side_effect=BrokerAPIError("classification unavailable")):
+            with self.assertRaises(BrokerAPIError):
+                self.universe.refresh(Market.US)
+        self.assertEqual(self.store.items(), before)
+        self.universe.validate_active()
+
+    def test_account_protection_lookup_is_not_needed_for_rotation(self):
+        with patch.object(self.service, "protected_symbols", side_effect=AssertionError("account lookup")) as protected:
+            self.universe.bootstrap()
+            self.service.data[Market.US] = ranked_common_stocks(101)
+            self.universe.refresh(Market.US)
+            protected.assert_not_called()
+        self.assertEqual(len(self.universe.items()), 100)
 
     def test_unselected_market_refresh_is_rejected_without_query(self):
         with self.assertRaises(ValueError):
@@ -155,7 +162,13 @@ class LSTM30UniverseTests(unittest.TestCase):
         self.service.data[Market.US] = ranked_common_stocks(101)
         self.universe.refresh(Market.US)
         self.universe.validate_active()
-        self.store.save_item(WatchItem(Instrument(Market.US, "FOREIGN", "ND"), "Unapproved", 31))
+        foreign = WatchItem(Instrument(Market.US, "FOREIGN", "ND"), "Unapproved", 31)
+        with self.assertRaisesRegex(ValueError, "TOP100"):
+            self.store.save_item(foreign)
+        # A foreign process bypassing the store still trips the active-set guard.
+        with self.store.connection() as db:
+            db.execute("INSERT INTO watchlist VALUES(?,?,?,?,?,?,1)",
+                       (foreign.id, "us", "FOREIGN", "ND", "Unapproved", 31))
         with self.assertRaises(ValueError):
             self.universe.validate_active()
 
@@ -166,6 +179,23 @@ class LSTM30UniverseTests(unittest.TestCase):
                                  baseline_items=(old,), clock=lambda: self.now)
         universe.bootstrap()
         self.assertTrue(all(item.days >= 31 for item in universe.items()))
+
+    def test_restart_prunes_legacy_103_from_persisted_rank_without_new_broker_rank(self):
+        self.store.replace_ranked(Market.US, ranked_common_stocks(), set(), days=31)
+        with self.store.connection() as db:
+            for index in (101, 102, 103):
+                item = WatchItem(Instrument(Market.US, f"S{index}", "ND"), f"Old {index}", 31)
+                db.execute("INSERT INTO watchlist VALUES(?,?,?,?,?,?,1)",
+                           (item.id, "us", item.instrument.symbol, "ND", item.name, 31))
+        self.now = session_on(Market.US, date(2026, 9, 14)).opened - timedelta(minutes=11)
+        universe = LSTM30Universe(self.service, self.store, ranked_markets=(Market.US,),
+                                 baseline_items=self.store.items(), clock=lambda: self.now)
+        self.assertEqual(len(universe.items()), 103)
+        universe.bootstrap()
+        self.assertEqual(len(universe.items()), 100)
+        self.assertTrue(universe.initialized)
+        self.service.top_volume.assert_not_called()
+        universe.validate_active()
 
 
 class ScopedRankingSchedulerTests(unittest.TestCase):

@@ -12,6 +12,7 @@ from dockdack.exceptions import BrokerAPIError, OrderNotSent, OrderOutcomeUnknow
 from dockdack.gui_service import Instrument
 from dockdack.manual_orders import reconcile_manual_executions, submit_manual_order
 from dockdack.models import Market, OrderExecution, OrderRequest, OrderResult, OrderSide, Quote, TradingMode
+from dockdack.universe import RankedStock
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
 
 
@@ -63,6 +64,12 @@ class ManualOrderTests(unittest.TestCase):
     def submit(self, request=None, reference=None):
         return submit_manual_order(self.service, self.store, request or self.request, reference)
 
+    @staticmethod
+    def complete_rankings():
+        return tuple(RankedStock(Market.DOMESTIC, f"{index:06d}", "KRX", f"Rank {index}",
+                                 index, D(1000), "KRW", 1000 - index, "volume")
+                     for index in range(1, 101))
+
     def row(self):
         return self.store.order_history(limit=None)[0]
 
@@ -97,6 +104,42 @@ class ManualOrderTests(unittest.TestCase):
         with self.store.connection() as db:
             row = db.execute("SELECT * FROM watchlist WHERE id=?", (item.id,)).fetchone()
         self.assertEqual((row["name"], row["days"], row["active"]), ("사용자 이름", 83, 0))
+
+    def test_manual_order_outside_complete_rank_keeps_exact_top100_and_fill_history(self):
+        self.store.replace_ranked(Market.DOMESTIC, self.complete_rankings(), set())
+        self.assertEqual(len(self.store.items()), 100)
+
+        self.submit()  # 005930 is outside the persisted TOP100.
+        self.assertEqual(len(self.store.items()), 100)
+        with self.store.connection() as db:
+            row = db.execute("SELECT active FROM watchlist WHERE id=?", (WatchItem(INST).id,)).fetchone()
+        self.assertEqual(row["active"], 0)
+        self.assertEqual(self.row()["status"], "accepted")
+        self.assertEqual(self.reconcile(self.execution()), 1)
+        self.assertEqual(self.row()["status"], "filled")
+        self.assertEqual(len(self.service.submitted), 1)
+
+    def test_missing_or_malformed_rank_keeps_original_active_manual_row(self):
+        changes = {
+            "none": None,
+            "mixed_basis": "UPDATE turnover_ranks SET ranking_basis='turnover' WHERE rank=1",
+            "different_timestamp": "UPDATE turnover_ranks SET fetched_at='2026-09-20T00:00:00+00:00' WHERE rank=1",
+            "invalid_timestamp": "UPDATE turnover_ranks SET fetched_at='invalid' WHERE rank=1",
+            "inactive_ranked_row": "UPDATE watchlist SET active=0 WHERE id=(SELECT watch_id FROM turnover_ranks WHERE rank=1)",
+        }
+        for case, sql in changes.items():
+            with self.subTest(case=case):
+                self.store = WatchStore(Path(self.temp.name) / f"{case}.sqlite3")
+                self.service = FakeService()
+                if sql is not None:
+                    self.store.replace_ranked(Market.DOMESTIC, self.complete_rankings(), set())
+                    with self.store.connection() as db:
+                        db.execute(sql)
+                self.submit()
+                with self.store.connection() as db:
+                    row = db.execute("SELECT active FROM watchlist WHERE id=?", (WatchItem(INST).id,)).fetchone()
+                self.assertEqual(row["active"], 1)
+                self.assertEqual(self.row()["status"], "accepted")
 
     def test_pending_attempt_blocks_second_manual_click(self):
         self.submit()

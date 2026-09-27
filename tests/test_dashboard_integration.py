@@ -87,7 +87,7 @@ class DashboardIntegrationTests(unittest.TestCase):
     def test_holdings_is_default_and_opening_does_not_arm_or_invent_empty_account(self):
         self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.portfolio_panel)
         self.assertEqual([self.window.workspace_tabs.tabText(i) for i in range(4)],
-                         ["보유종목", "주문·체결", "매매일지", "서버·감시 로그"])
+                         ["보유종목", "매매일지", "주문·체결", "서버·감시 로그"])
         self.assertIn("미확인", self.window.portfolio_panel.summary_label.text())
         self.assertEqual(self.window.portfolio_panel.table.rowCount(), 0)
         self.assertEqual(self.service.account_calls, [])
@@ -112,6 +112,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
         self.assertEqual(self.store.attempts(), ())
         self.assertEqual(self.window.order_history_panel.table.rowCount(), 0)
+        self.assertEqual(self.window.message.text(), '')
 
     def test_account_error_retains_prior_holdings_and_successful_empty_market_is_distinct(self):
         self.window.refresh_portfolio()
@@ -128,6 +129,7 @@ class DashboardIntegrationTests(unittest.TestCase):
         self.assertIn("요청 제한", labels[Market.DOMESTIC]["updated"].text())
         self.assertEqual(labels[Market.US]["status"].text(), "보유종목 없음")
         self.assertIn("잔고 오류 1건", self.window.health_label.text())
+        self.assertEqual(self.window.message.text(), '')
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 

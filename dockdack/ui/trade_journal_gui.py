@@ -1,7 +1,8 @@
 """Read-only daily, monthly and yearly journal. No broker calls or orders."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from time import monotonic
 from zoneinfo import ZoneInfo
 
@@ -130,17 +131,17 @@ class DailyTradeJournalPanel(QWidget):
             page_layout.addLayout(controls)
             if market == "us":
                 fx_controls = QHBoxLayout()
-                self.fx_toggle = QCheckBox("USD 금액 현재 환율로 원화 환산")
-                self.fx_toggle.setAccessibleName("미국 매매일지 USD 현재 참고환율 원화 환산")
-                self.fx_toggle.setToolTip("화면 표시만 바꿉니다. 원본 USD 장부·주문·체결·실제 원화 손익은 변경하지 않습니다.")
+                self.fx_toggle = QCheckBox("원화 환산")
+                self.fx_toggle.setAccessibleName("미국 매매일지 원화 환산")
+                self.fx_toggle.setToolTip("화면 표시만 바꿉니다. USD 장부·주문·체결·실제 원화 손익은 변경하지 않습니다.")
                 self.fx_toggle.toggled.connect(self._fx_toggled)
                 fx_controls.addWidget(self.fx_toggle)
-                self.fx_refresh_button = QPushButton("환율 다시 조회")
+                self.fx_refresh_button = QPushButton("환율 갱신")
                 self.fx_refresh_button.setAutoDefault(False)
                 self.fx_refresh_button.setEnabled(False)
                 self.fx_refresh_button.clicked.connect(self._request_fx)
                 fx_controls.addWidget(self.fx_refresh_button)
-                self.fx_status = label("USD 원본 표시 · 환율 조회 안 함", "muted", wrap=True)
+                self.fx_status = label("USD", "muted", wrap=True)
                 fx_controls.addWidget(self.fx_status, 1)
                 page_layout.addLayout(fx_controls)
             metrics = QGridLayout()
@@ -167,6 +168,7 @@ class DailyTradeJournalPanel(QWidget):
             page_layout.addLayout(metrics)
             self.summaries[market] = label("", "muted", wrap=True)
             page_layout.addWidget(self.summaries[market])
+            self.summaries[market].hide()  # Detail counts remain available in the ledger table/tooltips.
             view = table(["주문시각", "종목", "매수/매도", "체결 수량", "체결 평균가", "체결금액",
                           "실현손익", "실현 수익률", "주문 상태", "매수 모델"])
             view.setWordWrap(False)
@@ -236,22 +238,37 @@ class DailyTradeJournalPanel(QWidget):
     def _fx_toggled(self, checked):
         if not checked:
             self._fx_request_id += 1
-            self._fx_reference = None
             self.fx_refresh_button.setEnabled(False)
-            self.fx_status.setText("USD 원본 표시 · 환율 조회 안 함")
+            self.fx_status.setText("USD")
             self.fx_status.setToolTip("")
             self.render_market("us")
             return
+        if self._fx_reference is not None:
+            self._show_fx_reference(self._fx_reference)
+            self.render_market("us")
+            return
         self._request_fx()
+
+    def _show_fx_reference(self, reference):
+        self.fx_status.setText(f"1 USD ≈ {reference.krw_per_usd:,.0f}원")
+        self.fx_status.setToolTip(
+            f"ECB {reference.published_on.isoformat()} 고시 · 표시용 환산, 실제 원화 실현손익 아님\n"
+            f"EUR 기준 USD {reference.eur_usd} / KRW {reference.eur_krw}의 같은 고시일 교차환율\n"
+            f"{reference.source_url}\n거래·체결일 환율이 아니며 수수료·세금·환전 스프레드가 없습니다.")
+        self.fx_refresh_button.setEnabled(True)
 
     def _request_fx(self):
         if not self.fx_toggle.isChecked():
             return
         self._fx_request_id += 1
         request_id = self._fx_request_id
-        self._fx_reference = None
-        self.fx_status.setText("ECB 현재 참고환율 조회 중 · 완료 전 USD 원본 표시")
-        self.fx_status.setToolTip("")
+        if self._fx_reference is None:
+            self.fx_status.setText("환율 조회 중")
+            self.fx_status.setToolTip("")
+        else:
+            self.fx_status.setText("환율 갱신 중 · 이전 환율")
+            self.fx_status.setToolTip(
+                f"ECB {self._fx_reference.published_on.isoformat()} 고시 환율을 갱신하는 동안 표시합니다.")
         self.fx_refresh_button.setEnabled(False)
         self.render_market("us")
         worker = Worker(lambda: self._fx_fetcher(timeout=3.0))
@@ -264,19 +281,28 @@ class DailyTradeJournalPanel(QWidget):
         self._fx_workers.pop(request_id, None)
         if request_id != self._fx_request_id or not self.fx_toggle.isChecked():
             return
-        if error is not None or not isinstance(reference, UsdKrwReference):
-            self._fx_reference = None
+        valid = (isinstance(reference, UsdKrwReference)
+                 and isinstance(reference.published_on, date)
+                 and isinstance(reference.krw_per_usd, Decimal)
+                 and reference.krw_per_usd.is_finite() and reference.krw_per_usd > 0
+                 and isinstance(reference.eur_usd, Decimal)
+                 and reference.eur_usd.is_finite() and reference.eur_usd > 0
+                 and isinstance(reference.eur_krw, Decimal)
+                 and reference.eur_krw.is_finite() and reference.eur_krw > 0)
+        if error is not None or not valid:
             reason = str(error) if isinstance(error, ValueError) else type(error).__name__ if error else "응답 형식 미확인"
-            self.fx_status.setText(f"ECB 환율 조회 실패 ({reason}) · USD 원본 유지")
-            self.fx_status.setToolTip("")
+            if self._fx_reference is None:
+                self.fx_status.setText("환율 조회 실패 · USD 유지")
+                self.fx_status.setToolTip(f"ECB 환율 조회 실패: {reason}")
+            else:
+                self.fx_status.setText("환율 갱신 실패 · 이전 환율")
+                self.fx_status.setToolTip(
+                    f"ECB 환율 갱신 실패: {reason}\n"
+                    f"이전 환율 ECB {self._fx_reference.published_on.isoformat()} 고시 · "
+                    f"1 USD = {self._fx_reference.krw_per_usd:,.2f} KRW")
         else:
             self._fx_reference = reference
-            self.fx_status.setText(
-                f"ECB {reference.published_on.isoformat()} 최근 고시 · "
-                f"1 USD ≈ {reference.krw_per_usd:,.2f} KRW · 화면 참고환산, 실제 원화 실현손익 아님")
-            self.fx_status.setToolTip(
-                f"ECB EUR 기준 USD {reference.eur_usd} / KRW {reference.eur_krw}의 같은 고시일 교차환율\n"
-                f"{reference.source_url}\n거래·체결일 환율이 아니며 수수료·세금·환전 스프레드가 없습니다.")
+            self._show_fx_reference(reference)
         self.fx_refresh_button.setEnabled(True)
         self.render_market("us")
 
@@ -331,7 +357,7 @@ class DailyTradeJournalPanel(QWidget):
         for market in MARKETS:
             self.render_market(market)
         count = len(self.journal["undated"])
-        self.warning.setText(f"날짜·시장 미확인 {count}건은 일·월·연 합계에서 제외되었습니다. 원본 주문 장부에서 확인하세요." if count else "")
+        self.warning.setText(f"날짜·시장 미확인 {count}건은 일·월·연 합계에서 제외되었습니다. 주문 장부에서 확인하세요." if count else "")
         self.warning.setVisible(bool(count))
         return True
 
@@ -346,11 +372,11 @@ class DailyTradeJournalPanel(QWidget):
 
         def display_money(amount, *, signed=False, price=False):
             if fx is not None and amount is not None:
-                return "≈ " + _money(amount * fx.krw_per_usd, "KRW", signed=signed, price=price)
+                return _money(amount * fx.krw_per_usd, "KRW", signed=signed, price=price)
             return _money(amount, currency, signed=signed, price=price)
 
         fx_note = (f"ECB {fx.published_on.isoformat()} 고시 1 USD ≈ {fx.krw_per_usd:,.2f} KRW "
-                   "현재 참고환산 · 체결일 환율/실제 원화 손익 아님" if fx is not None else "")
+                   "표시용 환산 · 체결일 환율/실제 원화 손익 아님" if fx is not None else "")
         values = self.values[market]
         for side, count_key in (("buy", "buy"), ("sell", "sell_amount")):
             unknown = summary[f"unknown_{count_key}_count"]
@@ -358,17 +384,13 @@ class DailyTradeJournalPanel(QWidget):
             text = display_money(amount)
             if unknown:
                 text += f"\n확인분 {display_money(summary[f'known_{side}_amount'])}"
-            elif fx is not None:
-                text += f"\n원본 {_money(amount, 'USD')}"
             values[side].setText(text)
             values[side].setToolTip(
                 f"실제 체결가격 확인 {summary[f'known_{count_key}_count']}건 / 금액 미확인 {unknown}건 · 주문가/현재가 대체 없음"
-                + (f"\n원본 확인분 {_money(summary[f'known_{side}_amount'], 'USD')} · {fx_note}" if fx is not None else ""))
+                + (f"\nUSD {_money(summary[f'known_{side}_amount'], 'USD')} · {fx_note}" if fx is not None else ""))
         profit, rate = summary["known_realized_profit"], summary["known_return_pct"]
         has_sales = summary["sell_count"] > 0 or summary["unknown_profit_count"] > 0
         profit_text = display_money(profit, signed=True) if has_sales else "매도 체결 없음"
-        if fx is not None and profit is not None:
-            profit_text += f"\n원본 {_money(profit, 'USD', signed=True)}"
         values["profit"].setText(profit_text)
         values["return"].setText(f"{rate:+.2f}%" if rate is not None else "미확인" if has_sales else "—")
         if summary["unknown_profit_count"] and profit is not None:
@@ -380,8 +402,8 @@ class DailyTradeJournalPanel(QWidget):
             # must always receive their full line height.
             value.setMinimumHeight(value.fontMetrics().lineSpacing() * max(2, len(value.text().splitlines())) + 4)
         values["profit"].setToolTip(RETURN_DESCRIPTION + " · 수수료·세금 제외 · 미확인 손익은 0원이 아닙니다."
-                                    + (f"\n원본 확인분 {_money(profit, 'USD', signed=True)} · {fx_note}" if fx is not None else ""))
-        values["return"].setToolTip(RETURN_DESCRIPTION + ("\n수익률은 USD 원본 매도손익·매입원가 기준이며 환산 수익률이 아닙니다." if fx is not None else ""))
+                                    + (f"\nUSD {_money(profit, 'USD', signed=True)} · {fx_note}" if fx is not None else ""))
+        values["return"].setToolTip(RETURN_DESCRIPTION + ("\n수익률은 USD 매도손익·매입원가 기준입니다." if fx is not None else ""))
         period_title = (day.isoformat() if period == "day" else
                         day.strftime("%Y-%m") if period == "month" else str(day.year))
         self.summaries[market].setText(
@@ -415,14 +437,14 @@ class DailyTradeJournalPanel(QWidget):
                           prototype_order_label(row)))
         view = self.tables[market]
         for column, title in ((4, "체결 평균가"), (5, "체결금액"), (6, "실현손익")):
-            view.horizontalHeaderItem(column).setText(title + (" (참고 KRW)" if fx is not None else ""))
+            view.horizontalHeaderItem(column).setText(title)
         if populate(view, cells, [row["rule_id"] for row in rows]):
             for index, row in enumerate(rows):
                 fx_details = ""
                 if fx is not None:
                     original_profit = (_money(row["metric"].get("realized_profit"), "USD", signed=True)
                                        if row.get("side") == "sell" and row["has_fill"] else "—")
-                    fx_details = (f"원본 USD 체결가 {_money(row['effective_fill_price'], 'USD', price=True)} · "
+                    fx_details = (f"USD 체결가 {_money(row['effective_fill_price'], 'USD', price=True)} · "
                                   f"체결금액 {_money(row['amount'], 'USD')} · "
                                   f"실현손익 {original_profit}\n{fx_note}\n")
                 tooltip = (f"주문번호: {row.get('order_number') or '미확인'}\n{DATE_DESCRIPTION}\n"

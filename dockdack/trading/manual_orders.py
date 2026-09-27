@@ -65,10 +65,14 @@ def _claim_manual(store, request, reference, now):
             raise OrderNotSent("이 종목의 미확정·미체결 주문을 먼저 확인하세요. 재주문하지 않았습니다.")
         existing = db.execute("SELECT 1 FROM watchlist WHERE id=?", (item.id,)).fetchone()
         if not existing:
-            if db.execute("SELECT COUNT(*) FROM watchlist WHERE active=1").fetchone()[0] >= MAX_WATCH_ITEMS:
+            ranked = store._complete_ranked_rows(db, request.market)
+            # A manual order still needs a durable watch row, but an unranked
+            # symbol must not become a 101st ordinary buy/quote interest.
+            active = int(not ranked or item.id in {row["watch_id"] for row in ranked})
+            if active and db.execute("SELECT COUNT(*) FROM watchlist WHERE active=1").fetchone()[0] >= MAX_WATCH_ITEMS:
                 raise OrderNotSent("관심종목 저장 한도에 도달해 수동 주문을 기록할 수 없습니다.")
-            db.execute("INSERT INTO watchlist(id,market,symbol,exchange,name,days,active) VALUES(?,?,?,?,?,30,1)",
-                       (item.id, request.market.value, request.symbol, request.exchange, ""))
+            db.execute("INSERT INTO watchlist(id,market,symbol,exchange,name,days,active) VALUES(?,?,?,?,?,30,?)",
+                       (item.id, request.market.value, request.symbol, request.exchange, "", active))
         # Existing name, days and inactive membership deliberately survive.
         db.execute("INSERT INTO rules(id,watch_id,kind,side,quantity,max_notional,threshold,period,status) "
                    "VALUES(?,?,?,?,?,?,?,?,?)", (rule.id, rule.watch_id, rule.kind.value, rule.side.value,

@@ -36,6 +36,22 @@ class OperationsGuiTests(unittest.TestCase):
         self.operations = OperationsPanel()
         self.serial = 0
 
+    def test_redundant_order_summary_cards_are_not_shown(self):
+        self.orders.show()
+        self.app.processEvents()
+        self.assertFalse(self.orders.summary.isVisible())
+        self.assertFalse(self.orders.performance_label.isVisible())
+        self.assertFalse(self.orders.recovery_label.isVisible())
+        self.assertTrue(self.orders.table.isVisible())
+        self.assertEqual(self.orders.tabs.count(), 2)
+
+    def test_order_event_log_shows_rows_without_redundant_heading_and_count(self):
+        self.orders.show()
+        self.orders.tabs.setCurrentWidget(self.orders.audit)
+        self.app.processEvents()
+        self.assertTrue(self.orders.audit.table.isVisible())
+        self.assertFalse(self.orders.audit.count_label.isVisible())
+
     def tearDown(self):
         for panel in (self.orders, self.operations):
             panel.close()

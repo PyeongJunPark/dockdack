@@ -150,8 +150,8 @@ class GuiOptimizationTests(unittest.TestCase):
             self.assertLess(point.y(), self.window.height())
         for control in (self.window.stop_button, self.window.environment_selector):
             self.assertTrue(self.window.advanced_monitor_page.isAncestorOf(control))
-        self.assertEqual(self.window.tabs.indexOf(self.window.external_panel), -1)
-        self.assertGreaterEqual(self.window.signal_connection_page.indexOf(self.window.external_panel), 0)
+        self.assertGreaterEqual(self.window.tabs.indexOf(self.window.external_panel), 0)
+        self.assertEqual(self.window.signal_connection_page.indexOf(self.window.external_panel), -1)
 
     def test_normal_gui_has_no_account_wide_close_policy_or_confirmation(self):
         self.assertFalse(hasattr(self.window, 'close_all_at_market_end'))

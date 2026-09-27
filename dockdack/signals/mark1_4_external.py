@@ -30,8 +30,8 @@ MODEL_ID = "mark1-4-prototype"
 SOURCE_ID = "mark1-4-prototype-demo-trigger"
 TITLE = "mark1.4 prototype"
 STRATEGY_NOTICE = (
-    "국내 E5 / 미국 E1 · 완료 30일봉으로 개장 전 후보 동결 · 장초반 5분만 모의 매수 · "
-    "시장별 평가자산 10%씩 최대 10종목 · 체결 확인된 Mark1.4 보유분만 거래일 마감 5분 전 개별 매도 시도"
+    "국내 압축특징 신경망 / 미국 종목 간 순위 신경망 · 완료 30일봉으로 개장 전 후보 동결 · 장초반 5분만 모의 매수 · "
+    "설정한 평가자산 비중으로 최대 10종목 · 체결 확인된 Mark1.4 보유분만 거래일 마감 5분 전 개별 매도 시도"
 )
 RISK_NOTICE = (
     "국내 압축특징망 / 미국 같은 날 순위망 · 점수는 확률이 아님 · 현재 TOP100은 "
@@ -81,7 +81,8 @@ def _signal_id(export_id: str, watch_id: str, *, model_id=MODEL_ID, source_id=SO
 
 
 def _policy_enabled(engine) -> bool:
-    return getattr(engine, "equity_buy_percent", None) == Decimal("10")
+    percent = getattr(engine, "equity_buy_percent", None)
+    return isinstance(percent, Decimal) and percent.is_finite() and Decimal("0") < percent <= Decimal("100")
 
 
 def _matches_preopen_bars(plan, key, market, bars):
@@ -349,7 +350,7 @@ class Mark14ExternalFeed(ExternalPrototypeFeed):
     def _require_policy(self):
         self.bridge._ensure_demo()
         if not _policy_enabled(self.window.engine):
-            raise ValueError("Mark1.4는 평가자산 10% 모의 매수 설정이 필요합니다.")
+            raise ValueError("Mark1.4는 0% 초과·100% 이하 평가자산 비중 모의 매수 설정이 필요합니다.")
 
     def prepare_preopen(self, market, candidates, *, now, session):
         """Score a whole ranked market once during the final pre-open ten minutes.

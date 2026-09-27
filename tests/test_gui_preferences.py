@@ -84,7 +84,7 @@ class GuiPreferencesTests(unittest.TestCase):
         first.order_popups.setChecked(False)
         first.additional_sources.add_row(source='second', path=str(self.folder / 'second.json'))
         first.watch_market_tabs.setCurrentIndex(1)
-        first.advanced_settings_button.setChecked(True)
+        first.workspace_tabs.setCurrentWidget(first.tabs)
         first.workspace_tabs.setCurrentWidget(first.watch_page)
         first.close()
 
@@ -112,7 +112,8 @@ class GuiPreferencesTests(unittest.TestCase):
         self.assertEqual(second.additional_sources.raw_sources(), (('second', str(self.folder / 'second.json')),))
         self.assertEqual(second.watch_market_tabs.currentIndex(), 1)
         self.assertIs(second.workspace_tabs.currentWidget(), second.watch_page)
-        self.assertTrue(second.advanced_settings_button.isChecked())
+        self.assertTrue(second.workspace_tabs.isTabVisible(second.workspace_tabs.indexOf(second.tabs)))
+        self.assertTrue(second.advanced_settings_button.isHidden())
         self.assertFalse(second.monitoring)
         self.assertFalse(second.pending_auto_arm)
         self.assertFalse(second.engine.orders_enabled)
@@ -134,7 +135,7 @@ class GuiPreferencesTests(unittest.TestCase):
             with self.subTest(selection=selection):
                 self.store.save_ui_preferences({'version': 3, 'advanced_visible': False, **selection})
                 window = self.make_window()
-                self.assertTrue(window.advanced_settings_button.isChecked())
+                self.assertTrue(window.workspace_tabs.isTabVisible(window.workspace_tabs.indexOf(window.tabs)))
                 self.assertIs(window.workspace_tabs.currentWidget(), window.tabs)
                 self.assertIs(window.tabs.currentWidget(), window.operations_panel)
                 window.close()

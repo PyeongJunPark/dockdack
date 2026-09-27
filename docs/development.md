@@ -8,7 +8,7 @@
 
 저장소에서는 `uv sync --locked --extra gui --extra prototype` 후 `uv run dockdack-gui` 또는 기존 `DockDack.vbs`를 사용한다. 시작 시 감시·자동주문 OFF다. 모의계좌 전체의 마감 전량매도 기능은 제거했다. 장전 모델별 기간 매도는 확인된 해당 모델 매수분에만 적용되며, 감시·모의 자동주문 ON과 주문별 검사가 필요하다.
 
-wheel에는 코드/worker/UI 자산이 들어가고 모델·API 키·거래 DB는 포함하지 않는다. 설치본은 `DOCKDACK_HOME`을 데이터 홈으로 사용하며, 미지정 시 Windows `%LOCALAPPDATA%/DockDack`이다. 저장소 실행은 기존 저장소 홈을 유지한다. `DOCKDACK_MODEL_ROOT`로 **models의 상위 폴더가 아니라 models 폴더 자체**를 지정한다. 그 아래 장중 `mark1_prototype`, `mark1_1_prototype`, `mark1_2_prototype` 및 장전 `mark1_4`, `mark1_series`, `mark1_8`, `mark1_9`, `mark1_10`, `mark1_horizons` 묶음을 상대 구조 그대로 둔다. manifest와 runtime 소스 검증을 통과한 모델만 읽는다.
+wheel에는 코드/worker/UI 자산이 들어가고 모델·API 키·거래 DB는 포함하지 않는다. 설치본은 `DOCKDACK_HOME`을 데이터 홈으로 사용하며, 미지정 시 Windows `%LOCALAPPDATA%/DockDack`이다. 저장소 실행은 기존 저장소 홈을 유지한다. `DOCKDACK_MODEL_ROOT`로 **models의 상위 폴더가 아니라 models 폴더 자체**를 지정한다. 그 아래 장중 `mark1_prototype`, `mark1_1_prototype`, `mark1_2_prototype` 및 장전 `mark1_3`, `mark1_4`, `mark1_series`, `mark1_8`, `mark1_9`, `mark1_10`, `mark1_horizons` 묶음을 상대 구조 그대로 둔다. manifest와 runtime 소스 검증을 통과한 모델만 읽는다.
 
 ```powershell
 $env:DOCKDACK_HOME = 'C:/DockDack'
@@ -55,7 +55,7 @@ uv build --wheel
 
 `scripts/check.py`는 소스 구문 검사와 전체 unittest를 실행하고, 발견된 테스트가 0개면 실패한다. GUI는 가상 화면에서 검증한다. 실제 API 키나 주문 권한은 필요하지 않다. 연구/CUDA 설치는 [연구 도구](research-tools.md)와 `requirements-ml-cuda.txt`를 따르며, 운영 GUI에 GPU 학습 환경을 강제하지 않는다.
 
-별도 환경에 wheel과 gui/prototype 의존성을 설치한 뒤 **저장소 밖 작업 폴더**에서 해당 Python으로 `scripts/smoke_installed.py --model-root <모델폴더>`를 실행하면 체크아웃 import 여부, 일반 GUI import, 두 worker와 국내/미국 저장 추론을 확인한다. 이 검사는 계좌·주문을 만들지 않는다. 원격 CI 파일은 `.github/workflows/check.yml`; 로컬 통과와 원격 실행 완료는 구분한다.
+별도 환경에 wheel과 gui/prototype 의존성을 설치한 뒤 **저장소 밖 작업 폴더**에서 해당 Python으로 `scripts/smoke_installed.py --model-root <모델폴더>`를 실행하면 체크아웃 import 여부, 일반 GUI import, 선택 가능한 13개 모델의 독립 worker와 국내/미국 저장 추론을 확인한다. 이 검사는 계좌·주문을 만들지 않는다. 원격 CI 파일은 `.github/workflows/check.yml`이며, CI는 빠른 `scripts/smoke_wheel_imports.py`로 빌드된 wheel의 5개 명령 진입점·GUI 자산·소스 밖 import만 확인한다. 이 빠른 검사는 별도 설치 환경이나 모델 추론의 대체가 아니다. 로컬 통과와 원격 실행 완료는 구분한다.
 
 ## 구조와 호환
 

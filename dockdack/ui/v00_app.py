@@ -14,11 +14,11 @@ from pathlib import Path
 import sys
 from uuid import NAMESPACE_URL, uuid5
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QGridLayout, QHeaderView, QHBoxLayout, QMessageBox, QLabel,
-    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QMessageBox, QLabel,
+    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from dockdack.branding import apply_branding, set_windows_app_id
@@ -30,6 +30,7 @@ from dockdack.models import Market, TradingMode
 from dockdack.portfolio import PortfolioCache
 from dockdack.signal_bridge import atomic_json, ExternalPolicy, SignalFileReader
 from dockdack.signals.preopen_series import PREOPEN_MODELS
+from dockdack.trading.model_exit_schedule import timed_exit_due
 from dockdack.watch_gui import WatchlistDialog
 from dockdack.watchlist import WatchStore
 
@@ -146,10 +147,10 @@ MARK12_NOTICE = (
     '현재가에서 +1%/−0.9% 선후 도달 확률 50% 초과 시 모의 매수 후보 · 해당 매수분의 기준은 +1%/−0.9%'
 )
 MARK14_NOTICE = (
-    'mark1.4 prototype · 국내 E5: 완료 30일봉의 추세·변동성·거래량/유동성 압축 특징을 학습한 신경망. '
-    '미국 E1: 같은 날 100종목의 다음 거래일 상대 순수익 순위를 학습한 신경망.\n'
+    'mark1.4 prototype · 국내: 완료 30일봉의 추세·변동성·거래량/유동성 압축 특징을 학습한 신경망. '
+    '미국: 같은 날 100종목의 다음 거래일 상대 순수익 순위를 학습한 신경망.\n'
     '개장 10분 전 점수·후보 동결, 숫자 기준 초과 상위 10종목만 개장 후 5분 모의 매수 후보. 점수는 확률이 아닙니다.\n'
-    '종목당 평가자산 10% 한도 · Mark1.4 실제 체결로 확인된 보유분만 해당 거래일 마감 5분 전부터 가격 무관 매도 시도. 계좌 전체 청산은 하지 않습니다.'
+    '1회 매수 비중은 모델 선택 화면 설정과 주문 상한을 적용 · Mark1.4 실제 체결로 확인된 보유분만 해당 거래일 마감 5분 전부터 가격 무관 매도 시도. 계좌 전체 청산은 하지 않습니다.'
 )
 PROTOTYPE_NOTICES = {MARK1_TRIGGER: MARK1_NOTICE, MARK11_TRIGGER: MARK11_NOTICE,
                      MARK12_TRIGGER: MARK12_NOTICE, MARK14_TRIGGER: MARK14_NOTICE}
@@ -170,8 +171,8 @@ PROTOTYPE_METHODS = {
     MARK1_TRIGGER: '30일봉 특징 · CatBoost 3개 시드 앙상블',
     MARK11_TRIGGER: '30일봉 특징 · 별도 CatBoost 3개 시드 앙상블',
     MARK12_TRIGGER: '가상 매수가 증강 30일봉 · 국내 CNN / 미국 LSTM 3개 시드',
-    MARK14_TRIGGER: ('국내 E5: 추세·변동성·유동성 압축 특징 신경망 / '
-                     '미국 E1: 같은 날 100종목의 다음 날 상대 수익 순위 신경망'),
+    MARK14_TRIGGER: ('국내: 추세·변동성·유동성 압축 특징 신경망 / '
+                     '미국: 같은 날 100종목의 다음 날 상대 수익 순위 신경망'),
 }
 PROTOTYPE_METHODS.update({model: spec.method for model, spec in PREOPEN_MODELS.items()})
 PROTOTYPE_EXITS = {
@@ -186,33 +187,97 @@ PROTOTYPE_EXITS.update({model: spec.horizon for model, spec in PREOPEN_MODELS.it
 class Mark14Panel(QWidget):
     """One model selection surface; pre-open scores retain their own units."""
 
-    def __init__(self, enabled_models, parent=None):
+    def __init__(self, enabled_models, parent=None, *, clock=None):
         super().__init__(parent)
+        self._clock = clock
         self.setObjectName('mark14Panel')
         layout = QVBoxLayout(self)
         self.heading = QLabel('모델 선택 · 선택한 모델은 각자 독립 신호를 냅니다')
-        layout.addWidget(self.heading)
+        self.heading.hide()
+        self.sizing_card = QFrame()
+        self.sizing_card.setObjectName('modelSizingCard')
+        self.sizing_card.setStyleSheet(
+            'QFrame#modelSizingCard { background: #193148; border: 1px solid #31536d; border-radius: 6px; }')
+        self.sizing_row = QHBoxLayout(self.sizing_card)
+        self.sizing_row.setContentsMargins(12, 7, 12, 7)
+        self.sizing_row.setSpacing(12)
+        self.sizing_label = QLabel('1회 매수 비중')
+        self.sizing_label.setStyleSheet('font-size: 14px; font-weight: 600; color: #e9f5ff;')
+        self.sizing_row.addWidget(self.sizing_label)
+        self.sizing_row.addStretch()
+        layout.addWidget(self.sizing_card)
         choices = QWidget()
-        choice_grid = QGridLayout(choices)
+        choices.setStyleSheet('background: #121b2a; color: #e9f5ff;')
+        choice_stack = QVBoxLayout(choices)
+        choice_stack.setContentsMargins(7, 7, 7, 7)
+        choice_stack.setSpacing(6)
         self.model_checks = {}
         self.model_descriptions = {}
-        for index, model in enumerate(ALL_MODEL_IDS):
+        self.model_detail_fields = {}
+        self._model_detail_rows = []
+        self._detail_columns = None
+        for model in ALL_MODEL_IDS:
             phase = '장중' if model in BARRIER_MODELS else '장전'
+            card = QFrame()
+            card.setObjectName('modelChoiceCard')
+            card.setStyleSheet('QFrame#modelChoiceCard { background: #1a293a; border: 1px solid #30465b; '
+                               'border-radius: 6px; }')
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(11, 8, 11, 8)
+            card_layout.setSpacing(4)
+            card_header = QHBoxLayout()
+            card_header.setSpacing(8)
             check = QCheckBox(PROTOTYPE_TITLES[model])
             check.setObjectName('external-' + model)
             check.setChecked(model in enabled_models)
             check.setToolTip(PROTOTYPE_NOTICES[model])
-            choice_grid.addWidget(check, index * 2, 0)
-            choice_grid.addWidget(QLabel(phase), index * 2, 1)
+            check.setStyleSheet('QCheckBox { font-size: 15px; font-weight: 600; color: #e9f5ff; }')
+            card_header.addWidget(check)
+            card_header.addStretch()
+            phase_label = QLabel(phase)
+            phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            phase_label.setFixedWidth(44)
+            phase_label.setStyleSheet('font-size: 12px; font-weight: 600; color: #aee4d4; '
+                                      'background: #254653; border-radius: 4px; padding: 2px;')
+            card_header.addWidget(phase_label)
+            card_layout.addLayout(card_header)
             description = QLabel(
                 f'학습: {PROTOTYPE_METHODS[model]} · 출력: {PROTOTYPE_TARGETS[model]} · '
-                f'매도: {PROTOTYPE_EXITS[model]}')
+                f'매도: {PROTOTYPE_EXITS[model]}', card)
             description.setObjectName('method-' + model)
-            description.setWordWrap(True)
             description.setToolTip(PROTOTYPE_NOTICES[model])
-            choice_grid.addWidget(description, index * 2 + 1, 0, 1, 2)
+            description.hide()  # Semantic text for accessibility and compatibility; visible fields are separate.
+            detail_grid = QGridLayout()
+            detail_grid.setContentsMargins(0, 2, 0, 0)
+            detail_grid.setHorizontalSpacing(6)
+            detail_grid.setVerticalSpacing(6)
+            fields = []
+            for caption, value in (('학습', PROTOTYPE_METHODS[model]),
+                                   ('출력', PROTOTYPE_TARGETS[model]),
+                                   ('매도', PROTOTYPE_EXITS[model])):
+                field = QFrame()
+                field.setObjectName('modelDetailField')
+                field.setStyleSheet('QFrame#modelDetailField { background: #22364a; '
+                                    'border: 1px solid #314e64; border-radius: 4px; }')
+                field_layout = QVBoxLayout(field)
+                field_layout.setContentsMargins(8, 5, 8, 6)
+                field_layout.setSpacing(3)
+                heading = QLabel(caption)
+                heading.setStyleSheet('font-size: 11px; font-weight: 600; color: #80dbcd;')
+                field_layout.addWidget(heading)
+                value_label = QLabel(value)
+                value_label.setWordWrap(True)
+                value_label.setStyleSheet('font-size: 13px; color: #e9f5ff;')
+                field_layout.addWidget(value_label)
+                fields.append(field)
+            card_layout.addLayout(detail_grid)
+            self._model_detail_rows.append((detail_grid, fields))
+            choice_stack.addWidget(card)
             self.model_checks[model] = check
             self.model_descriptions[model] = description
+            self.model_detail_fields[model] = fields
+        choice_stack.addStretch()
+        self._reflow_model_details()
         self.enable_check = self.model_checks[MARK14_TRIGGER]
         self.barrier_checks = {model: self.model_checks[model] for model in BARRIER_MODELS}
         self.extra_checks = {}
@@ -220,9 +285,10 @@ class Mark14Panel(QWidget):
             self.extra_checks[model] = self.model_checks[model]
         choice_list = QScrollArea()
         choice_list.setObjectName('allModelChoices')
+        choice_list.setStyleSheet('QScrollArea { background: #121b2a; border: 1px solid #2a455c; border-radius: 5px; }')
         choice_list.setWidgetResizable(True)
         choice_list.setWidget(choices)
-        choice_list.setMinimumHeight(130)
+        choice_list.setMinimumHeight(180)
         layout.addWidget(choice_list, 1)
         self.notice = QLabel(
             '모의계좌 모델 신호 · 실전 모델 주문 차단 · 자동주문 ON은 별도. '
@@ -230,12 +296,13 @@ class Mark14Panel(QWidget):
         self.notice.setWordWrap(True)
         self.notice.setStyleSheet('color: #ffda91;')
         self.notice.setToolTip(MARK14_NOTICE)
-        layout.addWidget(self.notice)
-        self.status = QLabel('장전 판단 대기 · 10분 전 거래량 TOP100 및 완료 30봉 필요 · 주문 OFF는 별도')
+        self.notice.hide()
+        self.status = QLabel('—')
         self.status.setObjectName('mark14PreopenStatus')
         self.status.setWordWrap(True)
         self.status.setStyleSheet('background: #183047; color: #c6e9f1; padding: 8px; border-radius: 5px;')
         layout.addWidget(self.status)
+        self.status.hide()
         self.model_results = {}
         self.model_selector = QComboBox()
         self.model_selector.setObjectName('preopenModelResults')
@@ -243,10 +310,15 @@ class Mark14Panel(QWidget):
             self.model_selector.addItem(PROTOTYPE_TITLES[model], model)
         self.model_selector.currentIndexChanged.connect(self._show_selected_model)
         layout.addWidget(self.model_selector)
+        self.selected_result = QLabel('선택 종목 —')
+        self.selected_result.setObjectName('selectedModelResult')
+        self.selected_result.setWordWrap(True)
+        self.selected_result.setStyleSheet('background: #193148; color: #e9f5ff; padding: 7px; border-radius: 6px;')
+        layout.addWidget(self.selected_result)
         self.tables = {}
         self.market_tabs = QTabWidget()
-        for market, title in (('domestic', '국내 E5 · 예상 순수익률 점수'),
-                              ('us', '미국 E1 · 상대순위 점수')):
+        for market, title in (('domestic', '국내 · 예상 순수익률 점수'),
+                              ('us', '미국 · 상대순위 점수')):
             table = QTableWidget(0, 5)
             table.setObjectName('mark14-' + market)
             table.setHorizontalHeaderLabels(('종목', '점수', '진입기준', '장전 판정', '학습 비중'))
@@ -256,6 +328,45 @@ class Mark14Panel(QWidget):
             self.tables[market] = table
         layout.addWidget(self.market_tabs, 1)
         self.model_selector.setCurrentIndex(self.model_selector.findData(MARK14_TRIGGER))
+        # A prepared plan is only actionable for its own exchange session.
+        # Keep older scores for inspection, but never present them as today's candidates.
+        self.session_display_timer = QTimer(self)
+        self.session_display_timer.setInterval(60_000)
+        self.session_display_timer.timeout.connect(self._show_selected_model)
+        self.session_display_timer.start()
+
+    def _reflow_model_details(self):
+        columns = 3 if self.width() >= 1050 else 2 if self.width() >= 690 else 1
+        if columns == self._detail_columns:
+            return
+        self._detail_columns = columns
+        for grid, fields in self._model_detail_rows:
+            while grid.count():
+                grid.takeAt(0)
+            for index, field in enumerate(fields):
+                if columns == 2 and index == 2:
+                    grid.addWidget(field, 1, 0, 1, 2)
+                else:
+                    grid.addWidget(field, index // columns, index % columns)
+            for index in range(3):
+                grid.setColumnStretch(index, 1 if index < columns else 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_model_detail_rows'):
+            self._reflow_model_details()
+
+    def _result_is_current_session(self, market, result):
+        try:
+            from dockdack.history import market_time
+            from dockdack.market_schedule import session_on
+            market_enum = Market(market)
+            now = self._clock()
+            session = session_on(market_enum, market_time(market_enum, now).date())
+            opened = datetime.fromisoformat(str(result['session_open']))
+            return session is not None and opened == session.opened
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
 
     def show_preopen(self, result):
         if not isinstance(result, dict):
@@ -278,7 +389,7 @@ class Mark14Panel(QWidget):
             self.status.setText(
                 f'{PROTOTYPE_TITLES[model]} · 장중 추론\n'
                 f'{PROTOTYPE_METHODS[model]}\n'
-                f'현재가 기준 {PROTOTYPE_TARGETS[model]} 추정확률은 관심종목·차트에서 확인')
+                f'현재가 기준 {PROTOTYPE_TARGETS[model]} 추정확률은 관심종목 표와 상단 최근 조회에서 확인')
             return
         self.market_tabs.show()
         statuses = []
@@ -286,18 +397,20 @@ class Mark14Panel(QWidget):
             result = self.model_results.get((model, market), {})
             name = '국내' if market == 'domestic' else '미국'
             if model == MARK14_TRIGGER:
-                self.market_tabs.setTabText(index, '국내 E5 · 예상 순수익률 점수' if market == 'domestic'
-                                            else '미국 E1 · 상대순위 점수')
+                self.market_tabs.setTabText(index, '국내 · 예상 순수익률 점수' if market == 'domestic'
+                                            else '미국 · 상대순위 점수')
             else:
                 self.market_tabs.setTabText(index, f'{name} · {PROTOTYPE_TARGETS[model]}')
             if not result:
-                statuses.append(f'{name} · 장전 판단 대기')
+                statuses.append(f'{name} · —')
                 table.setRowCount(0)
                 continue
             state = str(result.get('state', '대기'))
             reason = str(result.get('reason') or '')
             opened = str(result.get('session_open') or '')
-            statuses.append(f'{name} · {state} · 개장 {opened}' + (f' · {reason}' if reason else ''))
+            prior = not self._result_is_current_session(market, result)
+            statuses.append(f'{name} · {"이전 장 · " if prior else ""}{state} · 개장 {opened}'
+                            + (f' · {reason}' if reason else ''))
             candidates = result.get('candidates')
             if not isinstance(candidates, list):
                 table.setRowCount(0)
@@ -309,6 +422,8 @@ class Mark14Panel(QWidget):
                 score = candidate.get('score')
                 threshold = candidate.get('threshold')
                 decision = ('매수 후보' if candidate.get('selected') else '대기')
+                if prior:
+                    decision = '이전 장 · ' + decision
                 if candidate.get('out_of_training_universe'):
                     decision += ' · 학습종목 밖'
                 fraction = candidate.get('equity_fraction')
@@ -422,51 +537,129 @@ class V00Window(WatchlistDialog):
         # Display history only. Neither external JSON nor order validation
         # reads this cache; old probabilities cannot authorize a trade.
         self._last_model_scores = {}
+        self._last_preopen_scores = {}
         self._last_queried_watch_id = None
         self._last_complete_model_summary = None
         super().__init__(service or TradingService(), store, defer_workspace=True, session_lock=session_lock)
-        self.mark14_panel = Mark14Panel(enabled_models, self)
+        self._last_workspace_page = self.workspace_tabs.currentWidget()
+        self.workspace_tabs.tabBar().tabBarClicked.connect(self._workspace_tab_clicked)
+        self.mark14_panel = Mark14Panel(enabled_models, self, clock=lambda: self.engine.clock())
+        self.mark14_panel.model_selector.currentIndexChanged.connect(self._update_model_detail)
         status_page = self.signal_connection_page.widget(0)
         self.signal_connection_page.removeTab(0)
         status_page.hide()  # Keep diagnostic internals, remove the status/inspect screen.
-        self.signal_connection_page.insertTab(0, self.mark14_panel, '전체 모델')
-        self.signal_connection_page.setTabText(1, '공통 주문·연결')
+        self.signal_connection_page.removeTab(self.signal_connection_page.indexOf(self.external_panel))
+        self.tabs.addTab(self.external_panel, '공통 주문·연결')
+        self.workspace_tabs.removeTab(self.workspace_tabs.indexOf(self.model_performance_panel))
+        self.signal_connection_page.addTab(self.mark14_panel, '모델 선택')
+        self.signal_connection_page.addTab(self.model_performance_panel, '모델 성과')
+        self.signal_connection_page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.signal_connection_page.currentChanged.connect(lambda _: self._reload_activity(visible_force=True))
+        self.signal_connection_page.currentChanged.connect(self._refresh_visible_model_display)
+        self.workspace_tabs.setTabText(self.workspace_tabs.indexOf(self.watch_page), '관심종목')
         self.workspace_tabs.setTabText(self.workspace_tabs.indexOf(self.signal_connection_page),
-                                       'AI 추론모델 연결')
+                                       'AI 추론 모델')
         self.workspace_tabs.setTabText(self.workspace_tabs.indexOf(self.order_history_panel),
                                        '주문·체결')
         for destination, page in enumerate((self.watch_page, self.portfolio_panel,
-                                            self.order_history_panel, self.trade_journal_panel,
-                                            self.model_performance_panel, self.signal_connection_page,
-                                            self.tabs)):
+                                            self.trade_journal_panel, self.order_history_panel,
+                                            self.signal_connection_page, self.tabs)):
             source = self.workspace_tabs.indexOf(page)
             if source != destination:
                 self.workspace_tabs.tabBar().moveTab(source, destination)
         self.workspace_tabs.setCurrentWidget(self.watch_page)
         for view in self.watch_tables.values():
-            view.setColumnCount(7)
-            view.setHorizontalHeaderLabels(('종목', '현재가', 'N일', '조회',
-                                            'MK1.0 추정확률', 'MK1.1 추정확률', 'MK1.2 추정확률'))
-            view.setMinimumWidth(680)
-            for column, width in ((0, 110), (1, 95), (2, 40), (3, 110), (4, 105), (5, 105), (6, 105)):
+            view.setColumnCount(3 + len(ALL_MODEL_IDS))
+            view.setHorizontalHeaderLabels(('종목',
+                                            *(PROTOTYPE_TITLES[model].replace('mark', 'MK').replace(' prototype', '')
+                                              + (' 추정확률' if model in BARRIER_MODELS else ' 점수')
+                                              for model in ALL_MODEL_IDS),
+                                            '현재가', '조회'))
+            view.setMinimumWidth(285 if self._watch_compact else 680)
+            for column, width in ((0, 110), (view.columnCount() - 2, 95),
+                                  (view.columnCount() - 1, 110)):
                 view.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
                 view.setColumnWidth(column, width)
-        self.model_score_summary = QLabel('모델 판단 전')
+            for column in range(1, view.columnCount() - 2):
+                view.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+                view.setColumnWidth(column, 126)
+        self.model_score_summary = QLabel('현재가 —')
         self.model_score_summary.setObjectName('modelScoreSummary')
-        self.model_score_summary.setWordWrap(True)
+        self.model_score_summary.setWordWrap(False)
+        self.model_score_summary.setFixedHeight(34)
         self.model_score_summary.setStyleSheet(
             'QLabel#modelScoreSummary { background: #193148; color: #e9f5ff; '
-            'border: 1px solid #31536d; border-radius: 6px; padding: 8px; font-weight: 600; }')
-        self.model_score_summary.setToolTip('장중 모델은 장벽 선후 확률, 장전 모델은 각자 다른 단위의 동결 점수입니다. 서로 평균하거나 주문 판단에 섞지 않습니다.')
-        self.chart_title.parentWidget().layout().insertWidget(1, self.model_score_summary)
+            'border: 1px solid #31536d; border-radius: 6px; padding: 4px 8px; font-weight: 600; }')
+        self.price_change_summary = QLabel('전일 대비 —')
+        self.price_change_summary.setObjectName('priceChangeSummary')
+        self.price_change_summary.setFixedHeight(34)
+        self.price_change_summary.setStyleSheet(
+            'QLabel#priceChangeSummary { background: #193148; color: #e9f5ff; '
+            'border: 1px solid #31536d; border-radius: 6px; padding: 4px 8px; font-weight: 600; }')
+        self.price_strip = QWidget()
+        price_layout = QHBoxLayout(self.price_strip)
+        price_layout.setContentsMargins(0, 0, 0, 0)
+        price_layout.setSpacing(6)
+        price_layout.addWidget(self.model_score_summary, 1)
+        price_layout.addWidget(self.price_change_summary, 1)
+        self.chart_title.parentWidget().layout().insertWidget(1, self.price_strip)
         self.latest_model_summary = QLabel('최근 조회 종목 — · 모델 추정확률 —')
         self.latest_model_summary.setObjectName('latestModelSummary')
-        self.latest_model_summary.setAccessibleName('마지막 조회 종목과 활성 외부 AI 모델 추정확률 평균')
-        self.latest_model_summary.setWordWrap(True)
-        self.latest_model_summary.setStyleSheet('color: #aee4d4; font-weight: 600;')
-        self.latest_model_summary.setToolTip('같은 종목·같은 조회 시세에서 활성화된 모든 외부 prototype 모델이 판단했을 때만 산술평균을 표시합니다. 모델별 목표 조건이 달라 매매 판단에 쓰지 않습니다.')
-        self.layout().insertWidget(self.layout().indexOf(self.sweep_progress), self.latest_model_summary)
-        self.health_timer.timeout.connect(self._refresh_model_scores)
+        self.latest_model_summary.setAccessibleName('최근 조회 종목과 활성 AI 모델별 매수 판단 및 점수')
+        self.latest_model_summary.setWordWrap(False)
+        self.latest_model_summary.setFixedHeight(42)
+        self.latest_model_summary.setStyleSheet('QLabel#latestModelSummary { color: #e9f5ff; '
+                                                'background: transparent; border: none; '
+                                                'padding: 6px 8px; font-weight: 600; }')
+        self.latest_model_summary.setToolTip('최근 완료 조회 기준. 장중 확률 평균은 확률 모델끼리만 계산하며, 장전 점수는 모델별 단위 그대로 표시합니다. 매매 판단에 합산하지 않습니다.')
+        self.latest_model_summary_area = QScrollArea()
+        self.latest_model_summary_area.setObjectName('latestModelSummaryArea')
+        self.latest_model_summary_area.setWidgetResizable(False)
+        self.latest_model_summary_area.setFixedHeight(44)
+        self.latest_model_summary_area.setStyleSheet(
+            'QScrollArea#latestModelSummaryArea { background: #193148; '
+            'border: 1px solid #31536d; border-radius: 6px; }')
+        self.latest_model_summary_area.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.latest_model_summary_area.setWidget(self.latest_model_summary)
+        self.connection_flow.addWidget(self.latest_model_summary_area, 1)
+        # Keep the plain-text status for existing diagnostics, but make the
+        # compact visible card emphasize the model count instead of a sentence.
+        self.connection_flow.removeWidget(self.connection_summary)
+        self.connection_summary.setParent(self)
+        self.connection_summary.hide()
+        self.ai_connection_card = QFrame()
+        self.ai_connection_card.setObjectName('aiConnectionCard')
+        self.ai_connection_card.setFixedHeight(44)
+        self.ai_connection_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.ai_connection_card.setStyleSheet(
+            'QFrame#aiConnectionCard { background: #193148; border: 1px solid #31536d; border-radius: 6px; }')
+        ai_row = QHBoxLayout(self.ai_connection_card)
+        ai_row.setContentsMargins(10, 3, 9, 3)
+        ai_row.setSpacing(3)
+        ai_title = QLabel('AI 모델')
+        ai_title.setStyleSheet('font-size: 11px; color: #b8cbdc;')
+        ai_row.addWidget(ai_title)
+        ai_row.addStretch()
+        self.ai_model_count = QLabel('0')
+        self.ai_model_count.setObjectName('aiModelCount')
+        self.ai_model_count.setStyleSheet('font-size: 23px; font-weight: 700; color: #78e6c7;')
+        ai_row.addWidget(self.ai_model_count)
+        ai_suffix = QLabel('개 선택')
+        ai_suffix.setStyleSheet('font-size: 11px; color: #b8cbdc;')
+        ai_row.addWidget(ai_suffix)
+        self.ai_connection_warning = QLabel('점검')
+        self.ai_connection_warning.setObjectName('aiConnectionWarning')
+        self.ai_connection_warning.setStyleSheet('font-size: 11px; font-weight: 600; color: #ffbf80;')
+        self.ai_connection_warning.hide()
+        ai_row.addWidget(self.ai_connection_warning)
+        self.connection_flow.insertWidget(1, self.ai_connection_card, 1)
+        # Health text is refreshed every second, but the 200-row x 13-model
+        # watch grid is only time-sensitive while visible. Keep that work off
+        # the health tick; quote/pre-open events still update their rows at once.
+        self.model_display_timer = QTimer(self)
+        self.model_display_timer.setInterval(30_000)
+        self.model_display_timer.timeout.connect(self._refresh_visible_model_display)
+        self.model_display_timer.start()
         self._refresh_model_scores()
         # A disabled BUY feed must not change the ownership or exit policy of
         # already filled model lots. REAL use is separately blocked below.
@@ -482,6 +675,15 @@ class V00Window(WatchlistDialog):
             settings_items.append((self.external_grid.takeAt(0), position))
         for item, (row, column, row_span, column_span) in settings_items:
             self.external_grid.addItem(item, row + 7, column, row_span, column_span)
+        self.external_grid.removeWidget(self.percent_sizing)
+        self.percent_sizing.setParent(self)
+        self.percent_sizing.setChecked(True)
+        self.percent_sizing.hide()
+        self.external_grid.removeWidget(self.buy_percent)
+        self.buy_percent.setSuffix(' %')
+        self.buy_percent.setFixedWidth(120)
+        self.buy_percent.setToolTip('평가자산 대비 한 번의 매수 예산 비중입니다. 실제 주문은 주문당 금액 상한과 주문가능금액도 적용합니다.')
+        self.mark14_panel.sizing_row.insertWidget(1, self.buy_percent)
         self.external_model_checks = self.mark14_panel.model_checks
         self.model_trigger = QComboBox()
         self.model_trigger.setObjectName('builtinTradingTrigger')
@@ -494,6 +696,7 @@ class V00Window(WatchlistDialog):
         self.model_status = QLabel('내장 LSTM · 첫 장중 조회 시 모델 확인')
         self.model_status.setWordWrap(True)
         self.external_grid.addWidget(self.model_status, 5, 0, 1, 5)
+        self.model_status.hide()
         self.model_notice = QLabel(MARK1_NOTICE)
         self.model_notice.setWordWrap(True)
         self.model_notice.setStyleSheet('color: #ffda91;')
@@ -511,7 +714,7 @@ class V00Window(WatchlistDialog):
         self.ranking_button.setText('현재 선정 가능한 시장 · 거래량 TOP100')
         self.days_input.setValue(31)
         self.environment_caption.hide()
-        self.message.setText(f'ver {APP_RELEASE} · 감시·자동주문 OFF · AI 추론모델 연결에서 비중과 연결을 확인하세요.')
+        self.message.setText('')
         self._apply_execution_preferences()
         self._label_inputs()
         self._move_legacy_settings()
@@ -521,6 +724,13 @@ class V00Window(WatchlistDialog):
         self._preferences_timer.timeout.connect(self._save_preferences)
         self._restore_preferences()
         self._connect_preference_changes()
+
+    def _apply_execution_preferences(self):
+        # This desktop exposes only percentage sizing. A legacy saved False
+        # must never silently turn the hidden checkbox into fixed-quantity BUY.
+        if hasattr(self, 'percent_sizing'):
+            self.percent_sizing.setChecked(True)
+        super()._apply_execution_preferences()
 
     def _capture_preferences(self):
         # The random test producer temporarily rewrites these three controls.
@@ -543,7 +753,7 @@ class V00Window(WatchlistDialog):
             'external_quantity': self.external_quantity.value(),
             'external_krw': self.external_krw.value(),
             'external_usd': self.external_usd.value(),
-            'percent_sizing': self.percent_sizing.isChecked(),
+            'percent_sizing': True,
             'buy_percent': self.buy_percent.value(),
             'order_popups': self.order_popups.isChecked(),
             'additional_sources': [list(pair) for pair in self.additional_sources.raw_sources()],
@@ -551,9 +761,10 @@ class V00Window(WatchlistDialog):
             'watch_market_tab': self.watch_market_tabs.currentIndex(),
             'workspace_tab': self.workspace_tabs.currentIndex(),
             'workspace_tab_id': self._workspace_tab_id(),
-            'signal_connection_tab': self.signal_connection_page.currentIndex(),
+            'ai_subtab': ('performance' if self.signal_connection_page.currentWidget() is self.model_performance_panel
+                          else 'models'),
             'advanced_tab': self.tabs.currentIndex(),
-            'advanced_visible': self.advanced_settings_button.isChecked(),
+            'advanced_visible': True,
             'window_width': geometry.width(),
             'window_height': geometry.height(),
         }
@@ -569,7 +780,6 @@ class V00Window(WatchlistDialog):
     def _workspace_tab_id(self):
         pages = ((self.portfolio_panel, 'portfolio'), (self.order_history_panel, 'orders'),
                  (self.trade_journal_panel, 'journal'), (self.watch_page, 'watch'),
-                 (self.model_performance_panel, 'performance'),
                  (self.signal_connection_page, 'ai'), (self.operations_panel, 'logs'),
                  (self.tabs, 'advanced'))
         return next((name for widget, name in pages
@@ -659,8 +869,9 @@ class V00Window(WatchlistDialog):
                                 ('buy_percent', self.buy_percent)):
                 restore_number(key, widget)
             for key, widget in (('hourly_ranking', self.hourly_ranking), ('external_mode', self.external_mode),
-                                ('percent_sizing', self.percent_sizing), ('order_popups', self.order_popups)):
+                                ('order_popups', self.order_popups)):
                 restore_bool(key, widget)
+            self.percent_sizing.setChecked(True)
             for key, widget, limit in (('external_source', self.external_source, 128),
                                        ('signal_path', self.signal_path, 4096),
                                        ('chart_path', self.chart_path, 4096)):
@@ -694,16 +905,17 @@ class V00Window(WatchlistDialog):
                 for source, path in sources:
                     self.additional_sources.add_row(source=source, path=path)
             for key, tabs in (('watch_market_tab', self.watch_market_tabs),
-                              ('signal_connection_tab', self.signal_connection_page),
                               ('advanced_tab', self.tabs)):
                 index = choices.get(key)
                 if type(index) is int and 0 <= index < tabs.count():
                     tabs.setCurrentIndex(index)
-            if type(choices.get('advanced_visible')) is bool:
-                self.advanced_settings_button.setChecked(choices['advanced_visible'])
+            ai_subtab = choices.get('ai_subtab')
+            if ai_subtab in ('models', 'performance'):
+                self.signal_connection_page.setCurrentWidget(
+                    self.model_performance_panel if ai_subtab == 'performance' else self.mark14_panel)
             pages = {'portfolio': self.portfolio_panel, 'orders': self.order_history_panel,
                      'journal': self.trade_journal_panel, 'watch': self.watch_page,
-                     'performance': self.model_performance_panel,
+                     'performance': self.signal_connection_page,
                      'ai': self.signal_connection_page, 'logs': self.tabs,
                      'advanced': self.tabs}
             selected_page_id = choices.get('workspace_tab_id')
@@ -714,9 +926,10 @@ class V00Window(WatchlistDialog):
                 old_index = saved['workspace_tab']
                 selected_page_id = legacy[old_index] if 0 <= old_index < len(legacy) else None
                 page = pages.get(selected_page_id)
+            if selected_page_id == 'performance' and ai_subtab not in ('models', 'performance'):
+                self.signal_connection_page.setCurrentWidget(self.model_performance_panel)
             if selected_page_id == 'logs':
                 self.tabs.setCurrentWidget(self.operations_panel)
-                self.advanced_settings_button.setChecked(True)
             if page is not None:
                 index = self.workspace_tabs.indexOf(page)
                 if index >= 0 and self.workspace_tabs.isTabVisible(index):
@@ -740,6 +953,12 @@ class V00Window(WatchlistDialog):
         super().resizeEvent(event)
         if hasattr(self, '_preferences_timer'):
             self._queue_save_preferences()
+
+    def _adjust_watch_layout(self, *_):
+        super()._adjust_watch_layout()
+        if (hasattr(self, 'signal_connection_page') and hasattr(self, 'workspace_tabs')
+                and self.workspace_tabs.currentWidget() is self.signal_connection_page):
+            self.workspace_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     def _current_model_score(self, model, item):
         """Accept only a valid display diagnostic for this exact quote."""
@@ -821,39 +1040,96 @@ class V00Window(WatchlistDialog):
         return value, note + f'\n현재가 {snapshot.quote.price} {item.instrument.currency} · 이 시세의 유효한 모델 확률이 없습니다.', value
 
     def _preopen_score_display(self, model, item):
-        """Show a frozen plan only for the selected stock and current session."""
-        result = self.mark14_panel.model_results.get((model, item.instrument.market.value))
-        if not result:
-            return '판단 전(—)'
-        if result.get('state') != 'prepared':
-            return '판단 불가(—)'
+        """Show today's frozen plan or clearly marked last display-only decision."""
+        panel = getattr(self, 'mark14_panel', None)
+        result = panel.model_results.get((model, item.instrument.market.value)) if panel is not None else None
+        saved = self._last_preopen_scores.get((model, item.id))
+        def saved_display():
+            if saved is None:
+                return '—'
+            from dockdack.history import market_time
+            from dockdack.market_schedule import session_on
+            session = session_on(item.instrument.market,
+                                 market_time(item.instrument.market, self.engine.clock()).date())
+            prefix = '마지막 판단' if session is not None and saved[0] == session.opened else '이전 장'
+            return f'{prefix} {saved[1]}'
+        if not result or result.get('state') != 'prepared':
+            return saved_display()
         try:
             from dockdack.history import market_time
             from dockdack.market_schedule import session_on
             now = self.engine.clock()
             session = session_on(item.instrument.market, market_time(item.instrument.market, now).date())
             opened = datetime.fromisoformat(str(result['session_open']))
-            if session is None or opened != session.opened:
-                return '이전 장 판단(—)'
+            current = session is not None and opened == session.opened
         except (KeyError, TypeError, ValueError):
-            return '날짜 확인 불가(—)'
+            return saved_display()
         candidates = result.get('candidates')
         if not isinstance(candidates, list):
-            return '판단 불가(—)'
+            return saved_display()
         row = next((entry for entry in candidates if isinstance(entry, dict)
                     and entry.get('watch_id') == item.id), None)
         if row is None:
-            return '대상 밖(—)'
+            return saved_display()
         score = row.get('score')
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not isfinite(score):
-            return '점수 없음(—)'
+            return saved_display()
         score_text = f'{score:.3f}%' if row.get('score_unit') == 'percent' else f'{score:.3f}점'
-        decision = '매수 후보' if row.get('selected') is True else '매수 안 함'
-        return f'{decision}({score_text})'
+        decision = '매수 후보' if row.get('selected') is True else '관망'
+        display = f'{decision}({score_text})'
+        if current:
+            self._last_preopen_scores[(model, item.id)] = (opened, display)
+            return display
+        return f'이전 장 {display}'
+
+    def _model_name(self, model):
+        return PROTOTYPE_TITLES[model].replace('mark', 'MK').replace(' prototype', '')
+
+    def _model_buy_display(self, model, item, *, compact=False):
+        """Display each model's own unit without treating a score as a probability."""
+        checks = getattr(self, 'external_model_checks', {})
+        if model not in checks or not checks[model].isChecked():
+            return '꺼짐'
+        if model in BARRIER_MODELS:
+            display = self._model_score_display(model, item)
+            return display[2].replace('대기', '관망') if compact else display[0]
+        return self._preopen_score_display(model, item)
+
+    def _model_sell_display(self, model, item):
+        """Only report verified holding-lot exit conditions, never infer SELL from a BUY score."""
+        key = f'{item.instrument.market.value}:{item.instrument.exchange}:{item.instrument.symbol}'
+        group = getattr(self.portfolio_panel, '_exit_targets', {}).get(key)
+        if not group:
+            return '—'
+        if group.get('error') or (group.get('lots') and not group.get('reconciled')):
+            return '매도 확인 필요'
+        lots = group.get('lots') if group.get('reconciled') else (group,)
+        owned = [lot for lot in lots if (lot.get('strategy_id') or lot.get('model_id')) == model
+                 and lot.get('quantity', 1) > 0]
+        if not owned:
+            return '—'
+        snapshot = self.snapshots.get(item.id)
+        fresh = (snapshot is not None and item.id in self.fresh_ids and item.id not in self.errors
+                 and 0 <= (self.engine.clock() - snapshot.fetched_at).total_seconds() <= MAX_QUOTE_AGE)
+        for lot in owned:
+            if lot.get('error'):
+                return '매도 확인 필요'
+            if lot.get('sellable_quantity', 1) <= 0:
+                continue
+            if timed_exit_due(lot, item.instrument.market, self.engine.clock()):
+                return '기간 매도 조건'
+            if fresh:
+                price = snapshot.quote.price
+                upper, lower = lot.get('take_profit_price'), lot.get('stop_loss_price')
+                if (isinstance(upper, Decimal) and price >= upper
+                        or isinstance(lower, Decimal) and price <= lower):
+                    return '가격 매도 조건'
+        return '매도 대기' if any(lot.get('sellable_quantity', 1) > 0 for lot in owned) else '매도가능수량 없음'
 
     def _watch_values(self, item):
-        return (*super()._watch_values(item),
-                *(self._model_score_display(model, item)[0] for model in BARRIER_MODELS))
+        name, price, checked_at = super()._watch_values(item)
+        return (name, *(self._model_buy_display(model, item) for model in ALL_MODEL_IDS),
+                price, checked_at)
 
     def _update_model_score_row(self, key):
         item = self._items_by_id.get(key)
@@ -861,11 +1137,17 @@ class V00Window(WatchlistDialog):
         if item is None or row is None:
             return
         view = self.watch_tables[item.instrument.market]
-        for column, model in enumerate(BARRIER_MODELS, 4):
+        for column, model in enumerate(ALL_MODEL_IDS, 1):
             cell = view.item(row, column)
             if cell is None:
                 continue
-            value, tip, _ = self._model_score_display(model, item)
+            if model in BARRIER_MODELS:
+                _, tip, _ = self._model_score_display(model, item)
+            else:
+                tip = (f'{PROTOTYPE_TITLES[model]} · 장전 동결 매수 후보 점수\n'
+                       f'{PROTOTYPE_METHODS[model]}\n{PROTOTYPE_TARGETS[model]} · 매도 여부는 보유분 조건으로 별도 확인\n'
+                       '이전 장/마지막 판단 표시는 화면 기록이며 현재 주문 허가가 아닙니다.')
+            value = self._model_buy_display(model, item)
             if cell.text() != value:
                 cell.setText(value)
             if cell.toolTip() != tip:
@@ -877,15 +1159,50 @@ class V00Window(WatchlistDialog):
         for key in tuple(getattr(self, '_watch_rows', ())):
             self._update_model_score_row(key)
         self._update_selected_model_scores()
+        self._update_model_detail()
         self._update_latest_model_summary()
 
+    def _refresh_visible_model_display(self, *_):
+        """Recheck time-dependent labels without repainting hidden watch rows."""
+        if not hasattr(self, 'model_score_summary'):
+            return
+        current = self.workspace_tabs.currentWidget()
+        if current is self.watch_page:
+            self._refresh_model_scores()
+        elif (current is self.signal_connection_page
+              and self.signal_connection_page.currentWidget() is self.mark14_panel):
+            self._update_model_detail()
+            self._update_latest_model_summary()
+
+    def _update_model_detail(self, *_):
+        panel = getattr(self, 'mark14_panel', None)
+        if panel is None:
+            return
+        item = self.selected_item()
+        if item is None:
+            panel.selected_result.setText('선택 종목 —')
+            return
+        model = panel.model_selector.currentData()
+        if model not in ALL_MODEL_IDS:
+            panel.selected_result.setText('모델 선택 전')
+            return
+        panel.selected_result.setText(
+            f'{self._model_name(model)} · {item.name or item.instrument.symbol} · '
+            f'매수: {self._model_buy_display(model, item, compact=True)} · '
+            f'매도: {self._model_sell_display(model, item)}')
+
+    def _set_latest_model_summary(self, text):
+        self.latest_model_summary.setText(text)
+        # The header has a fixed height. Keep every model reachable by its own
+        # horizontal scroll instead of making the chart disappear below it.
+        self.latest_model_summary.adjustSize()
+
     def _update_latest_model_summary(self):
-        """Show the last complete model mean until a whole newer set is ready."""
+        """Show one atomic barrier snapshot plus every active model's own verdict."""
         if not hasattr(self, 'latest_model_summary'):
             return
-        # Only the three barrier models report probabilities. Mark1.4's
-        # regression/ranking score has its own tab and is never averaged in %.
-        models = tuple(model for model in self._chosen_external_models() if model in BARRIER_MODELS)
+        models = tuple(self._chosen_external_models())
+        barrier_models = tuple(model for model in models if model in BARRIER_MODELS)
         completed = self._last_complete_model_summary
         if completed is not None and (completed[0] != models
                                       or completed[1] not in getattr(self, '_items_by_id', {})):
@@ -894,61 +1211,96 @@ class V00Window(WatchlistDialog):
         snapshot = self.snapshots.get(self._last_queried_watch_id)
         if item is None or snapshot is None:
             self._last_complete_model_summary = None
-            self.latest_model_summary.setText('최근 조회 종목 — · 모델 추정확률 —')
+            self._set_latest_model_summary('최근 조회 종목 — · 모델 추정확률 —')
             return
         stamp = snapshot.fetched_at.astimezone().strftime('%m/%d %H:%M:%S')
         quote = (f'{item.name or item.instrument.symbol} ({item.instrument.symbol}) · {stamp}'
                  f' · 당시가 {snapshot.quote.price} {item.instrument.currency}')
         if not models:
             self._last_complete_model_summary = None
-            self.latest_model_summary.setText('최근 조회 ' + quote + ' · 활성 외부 AI 모델 없음')
+            self._set_latest_model_summary('최근 조회 ' + quote + ' · AI 모델 연결 없음')
             return
-        scores = [self._current_model_score(model, item) for model in models]
+        scores = [self._current_model_score(model, item) for model in barrier_models]
         if any(score is None for score in scores):
             if completed is not None:
-                self.latest_model_summary.setText(completed[2])
+                self._set_latest_model_summary(completed[2])
                 return
-            self.latest_model_summary.setText('최근 조회 ' + quote + ' · 모델 추정확률 —')
+            pending = ' · '.join(f'{self._model_name(model)} —' for model in models)
+            self._set_latest_model_summary('최근 조회 ' + quote + ' · 모델 추정확률 — · ' + pending)
             return
-        average = sum((score['probability'] for score in scores), Decimal(0)) / Decimal(len(models))
-        text = ('최근 완료 조회 ' + quote + f' · 활성 모델 단순 평균 {average:.1%} ({len(models)}/{len(models)})'
-                + ' · 목표 조건 상이·매매 판단에 사용 안 함')
+        probability_by_model = dict(zip(barrier_models, scores))
+        details = []
+        for model in models:
+            if model in probability_by_model:
+                score = probability_by_model[model]
+                verdict = '매수' if score['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '관망'
+                buy = f"{verdict}({score['probability']:.1%})"
+            else:
+                buy = self._preopen_score_display(model, item)
+            details.append(f'{self._model_name(model)} {buy} / {self._model_sell_display(model, item)}')
+        average = (' · 장중 확률 평균 '
+                   + f"{sum((score['probability'] for score in scores), Decimal(0)) / Decimal(len(scores)):.1%}"
+                   if scores else '')
+        text = '최근 완료 조회 ' + quote + average + ' · ' + '  |  '.join(details)
         self._last_complete_model_summary = (models, item.id, text)
-        self.latest_model_summary.setText(text)
+        self._set_latest_model_summary(text)
 
     def _update_selected_model_scores(self):
         if not hasattr(self, 'model_score_summary'):
             return
         item = self.selected_item()
         if item is None:
-            self.model_score_summary.setText('종목을 선택하면 모델별 판단이 표시됩니다.')
+            self.model_score_summary.setText('현재가 —')
+            self.price_change_summary.setText('전일 대비 —')
             return
         snapshot = self.snapshots.get(item.id)
-        quote = (f'{snapshot.quote.price} {item.instrument.currency} · {snapshot.fetched_at.astimezone():%m/%d %H:%M:%S}'
-                 if snapshot is not None and item.id not in self.errors else '현재가 확인 불가')
-        barrier = [model for model in BARRIER_MODELS if self.external_model_checks[model].isChecked()]
-        scores = (' · '.join(f'{PROTOTYPE_TITLES[model]} {self._model_score_display(model, item)[2]}'
-                             for model in barrier) if barrier else '선택 없음')
-        preopen_models = [model for model in PREOPEN_MODEL_IDS
-                          if self.external_model_checks[model].isChecked()]
-        prepared_models = [model for model in preopen_models
-                           if (model, item.instrument.market.value) in self.mark14_panel.model_results]
-        preopen = [f'{PROTOTYPE_TITLES[model]} {self._preopen_score_display(model, item)}'
-                   for model in prepared_models]
-        pending = len(preopen_models) - len(prepared_models)
-        if pending:
-            preopen.append(f'판단 대기 {pending}개')
-        preopen_lines = [' · '.join(preopen[index:index + 3])
-                         for index in range(0, len(preopen), 3)]
-        parts = [f'{item.instrument.symbol} · 현재가 {quote}', '장중 확률: ' + scores]
-        if preopen_lines:
-            parts.append('장전 동결 판단: ' + preopen_lines[0])
-            parts.extend(preopen_lines[1:])
-        self.model_score_summary.setText('\n'.join(parts))
+        if snapshot is None or item.id in self.errors:
+            self.model_score_summary.setText('현재가 —')
+            self.model_score_summary.setToolTip(str(self.errors.get(item.id) or '시세 조회 전'))
+        else:
+            self.model_score_summary.setText(f'현재가 {snapshot.quote.price} {item.instrument.currency}')
+            self.model_score_summary.setToolTip(
+                f'{item.instrument.symbol} · 조회 {snapshot.fetched_at.astimezone():%m/%d %H:%M:%S}'
+                + (' · 이전 조회값' if item.id not in self.fresh_ids else ''))
+        change = self._previous_close_change(item, snapshot)
+        if change is None:
+            self.price_change_summary.setText('전일 대비 —')
+            self.price_change_summary.setToolTip('전 거래일의 완료 일봉·신선한 시세를 모두 확인해야 표시합니다.')
+            color = '#e9f5ff'
+        else:
+            rate, previous_day, previous_close = change
+            self.price_change_summary.setText(f'전일 대비 {rate:+.2f}%')
+            self.price_change_summary.setToolTip(
+                f'{previous_day:%Y-%m-%d} 완료 일봉 종가 {previous_close} {item.instrument.currency} 기준')
+            color = '#78e6c7' if rate > 0 else '#ed7892' if rate < 0 else '#e9f5ff'
+        self.price_change_summary.setStyleSheet(
+            f'QLabel#priceChangeSummary {{ background: #193148; color: {color}; '
+            'border: 1px solid #31536d; border-radius: 6px; padding: 4px 8px; font-weight: 600; }')
+
+    def _previous_close_change(self, item, snapshot):
+        """Use only the preceding exchange session's completed daily bar."""
+        if snapshot is None or item.id in self.errors or item.id not in self.fresh_ids:
+            return None
+        from dockdack.history import market_time
+        from dockdack.market_schedule import session_on
+        market = item.instrument.market
+        quote_day = market_time(market, snapshot.fetched_at).date()
+        previous_day = next((quote_day - timedelta(days=offset) for offset in range(1, 16)
+                             if session_on(market, quote_day - timedelta(days=offset)) is not None), None)
+        if previous_day is None:
+            return None
+        bar = next((bar for bar in reversed(snapshot.history.bars) if bar.day == previous_day), None)
+        if bar is None or not bar.close.is_finite() or bar.close <= 0:
+            return None
+        price = snapshot.quote.price
+        if not price.is_finite() or price <= 0:
+            return None
+        return ((price / bar.close - Decimal(1)) * Decimal(100), previous_day, bar.close)
 
     def select_item(self, *_):
         super().select_item(*_)
         self._update_selected_model_scores()
+        self._update_model_detail()
 
     def _update_watch_row(self, key):
         super()._update_watch_row(key)
@@ -960,6 +1312,8 @@ class V00Window(WatchlistDialog):
         valid_ids = set(getattr(self, '_items_by_id', {}))
         self._last_model_scores = {key: score for key, score in self._last_model_scores.items()
                                    if key[1] in valid_ids}
+        self._last_preopen_scores = {key: score for key, score in self._last_preopen_scores.items()
+                                     if key[1] in valid_ids}
         if self._last_queried_watch_id not in valid_ids:
             self._last_queried_watch_id = None
         self._refresh_model_scores()
@@ -969,7 +1323,7 @@ class V00Window(WatchlistDialog):
         self.advanced_mode_panel = QWidget()
         options = QVBoxLayout(self.advanced_mode_panel)
         self.advanced_mode_note = QLabel(
-            '일반 AI 자동매매는 AI 추론모델 연결에서 모델을 선택하세요.\n'
+            '일반 AI 자동매매는 AI 추론 모델에서 모델을 선택하세요.\n'
             '수동 가격·이동평균 규칙은 AI 모델과 구형 신호기를 모두 끈 뒤 '
             '아래 AI·외부 신호 사용을 해제해야 실행됩니다. 자동주문 ON은 별도 확인이 필요합니다.')
         self.advanced_mode_note.setWordWrap(True)
@@ -994,25 +1348,50 @@ class V00Window(WatchlistDialog):
         self.tabs.currentChanged.connect(lambda _: self._reload_activity(visible_force=True))
         self.tabs.setCurrentWidget(self.advanced_mode_panel)
         index = self.workspace_tabs.indexOf(self.tabs)
-        self.workspace_tabs.setTabText(index, '기타·고급')
-        self.workspace_tabs.setTabVisible(index, False)
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        self.advanced_settings_button = QPushButton('기타·고급 설정')
+        self.workspace_tabs.setTabText(index, '고급설정')
+        self.workspace_tabs.setTabVisible(index, True)
+        # Compatibility handle for saved/pre-existing callbacks. The ordinary
+        # navigation is the permanently visible top-level tab.
+        self.advanced_settings_button = QPushButton('고급설정', self)
         self.advanced_settings_button.setCheckable(True)
         self.advanced_settings_button.setAutoDefault(False)
         self.advanced_settings_button.setObjectName('linkButton')
-        self.advanced_settings_button.setToolTip('수동 규칙·구형 LSTM·직접 신호기·서버 로그. 열고 닫아도 실행 설정은 변하지 않습니다.')
+        self.advanced_settings_button.setToolTip('고급설정 탭에서 수동 규칙·구형 모델·직접 신호기·서버 로그를 확인합니다.')
         self.advanced_settings_button.toggled.connect(self._show_advanced_settings)
-        footer.addWidget(self.advanced_settings_button)
-        self.layout().addLayout(footer)
+        self.advanced_settings_button.hide()
         self.external_mode.toggled.connect(self._update_connection)
+
+    def _workspace_changed(self, *_):
+        previous = getattr(self, '_last_workspace_page', None)
+        current = self.workspace_tabs.currentWidget()
+        super()._workspace_changed()
+        if not hasattr(self, '_last_workspace_page'):
+            return  # Base constructor has not finished wiring this desktop.
+        self._last_workspace_page = current
+        if current is self.watch_page and previous is not current:
+            self._refresh_model_scores()
+        elif current is self.signal_connection_page and previous is not current:
+            self._refresh_visible_model_display()
+        if current is self.portfolio_panel and previous is not current:
+            self.refresh_portfolio()  # PortfolioCache keeps the per-market 60 s minimum.
+
+    def _workspace_tab_clicked(self, index):
+        # QTabBar emits tabBarClicked before currentChanged. A click on another
+        # tab is handled by _workspace_changed; only re-clicks refresh here.
+        if (index == self.workspace_tabs.currentIndex()
+                and self.workspace_tabs.widget(index) is self.portfolio_panel):
+            self.refresh_portfolio()
 
     def _activity_page(self):
         # Present the nested log page to the base activity loader so its normal
         # current-category filtering and periodic throttle still apply.
         advanced = getattr(self, 'tabs', None)
         workspace = getattr(self, 'workspace_tabs', None)
+        ai_page = getattr(self, 'signal_connection_page', None)
+        if (ai_page is not None and workspace is not None
+                and workspace.currentWidget() is ai_page
+                and ai_page.currentWidget() is getattr(self, 'model_performance_panel', None)):
+            return self.model_performance_panel
         if (advanced is not None and workspace is not None
                 and workspace.currentWidget() is advanced
                 and advanced.currentWidget() is getattr(self, 'operations_panel', None)):
@@ -1020,13 +1399,16 @@ class V00Window(WatchlistDialog):
         return super()._activity_page()
 
     def _show_advanced_settings(self, visible):
-        index = self.workspace_tabs.indexOf(self.tabs)
         if not visible and self.workspace_tabs.currentWidget() is self.tabs:
             self.workspace_tabs.setCurrentWidget(self.signal_connection_page)
-        self.workspace_tabs.setTabVisible(index, visible)
         if visible:
             self.workspace_tabs.setCurrentWidget(self.tabs)
-        self.advanced_settings_button.setText('고급 설정 닫기' if visible else '기타·고급 설정')
+
+    def open_connection_settings(self):
+        self.workspace_tabs.setCurrentWidget(self.tabs)
+        self.tabs.setCurrentWidget(self.external_panel)
+        if self.monitoring or self.worker:
+            self.message.setText('현재 적용 설정입니다. 연결을 변경하려면 감시·주문을 중지하세요.')
 
     def _chosen_trigger(self):
         return self.model_trigger.currentData() if hasattr(self, 'model_trigger') else 'none'
@@ -1153,7 +1535,7 @@ class V00Window(WatchlistDialog):
     def _progress(self, data):
         if len(data) == 2 and data[0] == 'mark14_preopen':
             self.mark14_panel.show_preopen(data[1])
-            self._update_selected_model_scores()
+            self._refresh_model_scores()
             return
         result = super()._progress(data)
         if len(data) == 4 and not isinstance(data[1], Exception):
@@ -1276,6 +1658,7 @@ class V00Window(WatchlistDialog):
         if self.service is not before:
             self._preferences_timer.stop()
             self._last_model_scores.clear()
+            self._last_preopen_scores.clear()
             self._last_queried_watch_id = None
             self.external_quantity.setValue(999999999)
             self._apply_execution_preferences()
@@ -1284,13 +1667,25 @@ class V00Window(WatchlistDialog):
 
     def update_controls(self):
         super().update_controls()
-        # The entire external panel is disabled during a running sweep, so
-        # selecting a model never changes a worker's active policy mid-order.
+        # The sizing input has moved out of the externally disabled settings
+        # panel, so preserve the same edit lock while a sweep/monitor runs.
+        if hasattr(self, 'buy_percent') and hasattr(self, 'external_panel'):
+            editing = self.external_panel.isEnabled()
+            self.buy_percent.setEnabled(editing)
+            # Model checkboxes are outside the old external panel too. A click
+            # during a sweep would otherwise close live feeds from the GUI
+            # thread while the worker is still consuming them.
+            for check in getattr(self, 'external_model_checks', {}).values():
+                check.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
         self._sync_model_mode_controls()
 
     def _update_connection(self):
         super()._update_connection()
         if hasattr(self, 'model_status'):
+            if hasattr(self, 'ai_model_count'):
+                count = len(self._chosen_external_models())
+                self.ai_model_count.setText(str(count))
+                self.ai_connection_card.setAccessibleName(f'AI 모델 {count}개 선택')
             producer = self.test_producer
             choice = self._chosen_trigger()
             text = '\n'.join(
@@ -1300,18 +1695,27 @@ class V00Window(WatchlistDialog):
             if not text:
                 text = ((producer.status if isinstance(producer, DesktopModelBridge) else '내장 LSTM · 첫 장중 조회 시 모델 확인')
                         if choice == 'lstm30' else '외부 AI 연결 꺼짐 · 직접 연결한 외부 JSON은 별도 사용')
+            failed = tuple(model for model in self._chosen_external_models()
+                           if any(term in str(getattr(self._prototype_feeds.get(model), 'status', '')).split('\n', 1)[0]
+                                  for term in ('실패', '불가', '오류')))
+            self.ai_connection_warning.setVisible(bool(failed))
+            self.ai_connection_card.setAccessibleName(
+                f'AI 모델 {len(self._chosen_external_models())}개 선택'
+                + (f' · {len(failed)}개 신호 점검' if failed else ''))
             self.model_status.setToolTip(text)
+            if hasattr(self, 'ai_connection_card'):
+                self.ai_connection_card.setToolTip('선택한 모델 수입니다. 실제 신호 연결은 조회 중 확인합니다.\n' + text)
             if self._chosen_external_models():
                 text = '\n'.join(getattr(self._prototype_feeds.get(model), 'status',
                     f'{PROTOTYPE_TITLES[model]} · 외부 연결 선택됨 · 첫 조회 시 별도 프로세스 시작').splitlines()[0]
                     for model in self._chosen_external_models())
-                state = '감시 중' if self.monitoring else '감시 OFF'
-                orders = '주문 ON' if self.engine.orders_enabled else '주문 OFF'
-                self.connection_summary.setText(f'외부 AI {len(self._chosen_external_models())}개 · {state} · {orders} · 모델별 연결 상태는 AI 추론모델 연결에서 확인')
+                self.connection_summary.setText(f'AI 모델 {len(self._chosen_external_models())}개 선택')
+            elif self.external_mode.isChecked():
+                self.connection_summary.setText('AI 모델 연결 없음')
             self.model_status.setText(text)
             builtin = producer.builtin if isinstance(producer, ExternalFeedGroup) else producer
             if isinstance(builtin, DesktopModelBridge) and builtin._load_error:
-                warning = '내장 LSTM 실행 불가 · AI 추론모델 연결에서 원인 확인 · 다른 연결은 별도 운영'
+                warning = '내장 LSTM 실행 불가 · AI 추론 모델에서 원인 확인 · 다른 연결은 별도 운영'
                 self.connection_summary.setText(
                     self.connection_summary.text() + '\n' + warning
                     if self._chosen_external_models() else warning)

@@ -399,9 +399,39 @@ class WatchStore:
         with self.connection() as db:
             return tuple(dict(row) for row in db.execute(sql + " ORDER BY w.rowid", params))
 
+    @staticmethod
+    def _complete_ranked_rows(db, market: Market):
+        """Return only a consistent, active 100-stock ranking for one market."""
+        rows = db.execute(
+            """SELECT t.rank,t.watch_id,t.ranking_basis,t.fetched_at,
+                      w.active,w.market AS watch_market
+               FROM turnover_ranks t LEFT JOIN watchlist w ON w.id=t.watch_id
+               WHERE t.market=? ORDER BY t.rank""",
+            (market.value,),
+        ).fetchall()
+        if (len(rows) != 100 or {row["rank"] for row in rows} != set(range(1, 101))
+                or len({row["watch_id"] for row in rows}) != 100
+                or len({row["fetched_at"] for row in rows}) != 1
+                or {row["ranking_basis"] for row in rows} not in ({"volume"}, {"turnover"})
+                or any(row["active"] != 1 or row["watch_market"] != market.value for row in rows)):
+            return ()
+        try:
+            fetched_at = datetime.fromisoformat(rows[0]["fetched_at"])
+        except (TypeError, ValueError):
+            return ()
+        if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+            return ()
+        return tuple(rows)
+
     def save_item(self, item: WatchItem):
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            # A completed persisted TOP100 owns this market's active buy watchlist.
+            # Editing a ranked item is fine; adding an unranked item would make
+            # the next ordinary quote sweep 101+ stocks again.
+            ranked = self._complete_ranked_rows(db, item.instrument.market)
+            if ranked and item.id not in {row["watch_id"] for row in ranked}:
+                raise ValueError("TOP100 관리 중에는 순위 밖 종목을 관심목록에 추가할 수 없습니다. 보유종목은 별도로 감시합니다.")
             current = db.execute("SELECT active FROM watchlist WHERE id=?", (item.id,)).fetchone()
             count = db.execute("SELECT COUNT(*) FROM watchlist WHERE active=1").fetchone()[0]
             if (not current or not current[0]) and count >= MAX_WATCH_ITEMS:
@@ -409,7 +439,9 @@ class WatchStore:
             db.execute("""INSERT INTO watchlist VALUES (?, ?, ?, ?, ?, ?, 1)
                        ON CONFLICT(id) DO UPDATE SET name=excluded.name, days=excluded.days, active=1""",
                        (item.id, item.instrument.market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
-            # Explicit user edits pin a stock; legacy stocks are also preserved on migration.
+            # Keep legacy management metadata separate from user-edited chart
+            # settings. A subsequent complete TOP100 rotation still owns the
+            # active membership, including this manually edited row.
             db.execute("DELETE FROM managed_watchlist WHERE watch_id=?", (item.id,))
 
     def add_ranked(self, rankings, days: int = 30):
@@ -417,9 +449,32 @@ class WatchStore:
         items = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r) for r in rankings]
         if not items or len({item.id for item, _ in items}) != len(items):
             raise ValueError("순위 목록이 비어 있거나 종목이 중복됩니다.")
+        by_market = {market: [(item, rank) for item, rank in items if rank.market is market]
+                     for market in {rank.market for _, rank in items}}
+        for market, pairs in by_market.items():
+            if len(pairs) == 100 and {rank.rank for _, rank in pairs} != set(range(1, 101)):
+                raise ValueError(f"{market.value} 순위는 1~100번이 필요합니다.")
         now = utc_now().isoformat()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            for market, pairs in by_market.items():
+                if len(pairs) == 100:
+                    continue
+                if self._complete_ranked_rows(db, market):
+                    raise ValueError(f"{market.value} TOP100 관리 중에는 일부 종목만 순위에 추가할 수 없습니다.")
+            # Legacy bulk import is additive for partial lists. A complete
+            # 100-stock ranking, however, is a replacement, never 100 plus
+            # manual/pending/frozen interests from that market.
+            removed = 0
+            for market, pairs in by_market.items():
+                if len(pairs) != 100:
+                    continue
+                incoming = {item.id for item, _ in pairs}
+                extras = [row["id"] for row in db.execute(
+                    "SELECT id FROM watchlist WHERE active=1 AND market=?", (market.value,)
+                ) if row["id"] not in incoming]
+                self._deactivate_watch_ids(db, extras)
+                removed += len(extras)
             active = {r[0] for r in db.execute("SELECT id FROM watchlist WHERE active=1")}
             if len(active | {item.id for item, _ in items}) > MAX_WATCH_ITEMS:
                 raise ValueError(f"추가 후 관심종목이 {MAX_WATCH_ITEMS}개를 넘습니다. 기존 종목을 먼저 정리하세요.")
@@ -437,13 +492,15 @@ class WatchStore:
                            (rank.market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now,
                             str(rank.volume) if getattr(rank, "volume", None) is not None else None, getattr(rank, "ranking_basis", "turnover")))
             ranking_label = "거래량" if all(getattr(rank, "ranking_basis", "turnover") == "volume" for _, rank in items) else "거래대금"
-            self._insert_event(db, "SYSTEM", f"시장별 {ranking_label} 상위 {len(items)}종목 추가/갱신 · 기존 관심종목 유지",
+            self._insert_event(db, "SYSTEM", f"시장별 {ranking_label} 상위 {len(items)}종목 추가/갱신 · 순위 밖 {removed}개 관심목록 비활성 · 주문 이력 유지",
                                category="system", at=datetime.fromisoformat(now))
 
     def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30, *,
                        separate_holdings=False, preserve_watch_ids=()):
         pairs = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r) for r in rankings]
-        if len(pairs) != 100 or len({i.id for i, _ in pairs}) != 100 or any(r.market is not market for _, r in pairs):
+        if (len(pairs) != 100 or len({i.id for i, _ in pairs}) != 100
+                or {r.rank for _, r in pairs} != set(range(1, 101))
+                or any(r.market is not market for _, r in pairs)):
             raise ValueError("해당 시장의 서로 다른 100종목이 필요합니다.")
         frozen = frozenset(preserve_watch_ids)
         if any(not isinstance(key, str) or not key.startswith(market.value + ":") for key in frozen):
@@ -452,23 +509,16 @@ class WatchStore:
         now = utc_now().isoformat()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            removable = []
-            for row in db.execute("SELECT w.* FROM watchlist w JOIN managed_watchlist m ON m.watch_id=w.id WHERE w.active=1 AND w.market=?", (market.value,)):
-                if (row["id"] in incoming or row["id"] in frozen
-                        or (row["symbol"] in protected_symbols and not separate_holdings)):
-                    continue
-                if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','unknown','accepted')", (row["id"],)).fetchone():
-                    continue
-                if db.execute("SELECT 1 FROM rules WHERE watch_id=? AND status='ready' AND kind!='external'", (row["id"],)).fetchone():
-                    continue
-                removable.append(row["id"])
+            # Membership is *only* the latest ranked 100. Historical attempts,
+            # manually added names, held positions and opening plans remain in
+            # their independent ledgers; none is a 101st ordinary buy interest.
+            removable = [row["id"] for row in db.execute(
+                "SELECT id FROM watchlist WHERE active=1 AND market=?", (market.value,)
+            ) if row["id"] not in incoming]
             active = {r[0] for r in db.execute("SELECT id FROM watchlist WHERE active=1")}
             if len((active - set(removable)) | incoming) > MAX_WATCH_ITEMS:
-                raise ValueError("보호 종목을 포함한 관심목록이 500개를 넘습니다. 기존 목록을 유지합니다.")
-            for key in removable:
-                db.execute("UPDATE watchlist SET active=0 WHERE id=?", (key,))
-                db.execute("UPDATE rules SET status='paused' WHERE watch_id=? AND status='ready'", (key,))
-                db.execute("UPDATE external_signals SET status='paused' WHERE watch_id=? AND rule_id IN (SELECT id FROM rules WHERE status='paused')", (key,))
+                raise ValueError("관심목록이 500개를 넘습니다. 기존 목록을 유지합니다.")
+            self._deactivate_watch_ids(db, removable)
             db.execute("DELETE FROM turnover_ranks WHERE market=?", (market.value,))
             for item, rank in pairs:
                 new = not db.execute("SELECT 1 FROM watchlist WHERE id=?", (item.id,)).fetchone()
@@ -481,8 +531,50 @@ class WatchStore:
                            (market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now,
                             str(rank.volume) if getattr(rank, "volume", None) is not None else None, getattr(rank, "ranking_basis", "turnover")))
             self._insert_event(db, "SYSTEM",
-                               f"{market.value} 정시 TOP100 재선정 · 자동등록 순위이탈 {len(removable)}개 비활성 · 수동/보호 종목 유지",
+                               f"{market.value} 정시 TOP100 재선정 · 순위이탈 {len(removable)}개 관심목록 비활성"
+                               + (f" · 장전 동결 후보 {len(frozen - incoming)}개 새 순위 밖으로 매수 제외" if frozen - incoming else "")
+                               + " · 주문/보유 이력 유지",
                                category="system", at=datetime.fromisoformat(now))
+
+    @staticmethod
+    def _deactivate_watch_ids(db, watch_ids):
+        for key in watch_ids:
+            db.execute("UPDATE watchlist SET active=0 WHERE id=?", (key,))
+            # Only pending candidates are withdrawn. Accepted/filled signal
+            # records are historical evidence and must never be rewritten.
+            db.execute("""UPDATE external_signals SET status='paused'
+                          WHERE watch_id=? AND status IN ('queued','ready')
+                          AND rule_id IN (SELECT id FROM rules WHERE watch_id=? AND status='ready')""",
+                       (key, key))
+            db.execute("UPDATE rules SET status='paused' WHERE watch_id=? AND status='ready'", (key,))
+
+    def prune_ranked_extras(self, market: Market) -> int:
+        """Trim legacy 100+ watchlists only with a complete persisted rank.
+
+        This runs at launch without broker I/O. A legacy turnover rank only
+        identifies the previously selected 100; it never becomes a volume
+        TOP100 or a pre-open candidate approval. Incomplete/malformed ranks
+        are not enough evidence to choose which active interests to retire.
+        Orders, fills, holdings and all inactive watch rows stay in the ledger.
+        """
+        if not isinstance(market, Market):
+            raise ValueError("관심목록 시장을 확인하세요.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            ranks = self._complete_ranked_rows(db, market)
+            if not ranks:
+                return 0
+            ranked_ids = {row["watch_id"] for row in ranks}
+            extras = [row["id"] for row in db.execute(
+                "SELECT id FROM watchlist WHERE active=1 AND market=?", (market.value,)
+            ) if row["id"] not in ranked_ids]
+            if extras:
+                self._deactivate_watch_ids(db, extras)
+                self._insert_event(db, "SYSTEM",
+                                   f"{market.value} 기존 {'거래량' if ranks[0]['ranking_basis'] == 'volume' else '거래대금'} 순위 100개 적용 · "
+                                   f"순위 밖 {len(extras)}개 관심목록 비활성 · 주문/보유 이력 유지",
+                                   category="system")
+            return len(extras)
 
     def restrict_to_common(self, market: Market, eligible: set[tuple[str, str]],
                            protected_symbols: set[str]) -> dict[str, int]:

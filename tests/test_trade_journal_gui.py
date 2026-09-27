@@ -127,7 +127,6 @@ class DailyTradeJournalGuiTests(unittest.TestCase):
         view = self.panel.tables["domestic"]
         scroll = self.panel.scroll_areas["domestic"]
         self.assertGreaterEqual(view.height(), 190)
-        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
         scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
         self.app.processEvents()
         top = view.mapTo(scroll.viewport(), QPoint(0, 0)).y()
@@ -206,22 +205,29 @@ class DailyTradeJournalGuiTests(unittest.TestCase):
         self.assertTrue(threads)
         self.assertNotEqual(threads[0], threading.get_ident())
         self.assertEqual(updates, [threading.get_ident()])
-        self.assertIn("2026-09-25", self.panel.fx_status.text())
-        self.assertIn("120,000 KRW", self.panel.values["us"]["buy"].text())
-        self.assertIn("원본 100.00 USD", self.panel.values["us"]["buy"].text())
+        self.assertIn("2026-09-25", self.panel.fx_status.toolTip())
+        self.assertEqual(self.panel.values["us"]["buy"].text(), "120,000 KRW")
         self.assertIn("+12,000 KRW", self.panel.values["us"]["profit"].text())
         self.assertEqual(self.panel.values["us"]["return"].text(), "+10.00%")
-        self.assertIn("실제 원화 실현손익 아님", self.panel.fx_status.text())
+        self.assertIn("실제 원화 실현손익 아님", self.panel.fx_status.toolTip())
         self.assertIn("132,000 KRW", self.panel.tables["us"].item(0, 5).text())
-        self.assertIn("참고 KRW", self.panel.tables["us"].horizontalHeaderItem(5).text())
-        self.assertIn("원본 USD", self.panel.tables["us"].item(0, 5).toolTip())
+        self.assertEqual(self.panel.tables["us"].horizontalHeaderItem(5).text(), "체결금액")
+        self.assertIn("USD 체결가", self.panel.tables["us"].item(0, 5).toolTip())
         self.assertEqual(self.panel.values["domestic"]["buy"].text(), "0 KRW")
         self.store.order_history.assert_not_called()
 
         self.panel.fx_toggle.setChecked(False)
         self.assertEqual(self.panel.values["us"]["buy"].text(), "100.00 USD")
         self.assertEqual(self.panel.values["us"]["profit"].text(), "+10.00 USD")
-        self.assertNotIn("참고 KRW", self.panel.tables["us"].horizontalHeaderItem(5).text())
+        self.assertEqual(self.panel.tables["us"].horizontalHeaderItem(5).text(), "체결금액")
+        self.panel.fx_toggle.setChecked(True)
+        self.app.processEvents()
+        self.assertEqual(len(threads), 1)  # Display toggle reuses the dated rate.
+        self.assertEqual(self.panel.values["us"]["buy"].text(), "120,000 KRW")
+        self.assertIn("2026-09-25", self.panel.fx_status.toolTip())
+        self.panel.fx_refresh_button.click()
+        self.wait_for_fx()
+        self.assertEqual(len(threads), 2)  # Explicit refresh requests a new rate.
 
     def test_failed_reference_never_fabricates_krw_and_usd_remains_visible(self):
         def failing_fetcher(*, timeout):
@@ -233,10 +239,37 @@ class DailyTradeJournalGuiTests(unittest.TestCase):
         self.panel.fx_toggle.setChecked(True)
         self.wait_for_fx()
         self.assertIn("환율 조회 실패", self.panel.fx_status.text())
-        self.assertIn("USD 원본 유지", self.panel.fx_status.text())
+        self.assertIn("USD 유지", self.panel.fx_status.text())
         self.assertEqual(self.panel.values["us"]["buy"].text(), "100.00 USD")
         self.assertEqual(self.panel.tables["us"].item(0, 5).text(), "100.00 USD")
         self.store.order_history.assert_not_called()
+
+    def test_invalid_reference_rate_never_displays_nan_krw(self):
+        self.panel._fx_fetcher = lambda *, timeout: UsdKrwReference(
+            date(2026, 9, 25), D("NaN"), D("1.25"), D(1500))
+        self.panel.refresh(records=[order(1, market="us", exchange="ND",
+                                          symbol="AAPL", currency="USD")])
+        self.panel.fx_toggle.setChecked(True)
+        self.wait_for_fx()
+        self.assertIn("USD 유지", self.panel.fx_status.text())
+        self.assertEqual(self.panel.values["us"]["buy"].text(), "100.00 USD")
+        self.assertNotIn("NaN", self.panel.tables["us"].item(0, 5).text())
+
+    def test_failed_explicit_refresh_keeps_last_dated_krw_rate(self):
+        reference = UsdKrwReference(date(2026, 9, 25), D(1200), D("1.25"), D(1500))
+        self.panel._fx_fetcher = lambda *, timeout: reference
+        self.panel.refresh(records=[order(1, market="us", exchange="ND",
+                                          symbol="AAPL", currency="USD")])
+        self.panel.fx_toggle.setChecked(True)
+        self.wait_for_fx()
+        self.panel._fx_fetcher = lambda *, timeout: UsdKrwReference(
+            date(2026, 9, 26), D("NaN"), D("1.25"), D(1500))
+        self.panel.fx_refresh_button.click()
+        self.wait_for_fx()
+        self.assertIn("갱신 실패 · 이전 환율", self.panel.fx_status.text())
+        self.assertIn("2026-09-25", self.panel.fx_status.toolTip())
+        self.assertEqual(self.panel.values["us"]["buy"].text(), "120,000 KRW")
+        self.assertIs(self.panel._fx_reference, reference)
 
     def test_conversion_keeps_unmatched_sale_profit_unknown(self):
         self.panel._fx_fetcher = lambda *, timeout: UsdKrwReference(

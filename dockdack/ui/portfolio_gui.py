@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from dataclasses import replace
 from decimal import Decimal
 from typing import Mapping
 
-from PySide6.QtCore import QItemSelectionModel, Qt, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton,
+    QCheckBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from dockdack.fx_reference import UsdKrwReference, fetch_ecb_usd_krw
+from dockdack.gui import Worker
 from dockdack.models import Market
 from dockdack.portfolio import PortfolioMarketState, utc_now
 from dockdack.execution_policy import account_equity_cash
@@ -107,6 +109,12 @@ def _cash_context(account, currency):
     return " · ".join(parts), detail, negative
 
 
+# Preserve these readable widths on narrow windows, where the table scrolls.
+# On wide windows, extra space is distributed among descriptive/money columns.
+_TABLE_COLUMN_WIDTHS = (86, 220, 62, 78, 111, 111, 129, 117, 95, 145, 145, 160, 195)
+_TABLE_EXPAND_WEIGHTS = {1: 3, 4: 1, 5: 1, 6: 1, 7: 1, 9: 1, 10: 1, 11: 2, 12: 2}
+
+
 class PortfolioPanel(QWidget):
     """Shows successful empty balances differently from unavailable balances.
 
@@ -116,13 +124,18 @@ class PortfolioPanel(QWidget):
 
     request_refresh = Signal()
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, *, fx_fetcher=None):
         super().__init__(parent)
+        self._fx_fetcher = fx_fetcher or fetch_ecb_usd_krw
+        self._fx_reference: UsdKrwReference | None = None
+        self._fx_request_id = 0
+        self._fx_workers = {}
         self._payload: dict[Market, PortfolioMarketState] = {}
         self._row_signatures = {}
         self._rendered_states = {}
         self._live_quotes = {}
         self._rows_by_instrument = {}
+        self._column_fit_pending: set[Market] = set()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -186,6 +199,7 @@ class PortfolioPanel(QWidget):
             labels["updated"].setObjectName("muted")
             labels["updated"].setWordWrap(True)
             grid.addWidget(labels["updated"], 2, 0, 1, 4)
+            labels["updated"].hide()
             self.market_labels[market] = labels
             self.market_cards[market] = frame
             details = QPushButton("계좌 금액·조회 정보 펼치기")
@@ -203,14 +217,176 @@ class PortfolioPanel(QWidget):
             summary.setWordWrap(True)
             self.summaries[market] = summary
             page_layout.addWidget(summary)
+            summary.hide()
+            if market is Market.US:
+                fx_controls = QHBoxLayout()
+                self.fx_toggle = QCheckBox("원화 환산")
+                self.fx_toggle.setAccessibleName("미국 보유종목 원화 환산")
+                self.fx_toggle.setToolTip("화면 표시만 바꿉니다. USD 잔고·매도 기준·주문은 변경하지 않습니다.")
+                self.fx_toggle.toggled.connect(self._fx_toggled)
+                fx_controls.addWidget(self.fx_toggle)
+                self.fx_refresh_button = QPushButton("환율 갱신")
+                self.fx_refresh_button.setAutoDefault(False)
+                self.fx_refresh_button.setEnabled(False)
+                self.fx_refresh_button.clicked.connect(self._request_fx)
+                fx_controls.addWidget(self.fx_refresh_button)
+                self.fx_status = _label("USD", "muted")
+                fx_controls.addWidget(self.fx_status, 1)
+                page_layout.addLayout(fx_controls)
             self.tables[market] = self._make_table()
             page_layout.addWidget(self.tables[market], 1)
             self.market_tabs.addTab(page, title)
         layout.addWidget(self.market_tabs, 1)
-        footer = _label("예수금 ≠ 주문가능금액 ≠ 주문당 상한 · KRW와 USD는 합산하지 않습니다.", "muted")
-        footer.setWordWrap(True)
-        layout.addWidget(footer)
+        for table in self.tables.values():
+            table.viewport().installEventFilter(self)
+        self.market_tabs.currentChanged.connect(
+            lambda _index: self._schedule_table_fit(self.current_market))
         self.apply({})
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize:
+            for market, table in self.tables.items():
+                if watched is table.viewport():
+                    self._schedule_table_fit(market)
+                    break
+        return super().eventFilter(watched, event)
+
+    def _schedule_table_fit(self, market: Market) -> None:
+        if market in self._column_fit_pending:
+            return
+        self._column_fit_pending.add(market)
+        QTimer.singleShot(0, lambda selected=market: self._fit_pending_table(selected))
+
+    def _fit_pending_table(self, market: Market) -> None:
+        self._column_fit_pending.discard(market)
+        table = self.tables[market]
+        available = table.viewport().width()
+        if available <= 0:
+            return
+        base_total = sum(width for column, width in enumerate(_TABLE_COLUMN_WIDTHS)
+                         if not table.isColumnHidden(column))
+        extra = max(0, available - base_total)
+        weight_total = sum(_TABLE_EXPAND_WEIGHTS.values())
+        allocated = 0
+        expandable = tuple(_TABLE_EXPAND_WEIGHTS)
+        for column, base_width in enumerate(_TABLE_COLUMN_WIDTHS):
+            if table.isColumnHidden(column):
+                continue
+            addition = 0
+            if column in _TABLE_EXPAND_WEIGHTS:
+                if column == expandable[-1]:
+                    addition = extra - allocated
+                else:
+                    addition = extra * _TABLE_EXPAND_WEIGHTS[column] // weight_total
+                    allocated += addition
+            target = base_width + addition
+            if table.columnWidth(column) != target:
+                table.setColumnWidth(column, target)
+
+    def _active_fx(self, market: Market) -> UsdKrwReference | None:
+        return self._fx_reference if market is Market.US and self.fx_toggle.isChecked() else None
+
+    def _fx_note(self) -> str:
+        reference = self._fx_reference
+        if reference is None:
+            return ""
+        return (f"ECB {reference.published_on.isoformat()} 고시 · "
+                f"1 USD = {reference.krw_per_usd:,.2f} KRW · 표시용 환산, 실제 환전/거래일 환율 아님")
+
+    def _display_money(self, value, market: Market, *, price=False, signed=False, table=False) -> str:
+        reference = self._active_fx(market)
+        currency = "KRW" if market is Market.DOMESTIC else "USD"
+        if reference is not None and value is not None:
+            amount = value * reference.krw_per_usd
+            return (_table_money(amount, "KRW", signed=signed) if table
+                    else _money(amount, "KRW", signed=signed))
+        return (_table_money(value, currency, price=price, signed=signed) if table
+                else _money(value, currency, price=price, signed=signed))
+
+    def _display_target(self, value: Decimal, market: Market, sign: str) -> str:
+        reference = self._active_fx(market)
+        if reference is None:
+            return f"{sign} {_target_price(value)}"
+        # FX is illustrative, never an executable tick-size threshold. Limit
+        # display precision to whole KRW even when the cross-rate repeats.
+        return f"{sign} {_table_money(value * reference.krw_per_usd, 'KRW')}"
+
+    def _fx_toggled(self, checked: bool) -> None:
+        if not checked:
+            self._fx_request_id += 1
+            self.fx_refresh_button.setEnabled(False)
+            self.fx_status.setText("USD")
+            self.fx_status.setToolTip("")
+            self.market_tabs.setTabText(1, "미국 · USD")
+            self._rendered_states.pop(Market.US, None)
+            self.apply(self._payload)
+            return
+        if self._fx_reference is not None:
+            # OFF switches presentation only. Re-enable the last dated rate
+            # immediately; the explicit refresh button requests a new quote.
+            self._show_fx_reference(self._fx_reference)
+            self._rendered_states.pop(Market.US, None)
+            self.apply(self._payload)
+            return
+        self._request_fx()
+
+    def _show_fx_reference(self, reference: UsdKrwReference) -> None:
+        self.fx_status.setText(f"1 USD = {reference.krw_per_usd:,.0f}원")
+        self.fx_status.setToolTip(self._fx_note() + f"\n{reference.source_url}\nUSD 잔고·매도 기준·주문은 변경되지 않습니다.")
+        self.market_tabs.setTabText(1, "미국 · KRW")
+        self.fx_refresh_button.setEnabled(True)
+
+    def _request_fx(self) -> None:
+        if not self.fx_toggle.isChecked():
+            return
+        self._fx_request_id += 1
+        token = self._fx_request_id
+        self.fx_refresh_button.setEnabled(False)
+        if self._fx_reference is None:
+            self.fx_status.setText("환율 조회 중 · USD 유지")
+            self.fx_status.setToolTip("")
+            self.market_tabs.setTabText(1, "미국 · USD")
+        else:
+            self.fx_status.setText("환율 갱신 중 · 이전 환율")
+            self.fx_status.setToolTip(self._fx_note())
+            self.market_tabs.setTabText(1, "미국 · KRW")
+        self._rendered_states.pop(Market.US, None)
+        self.apply(self._payload)
+        worker = Worker(lambda: self._fx_fetcher(timeout=3.0))
+        worker.signals.completed.connect(
+            lambda result, error, request_id=token: self._fx_finished(request_id, result, error))
+        self._fx_workers[token] = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _fx_finished(self, request_id, reference, error) -> None:
+        self._fx_workers.pop(request_id, None)
+        if request_id != self._fx_request_id or not self.fx_toggle.isChecked():
+            return
+        valid = (isinstance(reference, UsdKrwReference)
+                 and isinstance(reference.published_on, date)
+                 and isinstance(reference.krw_per_usd, Decimal)
+                 and reference.krw_per_usd.is_finite() and reference.krw_per_usd > 0)
+        if error is not None or not valid:
+            reason = str(error) if isinstance(error, ValueError) else type(error).__name__ if error else "응답 형식 미확인"
+            if self._fx_reference is None:
+                self.fx_status.setText("환율 조회 실패 · USD 유지")
+                self.fx_status.setToolTip(f"ECB 환율 조회 실패: {reason}")
+                self.market_tabs.setTabText(1, "미국 · USD")
+            else:
+                self.fx_status.setText("환율 갱신 실패 · 이전 환율")
+                self.fx_status.setToolTip(f"ECB 환율 갱신 실패: {reason}\n" + self._fx_note())
+                self.market_tabs.setTabText(1, "미국 · KRW")
+        else:
+            self._fx_reference = reference
+            self._show_fx_reference(reference)
+        if error is not None or not valid:
+            self.fx_refresh_button.setEnabled(True)
+        self._rendered_states.pop(Market.US, None)
+        self.apply(self._payload)
+
+    def closeEvent(self, event):
+        self._fx_request_id += 1
+        super().closeEvent(event)
 
     def set_compact(self, compact: bool) -> None:
         """Use the available height for holdings rows; account details can expand."""
@@ -247,16 +423,16 @@ class PortfolioPanel(QWidget):
         header = result.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(54)
-        for column, width in enumerate((86, 220, 62, 78, 111, 111, 129, 117, 95)):
+        for column, width in enumerate(_TABLE_COLUMN_WIDTHS[:9]):
             result.setColumnWidth(column, width)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         for column in (9, 10):
-            result.setColumnWidth(column, 145)
+            result.setColumnWidth(column, _TABLE_COLUMN_WIDTHS[column])
         header.moveSection(header.visualIndex(9), 2)
         header.moveSection(header.visualIndex(10), 3)
-        result.setColumnWidth(11, 160)
+        result.setColumnWidth(11, _TABLE_COLUMN_WIDTHS[11])
         header.moveSection(header.visualIndex(11), 2)
-        result.setColumnWidth(12, 195)
+        result.setColumnWidth(12, _TABLE_COLUMN_WIDTHS[12])
         header.moveSection(header.visualIndex(12), 3)
         # Market/currency are already prominent in the selected tab. Keep the
         # data column for selection keys and copy/export compatibility, without
@@ -303,8 +479,13 @@ class PortfolioPanel(QWidget):
             currency = "KRW" if market is Market.DOMESTIC else "USD"
             text = {"unknown": "미확인 · 조회 전", "ok": "잔고 확인", "empty": "보유종목 없음",
                     "stale": "오래된 잔고 · 재조회 필요", "error": "조회 오류 · 이전 잔고 유지" if state.snapshot else "조회 오류 · 보유 여부 미확인"}[status]
-            labels["status"].setText(text)
+            # Successful refresh is already represented by holdings and time;
+            # keep only actionable/unknown states in the compact header.
+            labels["status"].setText('' if status == 'ok' else text)
             labels["status"].setStyleSheet("color: #ffb586;" if status in {"error", "stale"} else "color: #95a4bb;" if status == "unknown" else "color: #78e6c7;")
+            labels["status"].setToolTip(
+                f"최근 잔고 조회 {_time(state.last_attempt)} · {state.error}"
+                if status == "error" else "")
             labels["holdings"].setText(f"{len(state.positions)}종목" if state.snapshot is not None else "보유종목 미확인")
             account = state.snapshot
             evaluation = None if account is None else account.total_evaluation
@@ -314,22 +495,27 @@ class PortfolioPanel(QWidget):
                     evaluation = sum((p.evaluation_amount for p in state.positions), Decimal(0))
                 if profit is None:
                     profit = sum((p.profit_loss for p in state.positions), Decimal(0))
-            labels["evaluation"].setText(_money(evaluation, currency))
-            labels["profit"].setText(_money(profit, currency, signed=True))
+            fx = self._active_fx(market)
+            labels["evaluation"].setText(self._display_money(evaluation, market))
+            labels["profit"].setText(self._display_money(profit, market, signed=True))
             labels["profit"].setStyleSheet("color: #f08098;" if profit is not None and profit > 0 else "color: #84a7ff;" if profit is not None and profit < 0 else "")
-            labels["cash"].setText(_money(None if account is None else account.cash, currency))
-            labels["available"].setText(_money(None if account is None else account.available_to_order, currency))
+            labels["cash"].setText(self._display_money(None if account is None else account.cash, market))
+            labels["available"].setText(self._display_money(None if account is None else account.available_to_order, market))
             cash_context, cash_detail, negative_cash = _cash_context(account, currency)
-            labels["cash"].setToolTip(cash_detail)
+            fx_note = self._fx_note() if fx is not None else ""
+            labels["evaluation"].setToolTip((f"원본 {_money(evaluation, 'USD')}\n{fx_note}" if fx is not None else ""))
+            labels["profit"].setToolTip((f"원본 {_money(profit, 'USD', signed=True)}\n{fx_note}" if fx is not None else ""))
+            labels["cash"].setToolTip(cash_detail + (f"\n원본 {_money(account.cash, 'USD')}\n{fx_note}" if fx is not None and account is not None else ""))
             labels["cash"].setStyleSheet("color: #ffb586;" if negative_cash else "")
-            labels["available"].setToolTip("증권사가 반환한 주문가능금액입니다. 현재 예수금·D+2 추정예수금·출금가능금액과 다릅니다.")
+            labels["available"].setToolTip("증권사가 반환한 주문가능금액입니다. 현재 예수금·D+2 추정예수금·출금가능금액과 다릅니다."
+                                          + (f"\n원본 {_money(account.available_to_order, 'USD')}\n{fx_note}" if fx is not None and account is not None else ""))
             updated = f"잔고 기준 {_time(state.fetched_at)}"
             if status == "error":
                 updated += f" · 최근 시도 {_time(state.last_attempt)} · {state.error}"
             labels["updated"].setText(updated)
             summary_text = (
                 f"{title}: {text}" if status in {"unknown", "error", "stale", "empty"}
-                else f"{title} {len(state.positions)}종목 · {currency} 계좌 잔고 기준 / 자동 갱신 최소 60초"
+                else f"{title} {len(state.positions)}종목 · {'KRW 표시' if fx is not None else currency} 계좌 잔고 기준 / 자동 갱신 최소 60초"
             )
             self.summaries[market].setText(summary_text + ("\n" + cash_context if cash_context else ""))
             self.summaries[market].setToolTip(cash_detail)
@@ -362,14 +548,14 @@ class PortfolioPanel(QWidget):
                 if not target and position.average_price > 0:
                     upper, lower = position.average_price * Decimal('1.01'), position.average_price * Decimal('0.992')
                 values = (
-                    f"{title} · {currency}", f"{position.name or position.symbol} · {position.symbol}", _quantity(position.quantity),
+                    f"{title} · {'KRW' if fx is not None else currency}", f"{position.name or position.symbol} · {position.symbol}", _quantity(position.quantity),
                     (f"공유 {_quantity(target['broker_sellable_quantity'])}" if target.get('sellable_is_shared')
-                     else _quantity(position.sellable_quantity)), _table_money(position.average_price, currency, price=True),
-                    _table_money(live_price, currency, price=True), _table_money(position.evaluation_amount, currency),
-                    _table_money(position.profit_loss, currency, signed=True),
+                     else _quantity(position.sellable_quantity)), self._display_money(position.average_price, market, price=True, table=True),
+                    self._display_money(live_price, market, price=True, table=True), self._display_money(position.evaluation_amount, market, table=True),
+                    self._display_money(position.profit_loss, market, signed=True, table=True),
                     f"{'+' if position.profit_rate > 0 else ''}{position.profit_rate:,.2f}%",
-                    '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else f'≥ {_target_price(upper)}',
-                    '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else f'≤ {_target_price(lower)}',
+                    '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else self._display_target(upper, market, '≥'),
+                    '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else self._display_target(lower, market, '≤'),
                     target.get('model_title') or '미확인 / 수동·외부',
                     _planned_exit_label(target, position.market, upper, lower),
                 )
@@ -402,13 +588,16 @@ class PortfolioPanel(QWidget):
         for row, lot_id in self._rows_by_instrument.get(key, ()):
             row_target = lots.get(lot_id, target)
             price = table.item(row, 5)
-            price.setText(_table_money(quote.price, inst.currency, price=True))
-            price.setToolTip(f'독립 매도 감시 현재가 · {_time(self._live_quotes[key][1])}\n평가금액·손익은 별도 잔고 조회 시각 기준입니다.')
+            price.setText(self._display_money(quote.price, inst.market, price=True, table=True))
+            price.setToolTip(f'독립 매도 감시 현재가 · {_time(self._live_quotes[key][1])}\n평가금액·손익은 별도 잔고 조회 시각 기준입니다.'
+                             + (f"\n원본 {_money(quote.price, 'USD', price=True)}\n{self._fx_note()}" if self._active_fx(inst.market) is not None else ""))
             for column, field, sign in ((9, 'take_profit_price', '≥'), (10, 'stop_loss_price', '≤')):
                 value = row_target.get(field)
                 blocked = row_target.get('error') or ('lots' in target and not target.get('reconciled'))
-                table.item(row, column).setText('확인 필요 · 보류' if blocked else '미확인' if value is None else f'{sign} {_target_price(value)}')
-                table.item(row, column).setToolTip(self._target_tooltip(key, lot_id))
+                table.item(row, column).setText('확인 필요 · 보류' if blocked else '미확인' if value is None else self._display_target(value, inst.market, sign))
+                original = (f"\n실제 매도 기준 {sign} {_target_price(value)} USD\n{self._fx_note()}"
+                            if value is not None and self._active_fx(inst.market) is not None else "")
+                table.item(row, column).setToolTip(self._target_tooltip(key, lot_id) + original)
             table.item(row, 11).setText(row_target.get('model_title') or ('모델 장부 대조 필요' if 'lots' in target and not target.get('reconciled') else '미확인 / 수동·외부'))
             table.item(row, 11).setToolTip(self._target_tooltip(key, lot_id))
             table.item(row, 12).setText(_planned_exit_label(row_target, inst.market,
@@ -496,6 +685,24 @@ class PortfolioPanel(QWidget):
                         live = self._live_quotes.get(f'{position.market.value}:{position.exchange}:{position.symbol}')
                         if live and (fetched_at is None or live[1] >= fetched_at):
                             item.setToolTip(f'독립 매도 감시 현재가 · {_time(live[1])}\n평가금액·손익은 별도 잔고 조회 시각 기준입니다.')
+                    if self._active_fx(market) is not None and column in {4, 5, 6, 7, 9, 10}:
+                        original = {
+                            4: position.average_price,
+                            5: (live[0] if (live := self._live_quotes.get(instrument))
+                                and (fetched_at is None or live[1] >= fetched_at) else position.current_price),
+                            6: position.evaluation_amount,
+                            7: position.profit_loss,
+                        }.get(column)
+                        if column in {9, 10}:
+                            group = getattr(self, '_exit_targets', {}).get(instrument, {})
+                            target = next((lot for lot in group.get('lots', ()) if lot.get('lot_id') == lot_id), {}) if lot_id else group
+                            field = 'take_profit_price' if column == 9 else 'stop_loss_price'
+                            original = target.get(field)
+                            if not group and not lot_id and position.average_price > 0:
+                                original = position.average_price * (Decimal('1.01') if column == 9 else Decimal('0.992'))
+                        if original is not None and (column not in {9, 10} or item.text().startswith(('≥', '≤'))):
+                            prefix = ('실제 매도 기준 ' + ('≥ ' if column == 9 else '≤ ') if column in {9, 10} else '원본 ')
+                            item.setToolTip(item.toolTip() + f'\n{prefix}{_money(original, "USD", price=column in {4, 5, 9, 10})}\n{self._fx_note()}')
                     table.setItem(row, column, item)
                 if key in selection:
                     table.selectionModel().select(table.model().index(row, 1),

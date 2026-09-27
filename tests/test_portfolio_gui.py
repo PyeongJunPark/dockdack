@@ -12,7 +12,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
     from dockdack.portfolio_gui import PortfolioPanel
 
 from dockdack.models import Market
@@ -40,6 +40,10 @@ class PortfolioPanelTests(unittest.TestCase):
             self.assertIn("미확인", labels["holdings"].text())
             self.assertIn("미확인", labels["cash"].text())
         self.assertIn("미확인", self.panel.summary_label.text())
+
+    def test_redundant_cash_explanation_is_not_on_screen(self):
+        self.assertFalse(any("예수금 ≠ 주문가능금액" in value.text()
+                             for value in self.panel.findChildren(QLabel)))
 
     def test_separate_currency_cards_and_readable_holdings(self):
         kr = account(positions=(position(), position(symbol="000660", quantity="0")))
@@ -79,6 +83,7 @@ class PortfolioPanelTests(unittest.TestCase):
         self.assertIn("이전 잔고 유지", self.panel.market_labels[Market.DOMESTIC]["status"].text())
         self.assertIn("이전 잔고", self.panel.table.item(0, 1).toolTip())
         self.assertIn("요청 제한", self.panel.market_labels[Market.DOMESTIC]["updated"].text())
+        self.assertIn("요청 제한", self.panel.market_labels[Market.DOMESTIC]["status"].toolTip())
         self.assertEqual(self.panel.market_labels[Market.US]["status"].text(), "보유종목 없음")
         self.assertNotIn("미국", self.panel.summary_label.text())
         self.panel.market_tabs.setCurrentIndex(1)
@@ -113,6 +118,9 @@ class PortfolioPanelTests(unittest.TestCase):
         self.panel.resize(1080, 600)
         self.panel.show()
         self.app.processEvents()
+        for market in Market:
+            self.assertTrue(self.panel.market_labels[market]["updated"].isHidden())
+            self.assertTrue(self.panel.summaries[market].isHidden())
         calls = []
         self.panel.request_refresh.connect(lambda: calls.append("refresh"))
         self.assertEqual(self.panel.market_tabs.tabText(0), "한국 · KRW")

@@ -125,8 +125,12 @@ class Mark14WorkerTests(unittest.TestCase):
             worker().dispatch(preopen_request(now=(SESSION.opened - timedelta(minutes=11)).isoformat()))
         engine = SimpleNamespace(equity_buy_percent=Decimal("10"), close_liquidator=None)
         self.assertTrue(_policy_enabled(engine))
-        engine.equity_buy_percent = Decimal("9")
-        self.assertFalse(_policy_enabled(engine))
+        for percent in (Decimal("0.01"), Decimal("7.5"), Decimal("9"), Decimal("100")):
+            engine.equity_buy_percent = percent
+            self.assertTrue(_policy_enabled(engine), percent)
+        for invalid in (None, Decimal("0"), Decimal("-1"), Decimal("100.01"), Decimal("NaN")):
+            engine.equity_buy_percent = invalid
+            self.assertFalse(_policy_enabled(engine), invalid)
 
     def test_remote_preparation_rejection_keeps_healthy_child(self):
         client = PrototypeProcessClient(MODEL_ID, timeout=15)

@@ -63,13 +63,11 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
                 setattr(self.window, name, value)
             self.window.update_controls()
 
-    def test_advanced_tab_hidden_by_default_and_controls_reparented_out_of_external_grid(self):
+    def test_advanced_tab_is_always_visible_and_controls_reparented_out_of_external_grid(self):
         window = self.window
-        self.assertFalse(self.advanced_visible())
-        self.assertFalse(window.advanced_settings_button.isChecked())
-        self.assertTrue(window.advanced_settings_button.isCheckable())
-        self.assertTrue(window.advanced_settings_button.isEnabled())
-        self.assertEqual(window.advanced_settings_button.text(), "기타·고급 설정")
+        self.assertTrue(self.advanced_visible())
+        self.assertTrue(window.advanced_settings_button.isHidden())
+        self.assertEqual(window.workspace_tabs.tabText(window.workspace_tabs.indexOf(window.tabs)), '고급설정')
         for control in (window.external_mode, window.legacy_trigger_label, window.model_trigger):
             self.assertEqual(window.external_grid.indexOf(control), -1)
             self.assertTrue(window.advanced_mode_panel.isAncestorOf(control))
@@ -78,19 +76,17 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
         self.assertIn("수동 가격·이동평균", window.advanced_mode_note.text())
         self.assert_no_trading_io()
 
-    def test_footer_opens_and_closes_the_same_tab_objects_without_duplicates(self):
+    def test_top_tab_navigation_keeps_the_same_objects_without_duplicates(self):
         window = self.window
         pages = tuple(window.workspace_tabs.widget(index) for index in range(window.workspace_tabs.count()))
         settings = tuple(window.tabs.widget(index) for index in range(window.tabs.count()))
         for _ in range(3):
-            window.advanced_settings_button.click()
+            window.workspace_tabs.setCurrentWidget(window.tabs)
             self.assertTrue(self.advanced_visible())
             self.assertIs(window.workspace_tabs.currentWidget(), window.tabs)
-            self.assertEqual(window.advanced_settings_button.text(), "고급 설정 닫기")
-            window.advanced_settings_button.click()
-            self.assertFalse(self.advanced_visible())
+            window.workspace_tabs.setCurrentWidget(window.signal_connection_page)
+            self.assertTrue(self.advanced_visible())
             self.assertIs(window.workspace_tabs.currentWidget(), window.signal_connection_page)
-            self.assertEqual(window.advanced_settings_button.text(), "기타·고급 설정")
             self.assertEqual(tuple(window.workspace_tabs.widget(index) for index in range(window.workspace_tabs.count())), pages)
             self.assertEqual(tuple(window.tabs.widget(index) for index in range(window.tabs.count())), settings)
         self.assert_no_trading_io()
@@ -112,8 +108,8 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
         with patch.object(window.engine, "enable_orders", wraps=window.engine.enable_orders) as arm, \
                 patch.object(window.engine, "disarm", wraps=window.engine.disarm) as disarm, \
                 patch.object(window, "configure_external", wraps=window.configure_external) as configure:
-            window.advanced_settings_button.click()
-            window.advanced_settings_button.click()
+            window.workspace_tabs.setCurrentWidget(window.tabs)
+            window.workspace_tabs.setCurrentWidget(window.signal_connection_page)
             self.assertEqual(self.state(), state)
             self.assertEqual(window.engine.external_sources, sources)
             self.assertEqual(window._prototype_feeds, feeds)
@@ -137,16 +133,16 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
         self.assertFalse(window.engine.orders_enabled)
         self.assert_no_trading_io()
 
-    def test_manual_mode_is_explicit_and_summary_remains_visible_when_advanced_hidden(self):
+    def test_manual_mode_is_explicit_and_summary_remains_available_outside_advanced(self):
         window = self.window
-        window.advanced_settings_button.click()
+        window.workspace_tabs.setCurrentWidget(window.tabs)
         self.assertTrue(window.external_mode.isEnabled())
         self.assertIn("해제하면 수동 규칙", window.external_mode.text())
         window.external_mode.click()
         self.assertFalse(window.external_mode.isChecked())
         self.assertIn("수동 규칙", window.connection_summary.text())
-        window.advanced_settings_button.click()
-        self.assertFalse(self.advanced_visible())
+        window.workspace_tabs.setCurrentWidget(window.signal_connection_page)
+        self.assertTrue(self.advanced_visible())
         self.assertIn("수동 규칙", window.connection_summary.text())
         self.assertFalse(window.engine.orders_enabled)
         self.assertFalse(window.monitoring)
@@ -154,7 +150,7 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
 
     def test_selecting_prototype_requires_external_mode_and_disables_its_manual_switch(self):
         window = self.window
-        window.advanced_settings_button.click()
+        window.workspace_tabs.setCurrentWidget(window.tabs)
         window.external_mode.click()
         self.assertFalse(window.external_mode.isChecked())
         for model in (MARK1_TRIGGER, MARK11_TRIGGER):
@@ -198,22 +194,24 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
 
     def test_advanced_controls_inherit_monitoring_worker_pending_and_confirmation_locks(self):
         window = self.window
-        window.advanced_settings_button.click()
+        window.workspace_tabs.setCurrentWidget(window.tabs)
         conditions = ({"monitoring": True}, {"worker": SimpleNamespace()}, {"pending_auto_arm": True},
                       {"_workspace_worker": SimpleNamespace()}, {"_confirming_orders": True},
                       {"_pending_environment": (self.service, self.store)}, {"_confirming_environment": True})
         for condition in conditions:
             with self.subTest(condition=tuple(condition)), self.blocked_state(**condition):
                 self.assertFalse(window.external_panel.isEnabled())
+                self.assertFalse(window.buy_percent.isEnabled())
                 self.assertFalse(window.advanced_mode_panel.isEnabled())
                 self.assertFalse(window.external_mode.isEnabled())
                 self.assertFalse(window.model_trigger.isEnabled())
                 self.assertFalse(window.rule_panel.isEnabled())
-                self.assertTrue(window.advanced_settings_button.isEnabled())
+                self.assertTrue(self.advanced_visible())
                 before = self.state()
                 window.external_mode.click()
                 self.assertEqual(self.state(), before)
         self.assertTrue(window.advanced_mode_panel.isEnabled())
+        self.assertTrue(window.buy_percent.isEnabled())
         self.assertTrue(window.external_mode.isEnabled())
         self.assert_no_trading_io()
 
@@ -229,11 +227,11 @@ class AdvancedSettingsGuiTests(unittest.TestCase):
                     patch.object(window.engine, "disarm", wraps=window.engine.disarm) as disarm, \
                     patch.object(window, "stop_monitoring", wraps=window.stop_monitoring) as stop:
                 before = self.state()
-                window.advanced_settings_button.click()
+                window.workspace_tabs.setCurrentWidget(window.tabs)
                 self.assertTrue(self.advanced_visible())
                 self.assertFalse(window.advanced_mode_panel.isEnabled())
-                window.advanced_settings_button.click()
-                self.assertFalse(self.advanced_visible())
+                window.workspace_tabs.setCurrentWidget(window.signal_connection_page)
+                self.assertTrue(self.advanced_visible())
                 self.assertEqual(self.state(), before)
                 self.assertTrue(window.engine.orders_enabled)
                 self.assertTrue(window.monitoring)
