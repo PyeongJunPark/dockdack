@@ -108,20 +108,72 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(trigger, 'none')
         self.assertEqual(models, list(PROTOTYPE_NOTICES))
         self.assertEqual(self.window.signal_connection_page.tabText(
-            self.window.signal_connection_page.indexOf(self.window.mark14_panel)), '장전 모델')
+            self.window.signal_connection_page.indexOf(self.window.mark14_panel)), '전체 모델')
         self.assertEqual(self.window.signal_connection_page.count(), 2)
         self.assertEqual(self.window.signal_connection_page.tabText(
-            self.window.signal_connection_page.indexOf(self.window.external_panel)), '장중 모델')
+            self.window.signal_connection_page.indexOf(self.window.external_panel)), '공통 주문·연결')
         self.assertEqual(self.window.workspace_tabs.tabText(
             self.window.workspace_tabs.indexOf(self.window.signal_connection_page)), 'AI 추론모델 연결')
         self.assertEqual(self.window.workspace_tabs.currentWidget(), self.window.watch_page)
         self.assertEqual([self.window.workspace_tabs.tabText(index)
                           for index in range(self.window.workspace_tabs.count())][:7],
-                         ['관심종목·차트', '보유종목', '실제 주문·체결', '매매일지',
-                          '모델 성과', 'AI 추론모델 연결', '서버·감시 로그'])
+                         ['관심종목·차트', '보유종목', '주문·체결', '매매일지',
+                          '모델 성과', 'AI 추론모델 연결', '기타·고급'])
         self.assertEqual(self.window.watch_tables[Market.DOMESTIC].columnCount(), 7)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
+
+    def test_one_model_list_shows_method_phase_output_and_exit_without_repeated_demo_suffix(self):
+        panel = self.window.mark14_panel
+        self.assertEqual(panel.model_selector.count(), len(PROTOTYPE_NOTICES))
+        self.assertEqual([panel.model_selector.itemData(index)
+                          for index in range(panel.model_selector.count())][:5],
+                         [MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER,
+                          'mark1-3-prototype', MARK14_TRIGGER])
+        self.assertTrue(all('모의 신호 연결' not in check.text()
+                            for check in self.window.external_model_checks.values()))
+        self.assertIn('CatBoost 3개 시드', panel.model_descriptions[MARK1_TRIGGER].text())
+        self.assertIn('국내 CNN / 미국 LSTM', panel.model_descriptions[MARK12_TRIGGER].text())
+        mark14 = panel.model_descriptions[MARK14_TRIGGER].text()
+        self.assertIn('추세·변동성·유동성', mark14)
+        self.assertIn('100종목의 다음 날 상대 수익 순위', mark14)
+        self.assertIn('장마감 5분 전', mark14)
+        self.assertTrue(self.window.environment_caption.isHidden())
+
+    def test_preopen_chart_shows_frozen_candidate_and_score_only_for_current_session(self):
+        from dockdack.market_schedule import session_on
+        check = self.window.external_model_checks[MARK14_TRIGGER]
+        check.blockSignals(True)
+        check.setChecked(True)
+        check.blockSignals(False)
+        self.window._progress((self.item.id, self._score_snapshot(), 1, 1))
+        session = session_on(Market.DOMESTIC, NOW.date())
+        self.window._progress(('mark14_preopen', {
+            'model_id': MARK14_TRIGGER, 'market': 'domestic', 'state': 'prepared',
+            'session_open': session.opened.isoformat(),
+            'candidates': [{'watch_id': self.item.id, 'symbol': self.item.instrument.symbol,
+                            'score': 0.82, 'score_unit': 'percent', 'selected': True}],
+        }))
+        self.assertIn('mark1.4 prototype 매수 후보(0.820%)', self.window.model_score_summary.text())
+        self.window.engine.clock = lambda: NOW + timedelta(days=1)
+        self.window._update_selected_model_scores()
+        self.assertIn('mark1.4 prototype 이전 장 판단(—)', self.window.model_score_summary.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_advanced_keeps_custom_source_editor_and_refreshing_server_log(self):
+        self.assertEqual(self.window.workspace_tabs.indexOf(self.window.operations_panel), -1)
+        self.assertGreaterEqual(self.window.tabs.indexOf(self.window.operations_panel), 0)
+        self.assertTrue(self.window.advanced_sources_panel.isAncestorOf(self.window.additional_sources))
+        self.assertTrue(self.window.advanced_sources_panel.isAncestorOf(self.window.source_status))
+        self.window.additional_sources.add_row(source='my-signal', path=str(self.folder / 'mine.json'))
+        self.assertIn(['my-signal', str(self.folder / 'mine.json')],
+                      self.window._capture_preferences()['additional_sources'])
+        self.store.event('SYSTEM', 'advanced log refresh', category='system')
+        self.window.advanced_settings_button.setChecked(True)
+        self.window.tabs.setCurrentWidget(self.window.operations_panel)
+        self.drain_activity()
+        self.assertIn('advanced log refresh', self.window.operations_panel.logs['system'].table.item(0, 2).text())
 
     def test_mark14_connects_own_demo_source_without_starting_child_or_orders(self):
         self.window.external_model_checks[MARK14_TRIGGER].setChecked(True)
@@ -136,7 +188,7 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
 
     def test_every_checked_preopen_model_gets_its_own_demo_source_without_arming(self):
-        self.assertEqual(len(PREOPEN_MODEL_IDS), 9)
+        self.assertEqual(len(PREOPEN_MODEL_IDS), 10)
         self.assertEqual(set(desktop_model_choices(None, False, [])[1]),
                          set(PROTOTYPE_NOTICES))
         # This fixture passes builtin=False directly; the real desktop launcher
@@ -403,7 +455,7 @@ class V00GuiTests(unittest.TestCase):
         self.assertIn('MK1.0 추정확률', table.horizontalHeaderItem(4).text())
         self.assertIn('MK1.1 추정확률', table.horizontalHeaderItem(5).text())
         self.assertIn('mark1.0 prototype', self.window.external_model_checks[MARK1_TRIGGER].text())
-        self.assertIn('MK1.0과 MK1.2', self.window.model_score_summary.toolTip())
+        self.assertIn('장중 모델은 장벽 선후 확률', self.window.model_score_summary.toolTip())
         self.assertEqual(table.item(0, 4).text(), '매수 판정\n63.8%')
         self.assertEqual(table.item(0, 5).text(), '대기\n41.2%')
         self.assertIn('현재가 100 KRW', self.window.model_score_summary.text())
@@ -415,7 +467,8 @@ class V00GuiTests(unittest.TestCase):
         self.store.save_item(other)
         self.window.reload_tables(items=self.store.items(), rules=[])
         self.assertEqual(table.item(self.window._watch_rows[self.item.id], 4).text(), '매수 판정\n63.8%')
-        self.assertIn('현재가 없음', table.item(self.window._watch_rows[other.id], 4).text())
+        self.assertEqual(table.item(self.window._watch_rows[other.id], 4).text(), '—')
+        self.assertIn('현재가 조회 전', table.item(self.window._watch_rows[other.id], 4).toolTip())
         self.assertEqual([feed.publish.call_count for feed in feeds.values()], [1, 1])
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
@@ -592,7 +645,7 @@ class V00GuiTests(unittest.TestCase):
         self.window.external_model_checks[MARK11_TRIGGER].setChecked(False)
         self.window._refresh_model_scores()
         self.assertNotIn('63.8%', table.item(0, 4).text())
-        self.assertIn('연결 꺼짐', table.item(0, 5).text())
+        self.assertEqual(table.item(0, 5).text(), '—')
         self.assertIn('모델 추정확률 —', self.window.latest_model_summary.text())
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)

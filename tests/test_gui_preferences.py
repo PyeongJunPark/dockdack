@@ -129,6 +129,16 @@ class GuiPreferencesTests(unittest.TestCase):
         second.reload_tables(items=self.store.items())
         self.assertEqual(second.selected_item().days, 64)
 
+    def test_old_log_tab_selection_opens_logs_inside_advanced_settings(self):
+        for selection in ({'workspace_tab_id': 'logs'}, {'workspace_tab': 3}):
+            with self.subTest(selection=selection):
+                self.store.save_ui_preferences({'version': 3, 'advanced_visible': False, **selection})
+                window = self.make_window()
+                self.assertTrue(window.advanced_settings_button.isChecked())
+                self.assertIs(window.workspace_tabs.currentWidget(), window.tabs)
+                self.assertIs(window.tabs.currentWidget(), window.operations_panel)
+                window.close()
+
     def test_restored_no_model_does_not_upgrade_short_watch_history(self):
         self.store.save_item(WatchItem(self.service.resolve('005930'), '삼성전자', 20))
         self.store.save_ui_preferences({'version': 1, 'external_models': [], 'model_trigger': 'none'})

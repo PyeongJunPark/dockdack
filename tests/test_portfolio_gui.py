@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal as D
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -101,10 +102,10 @@ class PortfolioPanelTests(unittest.TestCase):
         item = self.panel.table.item(0, 1)
         self.panel.apply(payload, now=NOW + timedelta(seconds=1))
         self.assertIs(self.panel.table.item(0, 1), item)
-        self.assertEqual(len(self.panel.table.selectedItems()), 11)
+        self.assertEqual(len(self.panel.table.selectedItems()), 12)
         newer = {Market.DOMESTIC: replace(payload[Market.DOMESTIC], fetched_at=NOW + timedelta(seconds=60))}
         self.panel.apply(newer, now=NOW + timedelta(seconds=60))
-        self.assertEqual(len(self.panel.table.selectedItems()), 11)
+        self.assertEqual(len(self.panel.table.selectedItems()), 12)
 
     def test_market_tabs_only_show_the_selected_markets_card_and_holdings(self):
         payload = {market: PortfolioMarketState(market, account(market), NOW, NOW) for market in Market}
@@ -187,13 +188,13 @@ class PortfolioPanelTests(unittest.TestCase):
             table = self.panel.tables[market]
             self.assertIs(table.item(15 + index, 1), saved[market][0])
             self.assertEqual(table.verticalScrollBar().value(), saved[market][1])
-            self.assertEqual(len(table.selectedItems()), 11)
+            self.assertEqual(len(table.selectedItems()), 12)
         newer = {market: replace(state, fetched_at=NOW + timedelta(seconds=60)) for market, state in payload.items()}
         self.panel.apply(newer, now=NOW + timedelta(seconds=60))
         self.assertEqual(self.panel.current_market, Market.US)
         for market, table in self.panel.tables.items():
             self.assertEqual(table.verticalScrollBar().value(), saved[market][1])
-            self.assertEqual(len(table.selectedItems()), 11)
+            self.assertEqual(len(table.selectedItems()), 12)
 
     def test_market_error_unknown_and_stale_are_not_combined_with_other_market(self):
         self.panel.apply({
@@ -225,6 +226,57 @@ class PortfolioPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.table.item(0, 0).text(), "한국 · KRW")
         self.assertIn("KRW", self.panel.market_tabs.tabText(0))
         self.assertEqual(self.panel.market_labels[Market.DOMESTIC]["evaluation"].objectName(), "portfolioValue")
+
+    def test_model_lots_show_separate_planned_exit_sessions_without_implying_a_fill(self):
+        market = Market.DOMESTIC
+        key = "domestic:KRX:005930"
+        self.panel.apply({market: PortfolioMarketState(market, account(), NOW, NOW)}, now=NOW)
+        self.assertEqual(self.panel.table.item(0, 12).text(), "가격 조건 시")
+        common = {"quantity": D(1), "sellable_quantity": D(1), "average_price": D(100),
+                  "broker_sellable_quantity": D(2), "take_profit_price": None,
+                  "stop_loss_price": None, "buy_fill_observed_at": "2026-09-15T01:00:00+00:00"}
+        lots = ({**common, "lot_id": "daily", "strategy_id": "mark1-4-prototype",
+                 "model_title": "mark1.4 prototype"},
+                {**common, "lot_id": "h3", "strategy_id": "mark1-11-prototype",
+                 "model_title": "mark1.11 prototype"})
+        self.panel.set_exit_targets({key: {"lots": lots, "reconciled": True}})
+        table = self.panel.table
+        self.assertEqual(table.rowCount(), 2)
+        self.assertEqual(table.horizontalHeaderItem(12).text(), "기간 매도 예정")
+        self.assertLess(table.horizontalHeader().visualIndex(12), table.horizontalHeader().visualIndex(9))
+        self.assertEqual(table.item(0, 12).text(), "2026-09-15 마감 5분 전")
+        self.assertEqual(table.item(1, 12).text(), "2026-09-17 장중")
+        self.assertIn("완료되지 않을 수", table.item(1, 12).toolTip())
+
+        changed = {key: {"lots": (lots[0], {**lots[1],
+                                          "buy_fill_observed_at": "2026-09-14T01:00:00+00:00"}),
+                         "reconciled": True}}
+        self.panel.apply_holding_quote({"watch_id": key,
+                                        "instrument": SimpleNamespace(market=market, currency="KRW"),
+                                        "quote": SimpleNamespace(price=D(200)),
+                                        "targets": changed[key]})
+        self.assertEqual(table.item(1, 12).text(), "2026-09-16 장중")
+
+    def test_unreconciled_or_unobserved_model_lot_never_claims_a_scheduled_date(self):
+        market = Market.US
+        key = "us:ND:AAPL"
+        self.panel.apply({market: PortfolioMarketState(market, account(market), NOW, NOW)}, now=NOW)
+        lot = {"lot_id": "h5", "quantity": D(2), "sellable_quantity": D(2),
+               "average_price": D(100), "strategy_id": "mark1-12-prototype",
+               "model_title": "mark1.12 prototype", "buy_fill_observed_at": None,
+               "take_profit_price": None, "stop_loss_price": None}
+        self.panel.set_exit_targets({key: {"lots": (lot,), "reconciled": True}})
+        self.panel.market_tabs.setCurrentIndex(1)
+        self.assertEqual(self.panel.table.item(0, 12).text(), "체결일 미확인")
+        unreconciled = {"lots": (lot,), "reconciled": False,
+                        "issues": ("잔고 수량 불일치",)}
+        self.panel.set_exit_targets({key: unreconciled})
+        self.assertEqual(self.panel.table.item(0, 12).text(), "장부 대조 필요")
+        self.panel.apply_holding_quote({"watch_id": key,
+                                        "instrument": SimpleNamespace(market=market, currency="USD"),
+                                        "quote": SimpleNamespace(price=D(200)),
+                                        "targets": unreconciled})
+        self.assertEqual(self.panel.table.item(0, 12).text(), "장부 대조 필요")
 
 
 if __name__ == "__main__":

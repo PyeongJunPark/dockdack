@@ -28,10 +28,10 @@ MARK18_SOURCE = "mark1-8-prototype-demo-trigger"
 class PreopenIdentityTests(unittest.TestCase):
     def test_each_method_has_distinct_frozen_bundle_source_and_owned_title(self):
         self.assertEqual(set(PREOPEN_MODELS), {
-            f"mark1-{number}-prototype" for number in range(5, 13)
+            "mark1-3-prototype", *(f"mark1-{number}-prototype" for number in range(5, 13))
         })
-        self.assertEqual(len({spec.source_id for spec in PREOPEN_MODELS.values()}), 8)
-        self.assertEqual(len({spec.model_id for spec in PREOPEN_MODELS.values()}), 8)
+        self.assertEqual(len({spec.source_id for spec in PREOPEN_MODELS.values()}), 9)
+        self.assertEqual(len({spec.model_id for spec in PREOPEN_MODELS.values()}), 9)
         for model_id, spec in PREOPEN_MODELS.items():
             with self.subTest(model_id=model_id):
                 self.assertEqual(spec.source_id, model_id + "-demo-trigger")

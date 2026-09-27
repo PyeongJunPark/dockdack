@@ -333,6 +333,26 @@ class WatchGuiTests(unittest.TestCase):
         self.assertEqual(self.window.chart.currency, "")
         self.assertEqual(self.service.submitted, [])
 
+    def test_market_tab_separates_ranked_and_other_watch_items(self):
+        self.store.save_item(WatchItem(self.service.resolve("000660"), "SK하이닉스"))
+        ranks = (RankedStock(Market.DOMESTIC, "005930", "KRX", "삼성전자", 1,
+                             Decimal(100), "KRW", 1000, "volume"),)
+        ranks += tuple(RankedStock(Market.DOMESTIC, f"{100000 + index}", "KRX", f"종목 {index}", index + 2,
+                                   Decimal(100), "KRW", 999 - index, "volume") for index in range(99))
+        self.store.replace_ranked(Market.DOMESTIC, ranks, set())
+        self.window.reload_tables()
+        self.assertIn("순위 100 + 기타 1", self.window.watch_market_tabs.tabText(0))
+        self.assertIn("장전 모델 후보는 선정 순위만", self.window.watch_market_tabs.tabToolTip(0))
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].rowCount(), 101)
+
+    def test_market_tab_does_not_mislabel_legacy_turnover_as_volume_top100(self):
+        ranks = tuple(RankedStock(Market.DOMESTIC, f"{100000 + index}", "KRX", f"종목 {index}", index + 1,
+                                  Decimal(100), "KRW") for index in range(100))
+        self.store.replace_ranked(Market.DOMESTIC, ranks, set())
+        self.window.reload_tables()
+        self.assertNotIn("순위 100", self.window.watch_market_tabs.tabText(0))
+        self.assertIn("TOP100 미확정", self.window.watch_market_tabs.tabToolTip(0))
+
     def test_switching_both_market_tabs_is_display_only_even_while_orders_on(self):
         self.store.save_item(WatchItem(self.service.resolve("AAPL"), "애플"))
         self.window.reload_tables()

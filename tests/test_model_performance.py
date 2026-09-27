@@ -10,8 +10,9 @@ from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 
-from dockdack.model_performance import model_realized_performance
+from dockdack.model_performance import MODELS, model_realized_performance
 from dockdack.models import TradingMode
+from dockdack.signal_bridge import prototype_families
 from dockdack.trading.performance import realized_performance
 
 
@@ -53,16 +54,29 @@ def row(report, model=OLD, market="domestic", currency="KRW"):
 
 
 class ModelPerformanceTests(unittest.TestCase):
-    def test_empty_eight_rows_are_no_sales_not_zero_return(self):
+    def test_empty_report_includes_every_connected_model_without_zero_return(self):
         report = result([], TradingMode.DEMO)
         self.assertEqual(report["mode"], "demo")
-        self.assertEqual(len(report["rows"]), 8)
+        expected = {family.id for family in prototype_families()}
+        self.assertEqual(MODELS, tuple((family.id, family.title) for family in prototype_families()))
+        self.assertIn("mark1-3-prototype", expected)
+        self.assertEqual(len(report["rows"]), len(expected) * 2)
+        self.assertEqual({item["strategy_id"] for item in report["rows"]}, expected)
         for item in report["rows"]:
             self.assertEqual(item["status"], "no_sales")
             self.assertIsNone(item["return_pct"])
             self.assertIsNone(item["realized_profit"])
         self.assertTrue(report["complete"])
         self.assertIsNone(report["coverage"]["first_order_at"])
+
+    def test_registered_models_receive_only_their_own_realized_sales(self):
+        for model, _ in MODELS:
+            with self.subTest(model=model):
+                report = result([order(1, "buy", model=model), order(2, "sell", price="102")])
+                self.assertEqual(row(report, model)["return_pct"], 2)
+                self.assertEqual(row(report, model)["known_sell_count"], 1)
+                self.assertTrue(all(item["status"] == "no_sales" for item in report["rows"]
+                                    if item["strategy_id"] != model or item["market"] != "domestic"))
 
     def test_open_positions_and_unfilled_order_are_not_sales(self):
         report = result([order(1, "buy", model=OLD), order(2, "sell", status="accepted", filled_quantity="0", remaining_quantity="1")])

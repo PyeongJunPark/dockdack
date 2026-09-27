@@ -267,7 +267,7 @@ class WatchlistDialog(QDialog):
         self.environment_selector.apply(mode, pending=self._pending_environment is not None)
         self.environment_caption.setText(f'{TAGLINE}   /   {name}')
         self.portfolio_panel.heading.setText(f'현재 보유종목 · {name} 계좌')
-        self.order_history_panel.heading.setText(f'실제 주문·체결 내역 · {name} 계좌')
+        self.order_history_panel.heading.setText(f'주문·체결 · {name} 계좌')
         self.setWindowTitle(f'{APP_NAME} | 관심종목 · {name}')
         self.environment_notice.setText(
             '실전 · 실제 자금 사용 / 내장 랜덤 모의 신호기 차단 / 실전 API 키와 DOCKDACK_ALLOW_LIVE_ORDERS=true 필요 / 전환만으로 주문 ON 안 됨'
@@ -455,8 +455,6 @@ class WatchlistDialog(QDialog):
             self.brand_mark.setFixedSize(side, side)
             self.brand_mark.setPixmap(app_icon().pixmap(side - 2, side - 2))
             self.title_layout.setSpacing(2 if short else 6)
-            self.control_grid.setContentsMargins(12, 4 if short else 10, 12, 4 if short else 10)
-            self.control_grid.setSpacing(4 if short else 8)
         if getattr(self, '_watch_compact', None) != compact:
             self._watch_compact = compact
             margins = (12, 4, 12, 4) if compact else (20, 14, 20, 12)
@@ -505,7 +503,6 @@ class WatchlistDialog(QDialog):
         title.addStretch()
         self.environment_selector = EnvironmentSelector(selected_mode(self.service))
         self.environment_selector.requested.connect(self.request_environment)
-        title.addWidget(self.environment_selector)
         self.mode_label = label("자동주문 OFF · 주문 차단", "badge")
         self.window_controls.add_to(title)
         layout.addLayout(title)
@@ -532,19 +529,12 @@ class WatchlistDialog(QDialog):
         layout.addWidget(self.health_label)
         self.health_label.hide()  # Full diagnostics live in the server/log page.
 
-        control_card = QFrame()
-        control_card.setObjectName("controlBar")
-        controls = self.control_grid = QGridLayout(control_card)
-        controls.setContentsMargins(12, 10, 12, 10)
-        controls.setSpacing(8)
         self.interval = QSpinBox()
         self.interval.setRange(15, 3600)
         self.interval.setValue(30)
         self.interval.setSuffix(" 초")
-        interval_label = label("순회 후 대기", "muted")
-        interval_label.setBuddy(self.interval)
-        controls.addWidget(interval_label, 0, 0)
-        controls.addWidget(self.interval, 0, 1)
+        self.interval_label = label("순회 후 대기", "muted")
+        self.interval_label.setBuddy(self.interval)
         self.interval.setFixedWidth(100)
         self.interval.setToolTip("전체 관심종목을 순서대로 한 번 조회한 뒤 쉬는 시간입니다. 각 종목의 갱신 주기가 30초라는 뜻이 아닙니다.")
         self.refresh_button = QPushButton("전체 1회 조회")
@@ -562,12 +552,11 @@ class WatchlistDialog(QDialog):
         self.arm_button.clicked.connect(self.enable_auto_orders)
         self.disarm_button.clicked.connect(self.disable_auto_orders)
         self.stop_button.clicked.connect(self.stop_monitoring)
-        for button, row, column, span in ((self.refresh_button, 0, 2, 1), (self.start_button, 0, 3, 1),
-                                        (self.arm_button, 1, 0, 2), (self.disarm_button, 1, 2, 1),
-                                        (self.stop_button, 1, 3, 1)):
+        for button in (self.refresh_button, self.start_button, self.arm_button,
+                       self.disarm_button, self.stop_button):
             button.setAutoDefault(False)
-            controls.addWidget(button, row, column, 1, span)
-        layout.addWidget(control_card)
+        self.title_layout.insertWidget(4, self.arm_button)
+        self.title_layout.insertWidget(5, self.disarm_button)
 
         flow = QHBoxLayout()
         self.connection_summary = label("신호 연결 미설정", "muted", wrap=True)
@@ -587,6 +576,8 @@ class WatchlistDialog(QDialog):
         self.workspace_tabs = QTabWidget()
         self.workspace_tabs.setObjectName("workspaceTabs")
         self.workspace_tabs.setStyleSheet('QTabWidget#workspaceTabs { background: #111c2e; } QTabBar { background: #111c2e; }')
+        self.workspace_tabs.tabBar().setExpanding(True)
+        self.workspace_tabs.tabBar().setUsesScrollButtons(True)
         self.portfolio_panel = PortfolioPanel()
         self.portfolio_panel.request_refresh.connect(self.refresh_portfolio)
         self.order_history_panel = OrderHistoryPanel()
@@ -599,7 +590,7 @@ class WatchlistDialog(QDialog):
         self.watch_page = QWidget()
         watch_layout = QVBoxLayout(self.watch_page)
         self.workspace_tabs.addTab(self.portfolio_panel, "보유종목")
-        self.workspace_tabs.addTab(self.order_history_panel, "실제 주문·체결")
+        self.workspace_tabs.addTab(self.order_history_panel, "주문·체결")
         self.workspace_tabs.addTab(self.trade_journal_panel, "매매일지")
         self.workspace_tabs.addTab(self.operations_panel, "서버·감시 로그")
         self.workspace_tabs.addTab(self.watch_page, "관심종목·차트")
@@ -653,7 +644,7 @@ class WatchlistDialog(QDialog):
         self.watch_market_tabs = QTabWidget()
         self.watch_tables = {}
         for market, title in ((Market.DOMESTIC, "한국 · KRW"), (Market.US, "미국 · USD")):
-            view = table(["종목", "현재가", "N일", "상태/조회시각"])
+            view = table(["종목", "현재가", "N일", "조회"])
             view.setMinimumWidth(480)
             view.verticalHeader().setDefaultSectionSize(52)
             for column, width in ((0, 125), (1, 130), (2, 45)):
@@ -751,6 +742,32 @@ class WatchlistDialog(QDialog):
         self.tabs.addTab(rules_box, "트리거 규칙")
         self._build_external_tab()
         self._build_strategy_tab()
+        # Keep the ordinary dashboard focused on order ON/OFF. These existing
+        # controls retain their handlers and settings in a single advanced tab.
+        self.advanced_monitor_page = QWidget()
+        monitor_layout = QVBoxLayout(self.advanced_monitor_page)
+        monitor_layout.setContentsMargins(8, 8, 8, 8)
+        monitor_layout.setSpacing(8)
+        monitor_layout.addWidget(label("조회·감시", "section"))
+        monitor_layout.addWidget(self.environment_selector)
+        monitor_row = QHBoxLayout()
+        for widget in (self.refresh_button, self.start_button, self.stop_button):
+            monitor_row.addWidget(widget)
+        monitor_row.addStretch(1)
+        monitor_layout.addLayout(monitor_row)
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(self.interval_label)
+        interval_row.addWidget(self.interval)
+        interval_row.addStretch(1)
+        monitor_layout.addLayout(interval_row)
+        ranking_row = QHBoxLayout()
+        for widget in (self.ranking_button, self.export_button, self.hourly_ranking):
+            ranking_row.addWidget(widget)
+        ranking_row.addStretch(1)
+        monitor_layout.addLayout(ranking_row)
+        monitor_layout.addWidget(self.edit_panel)
+        monitor_layout.addStretch(1)
+        self.tabs.addTab(self.advanced_monitor_page, "조회·감시")
         self.tabs.currentChanged.connect(self._tab_changed)
         self.signal_connection_panel = SignalConnectionPanel()
         self.signal_connection_panel.setObjectName("signalConnectionPanel")
@@ -1229,8 +1246,7 @@ class WatchlistDialog(QDialog):
         market = item.instrument.market
         snapshot = self.snapshots.get(item.id)
         status = self.errors.get(item.id) or (
-            ("조회 " if item.id in self.fresh_ids else "저장값 ") + snapshot.fetched_at.astimezone().strftime("%m/%d %H:%M:%S")
-            if snapshot else "미조회")
+            snapshot.fetched_at.astimezone().strftime("%m/%d %H:%M:%S") if snapshot else "—")
         price = f"{number(snapshot.quote.price, 0 if market is Market.DOMESTIC else 4)} {item.instrument.currency}" if snapshot else "—"
         return (f"{item.name or item.instrument.symbol}\n{item.instrument.symbol}", price, item.days, status)
 
@@ -1284,7 +1300,8 @@ class WatchlistDialog(QDialog):
             self.message.setText(self._workspace_error)
         elif result[0] is self.store:
             self._workspace_error = ''
-            _, items, rules, cached = result
+            _, items, rules, cached, rankings = result
+            self._ranked_ids = self._volume_rank_ids(rankings)
             self._apply_cached_snapshots(cached)
             self.reload_tables(items=items, rules=rules)
         pending, self._workspace_pending = self._workspace_pending, False
@@ -1296,11 +1313,27 @@ class WatchlistDialog(QDialog):
             self.request_workspace_reload()
         self.update_controls()
 
+    @staticmethod
+    def _volume_rank_ids(rankings):
+        result = {}
+        for market in (Market.DOMESTIC, Market.US):
+            rows = [rank for rank in rankings if rank["market"] == market.value]
+            ids = {rank["watch_id"] for rank in rows}
+            valid = (len(rows) == len(ids) == 100
+                     and {rank["rank"] for rank in rows} == set(range(1, 101))
+                     and all(rank["ranking_basis"] == "volume" for rank in rows))
+            result[market] = ids if valid else set()
+        return result
+
     def reload_tables(self, *, items=None, rules=None):
         if self._defer_workspace and items is None:
             self.request_workspace_reload()
             return
-        items = self.store.items() if items is None else items
+        if items is None:
+            items = self.store.items()
+            rankings = self.store.rankings()
+            self._ranked_ids = self._volume_rank_ids(rankings)
+        ranked_ids = getattr(self, "_ranked_ids", {})
         self._items_by_id = {item.id: item for item in items}
         self._watch_rows = {}
         for index, (market, view) in enumerate(self.watch_tables.items()):
@@ -1320,9 +1353,17 @@ class WatchlistDialog(QDialog):
                 scrollbar.setValue(scroll)
             finally:
                 view.blockSignals(False)
-            self.watch_market_tabs.setTabText(index, f"{'한국 · KRW' if market is Market.DOMESTIC else '미국 · USD'} ({len(market_items)})")
+            rank_set = ranked_ids.get(market, set())
+            ranked = sum(item.id in rank_set for item in market_items)
+            extra = len(market_items) - ranked
+            name = '한국 · KRW' if market is Market.DOMESTIC else '미국 · USD'
+            self.watch_market_tabs.setTabText(index, f"{name} (순위 {ranked} + 기타 {extra})"
+                                              if rank_set else f"{name} ({len(market_items)})")
+            self.watch_market_tabs.setTabToolTip(
+                index, f"거래량 선정 {ranked}개 · 순위 외 관심/보호 {extra}개. 장전 모델 후보는 선정 순위만 사용합니다."
+                if rank_set else f"관심종목 {len(market_items)}개 · 거래량 TOP100 미확정")
         rules = self.store.rules(limit=500) if rules is None else rules
-        self.rules_table.setToolTip('최근 규칙 최대 500개 표시 · 전체 주문 기록은 실제 주문·체결 및 매매일지에서 확인하세요.')
+        self.rules_table.setToolTip('최근 규칙 최대 500개 표시 · 전체 주문 기록은 주문·체결 및 매매일지에서 확인하세요.')
         item_map = {i.id: i for i in items}
         self.set_rows(self.rules_table, [(item_map[r.watch_id].instrument.symbol, r.description,
                       "매수" if r.side.value == "buy" else "매도", r.quantity,
@@ -1338,8 +1379,11 @@ class WatchlistDialog(QDialog):
         if self.workspace_tabs.currentWidget() is self.watch_page:
             self.select_item()
 
+    def _activity_page(self):
+        return self.workspace_tabs.currentWidget()
+
     def _reload_activity(self, *, force=False, visible_force=False):
-        page = self.workspace_tabs.currentWidget()
+        page = self._activity_page()
         if not force and page not in (self.operations_panel, self.order_history_panel, self.trade_journal_panel,
                                       self.model_performance_panel):
             return
@@ -1588,7 +1632,7 @@ class WatchlistDialog(QDialog):
         def refresh(progress):
             self._refresh_executions_worker(progress, force=True)
             return {}
-        self._run(refresh, streaming=True, done="체결가 보완 조회 완료 · 실제 주문·체결 탭의 가격/실현손익과 미확인 사유를 확인하세요.")
+        self._run(refresh, streaming=True, done="가격 확인 조회 완료 · 주문·체결 화면을 확인하세요.")
 
     def _run(self, operation, *, streaming=False, done=None, focus_result=False, job_kind="task"):
         if self.worker:

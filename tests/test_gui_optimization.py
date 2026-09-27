@@ -145,9 +145,11 @@ class GuiOptimizationTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
         self.assertLessEqual(self.window.height(), 720)
-        for control in (self.window.stop_button, self.window.disarm_button, self.window.environment_selector):
+        for control in (self.window.arm_button, self.window.disarm_button):
             point = control.mapTo(self.window, control.rect().bottomRight())
             self.assertLess(point.y(), self.window.height())
+        for control in (self.window.stop_button, self.window.environment_selector):
+            self.assertTrue(self.window.advanced_monitor_page.isAncestorOf(control))
         self.assertEqual(self.window.tabs.indexOf(self.window.external_panel), -1)
         self.assertGreaterEqual(self.window.signal_connection_page.indexOf(self.window.external_panel), 0)
 

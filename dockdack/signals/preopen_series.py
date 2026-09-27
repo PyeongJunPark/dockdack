@@ -37,6 +37,8 @@ class PreopenModelSpec:
 
 
 PREOPEN_MODELS = {
+    "mark1-3-prototype": PreopenModelSpec("mark1-3-prototype", "models/mark1_3",
+                                           "8개 완료봉 특징·CUDA 학습 MLP 순수익 회귀", "예상 비용 후 순수익률 %"),
     "mark1-5-prototype": PreopenModelSpec("mark1-5-prototype", "models/mark1_series",
                                            "LSTM 순환망 순수익 회귀", "예상 순수익률 %"),
     "mark1-6-prototype": PreopenModelSpec("mark1-6-prototype", "models/mark1_series",
@@ -89,6 +91,9 @@ class PreopenExperimentalFeed(Mark14ExternalFeed):
 
 def load_preopen_predictor(model_id: str, bundle_root, market: str):
     """The child loads one SHA-checked trained model, never fits on live bars."""
+    if model_id == "mark1-3-prototype":
+        from dockdack.mark1_3_preopen import Mark13Predictor
+        return Mark13Predictor(bundle_root, market)
     if model_id in {"mark1-5-prototype", "mark1-6-prototype", "mark1-7-prototype"}:
         from dockdack.mark1_series_inference import MarkSeriesPredictor
         return MarkSeriesPredictor(bundle_root, market,

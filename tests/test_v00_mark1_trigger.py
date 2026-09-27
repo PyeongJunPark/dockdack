@@ -95,12 +95,12 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.model_trigger.findData(MARK1_TRIGGER), -1)
         self.assertEqual(self.window.model_trigger.findData(MARK11_TRIGGER), -1)
         self.assertEqual(self.window.model_trigger.findData(MARK12_TRIGGER), -1)
-        notice_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_notice))[0]
-        sources_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.additional_sources))[0]
         self.assertEqual(self.window.external_grid.indexOf(self.window.model_trigger), -1)
+        self.assertEqual(self.window.external_grid.indexOf(self.window.additional_sources), -1)
         self.assertTrue(self.window.advanced_mode_panel.isAncestorOf(self.window.model_trigger))
+        self.assertTrue(self.window.advanced_sources_panel.isAncestorOf(self.window.additional_sources))
         self.assertFalse(self.window.workspace_tabs.isTabVisible(self.window.workspace_tabs.indexOf(self.window.tabs)))
-        self.assertLess(notice_row, sources_row)
+        self.assertTrue(self.window.mark14_panel.isAncestorOf(self.window.external_model_checks[MARK1_TRIGGER]))
         self.assertFalse(self.window.builtin_lstm.isVisible())
         self.assertEqual(self.window.external_source.text(), 'external-model')
         self.assertIn('−0.9%', self.window.model_notice.text())

@@ -24,6 +24,7 @@ import dockdack
 from dockdack.runtime_paths import app_home, checkout_root, model_bundle
 
 MODEL_IDS = ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype",
+             "mark1-3-prototype",
              "mark1-4-prototype", "mark1-5-prototype", "mark1-6-prototype",
              "mark1-7-prototype", "mark1-8-prototype", "mark1-9-prototype",
              "mark1-10-prototype", "mark1-11-prototype", "mark1-12-prototype")
@@ -50,8 +51,8 @@ def model_bridge_type(model_id):
     if model_id == "mark1-4-prototype":
         from dockdack.signals.mark1_4_external import Mark14TriggerBridge
         return Mark14TriggerBridge
-    if model_id in MODEL_IDS[4:]:
-        from dockdack.signals.preopen_series import preopen_bridge_type
+    from dockdack.signals.preopen_series import PREOPEN_MODELS, preopen_bridge_type
+    if model_id in PREOPEN_MODELS:
         return preopen_bridge_type(model_id)
     raise ValueError("Unknown prototype model identity")
 
@@ -97,7 +98,7 @@ class PrototypeWorker:
         if model_id == "mark1-4-prototype":
             from dockdack.signals.mark1_4_external import Mark14Worker
             self.special = Mark14Worker(bundle_root=self.bundle_root, predictors=self.predictors)
-        elif model_id in MODEL_IDS[4:]:
+        elif model_id == "mark1-3-prototype" or model_id in MODEL_IDS[5:]:
             from dockdack.signals.mark1_4_external import Mark14Worker
             from dockdack.signals.preopen_series import load_preopen_predictor
             self.special = Mark14Worker(

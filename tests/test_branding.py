@@ -41,7 +41,7 @@ class BrandingTests(unittest.TestCase):
         locked = tomllib.loads((root / "uv.lock").read_text(encoding="utf-8"))
         package = next(item for item in locked["package"] if item["name"] == "dockdack")
         self.assertEqual(APP_VERSION, "0.1.0")
-        self.assertEqual(APP_RELEASE, "0.1 (MK1)")
+        self.assertEqual(APP_RELEASE, "0.1")
         self.assertEqual(project["project"]["version"], APP_VERSION)
         self.assertEqual(package["version"], APP_VERSION)
 

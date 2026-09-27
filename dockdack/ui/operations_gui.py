@@ -97,7 +97,7 @@ class OperationsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.addWidget(label("서버 상태와 데이터 흐름", "section"))
+        layout.addWidget(label("서버·감시 로그", "section"))
         self.runtime = label("감시 중지 · API 상태 미확인", "muted", wrap=True)
         self.flow = label("최근 감시 기록 — · 최근 신호 수신 —", "muted", wrap=True)
         layout.addWidget(self.runtime)
@@ -105,9 +105,9 @@ class OperationsPanel(QWidget):
         self.tabs = QTabWidget()
         self.logs = {}
         for category, title, text in (
-            ("system", "서버·오류", "시작·중지, 순회 상태, 자동주문 허용 상태와 운영 오류입니다. 앱 응답 표시만으로 API 정상 여부를 보장하지 않습니다."),
-            ("monitor", "시세·차트 감시", "종목별 조회 성공·실패, 일봉 캐시와 차트 전달 기록입니다. 매수·매도 내역이 아닙니다."),
-            ("signal", "매매 신호 (주문 아님)", "BUY / SELL은 매매 제안이며 주문·체결이 아닙니다. HOLD는 매매하지 않음입니다. 자동주문 OFF여도 신호 수신은 계속됩니다."),
+            ("system", "서버·오류", "시작·중지와 운영 오류"),
+            ("monitor", "시세·차트 감시", "종목 조회와 차트 전달 기록"),
+            ("signal", "매매 신호", "모델별 BUY·SELL·HOLD 기록"),
         ):
             view = EventLog(category, text)
             self.logs[category] = view
@@ -143,7 +143,7 @@ class OrderHistoryPanel(QWidget):
         self._applied_snapshot = None
         layout = QVBoxLayout(self)
         heading = QHBoxLayout()
-        self.heading = label("실제 주문·체결 내역 · 모의계좌", "section")
+        self.heading = label("주문·체결 · 모의계좌", "section")
         heading.addWidget(self.heading, 1)
         self.refresh_button = QPushButton("체결가 다시 확인")
         self.refresh_button.setAutoDefault(False)
@@ -151,19 +151,19 @@ class OrderHistoryPanel(QWidget):
         self.refresh_button.clicked.connect(self.request_refresh.emit)
         heading.addWidget(self.refresh_button)
         layout.addLayout(heading)
-        layout.addWidget(label("이 앱이 기록한 자동·수동 주문을 표시합니다. HOLD·신호는 제외하며 ‘접수’는 체결이 아닙니다. 체결가는 증권사 확인값만 사용합니다. 기록 시작 전이나 다른 앱의 주문은 포함되지 않습니다.", "muted", wrap=True))
         self.summary = label("주문 기록 없음", "section", wrap=True)
         layout.addWidget(self.summary)
-        self.performance_label = label("실현손익 미확인", "section", wrap=True)
+        self.performance_label = label("실현손익 —", "section", wrap=True)
+        self.performance_label.setToolTip(RETURN_DESCRIPTION + " · 수수료·세금 제외 · 근거 없는 손익은 표시하지 않습니다.")
         layout.addWidget(self.performance_label)
-        self.recovery_label = label("체결가 확인 전 · 현재가나 주문가로 체결가를 대신 채우지 않습니다.", "muted", wrap=True)
+        self.recovery_label = label("가격 확인 대기", "muted", wrap=True)
         layout.addWidget(self.recovery_label)
         self.tabs = tabs = QTabWidget()
         records_box = QWidget()
         records_layout = QVBoxLayout(records_box)
         filter_row = QHBoxLayout()
         self.filter = QComboBox()
-        for text, key in (("전체 주문", "all"), ("체결 확인 (부분체결 포함)", "filled"),
+        for text, key in (("전체 주문", "all"), ("체결", "filled"),
                           ("접수·확인 대기", "pending"), ("거절·취소·미전송·수동 확인", "other")):
             self.filter.addItem(text, key)
         self.filter.currentIndexChanged.connect(self.render)
@@ -188,10 +188,9 @@ class OrderHistoryPanel(QWidget):
         self.table.setToolTip("체결가·원가·손익은 통화별 값입니다. 행에 마우스를 올리면 주문번호·주문 수량·잔량·가격 출처를 볼 수 있습니다.")
         records_layout.addWidget(self.table, 1)
         tabs.addTab(records_box, "주문 장부")
-        self.audit = EventLog("order", "주문 전송 의도·접수·체결 확인의 상태 변화 기록입니다. ‘전송 의도’나 ‘접수 여부 확인 필요’를 체결로 해석하지 마세요.")
+        self.audit = EventLog("order", "주문 상태 변경 기록")
         tabs.addTab(self.audit, "주문 처리 로그")
         layout.addWidget(tabs, 1)
-        layout.addWidget(label(RETURN_DESCRIPTION + " · 수수료·세금 제외 · 매수 기록이 없으면 원가/손익 미확인", "muted", wrap=True))
 
     @staticmethod
     def has_fill(record):
@@ -242,12 +241,12 @@ class OrderHistoryPanel(QWidget):
             value = result["known_realized_profit"]
             rate = result["known_return_pct"]
             if value is None:
-                parts.append(f"{name} · 실현손익 미확인 ({result['unknown_sell_count']}건)")
+                parts.append(f"{name} —")
                 continue
             amount = f"{value:+,.0f}" if currency == "KRW" else f"{value:+,.2f}"
-            text = f"{name} 실현손익 {amount} {currency} · {rate:+.2f}%"
+            text = f"{name} {amount} {currency} · {rate:+.2f}%"
             if not result["complete"]:
-                text += f" (확인분만 · 미확인 {result['unknown_sell_count']}건 별도)"
+                text += " (일부)"
             parts.append(text)
         self.performance_label.setText("  /  ".join(parts))
 
@@ -257,7 +256,7 @@ class OrderHistoryPanel(QWidget):
         buys = sum(self.has_fill(r) and r["side"] == "buy" for r in records)
         sells = sum(self.has_fill(r) and r["side"] == "sell" for r in records)
         pending = sum(r["status"] in {"accepted", "submitting", "unknown"} for r in records)
-        self.summary.setText(f"체결 확인  매수 {buys}건 / 매도 {sells}건    ·    접수·확인 대기 {pending}건")
+        self.summary.setText(f"매수 체결 {buys}건 · 매도 체결 {sells}건 · 대기 {pending}건")
         selected = self.filter.currentData()
         if selected == "filled":
             records = tuple(r for r in records if self.has_fill(r))
@@ -265,7 +264,7 @@ class OrderHistoryPanel(QWidget):
             records = tuple(r for r in records if r["status"] in {"accepted", "submitting", "unknown"})
         elif selected == "other":
             records = tuple(r for r in records if r["status"] not in {"accepted", "submitting", "unknown", "filled"})
-        self.count_label.setText(f"최근 주문 최대 500건 기준 · 현재 {len(records)}건" if self.records else "아직 자동주문 기록이 없습니다. 신호만 수신해도 여기는 늘어나지 않습니다.")
+        self.count_label.setText(f"{len(records)}건" if self.records else "주문 기록 없음")
         rows = []
         metrics = []
         for r in records:

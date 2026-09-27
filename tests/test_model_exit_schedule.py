@@ -1,10 +1,11 @@
 """Time-based model exits apply to one confirmed lot, never the whole account."""
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from unittest.mock import patch
 
 from dockdack.market_schedule import session_on
 from dockdack.models import Market
-from dockdack.trading.model_exit_schedule import timed_exit_due
+from dockdack.trading.model_exit_schedule import planned_model_exit, timed_exit_due
 
 
 class ModelExitScheduleTests(unittest.TestCase):
@@ -29,6 +30,42 @@ class ModelExitScheduleTests(unittest.TestCase):
                                          "buy_fill_observed_at": session.opened.isoformat()}, market, now))
         self.assertFalse(timed_exit_due({"strategy_id": "mark1-4-prototype",
                                          "buy_fill_observed_at": (now + timedelta(minutes=1)).isoformat()}, market, now))
+        with patch("dockdack.trading.model_exit_schedule.session_on",
+                   side_effect=AssertionError("Future fills must not probe exit sessions")):
+            self.assertFalse(timed_exit_due({"strategy_id": "mark1-4-prototype",
+                                             "buy_fill_observed_at": (now + timedelta(minutes=1)).isoformat()},
+                                            market, now))
+
+    def test_planned_days_use_each_exchange_session_and_observed_fill(self):
+        domestic = Market.DOMESTIC
+        fill = session_on(domestic, date(2026, 9, 18)).opened + timedelta(minutes=10)
+        daily = {"strategy_id": "mark1-4-prototype", "buy_fill_observed_at": fill.isoformat()}
+        h3 = {**daily, "strategy_id": "mark1-11-prototype"}
+        h5 = {**daily, "strategy_id": "mark1-12-prototype"}
+        self.assertEqual((planned_model_exit(daily, domestic).day,
+                          planned_model_exit(daily, domestic).timing), (date(2026, 9, 18), "preclose"))
+        self.assertEqual((planned_model_exit(h3, domestic).day,
+                          planned_model_exit(h3, domestic).timing), (date(2026, 9, 22), "elapsed"))
+        # The exchange calendar skips the September 24–25 Chuseok closure.
+        self.assertEqual(planned_model_exit(h5, domestic).day, date(2026, 9, 28))
+        before = session_on(domestic, date(2026, 9, 21)).closed - timedelta(minutes=2)
+        due = session_on(domestic, date(2026, 9, 22)).opened + timedelta(minutes=1)
+        self.assertFalse(timed_exit_due(h3, domestic, before))
+        self.assertTrue(timed_exit_due(h3, domestic, due))
+        us_fill = session_on(Market.US, date(2026, 9, 4)).opened + timedelta(minutes=10)
+        us_h3 = {"strategy_id": "mark1-11-prototype", "buy_fill_observed_at": us_fill.isoformat()}
+        # U.S. Labor Day is not counted as a trading session.
+        self.assertEqual(planned_model_exit(us_h3, Market.US).day, date(2026, 9, 9))
+
+    def test_missing_or_untrusted_fill_has_no_displayed_plan(self):
+        market = Market.US
+        valid = session_on(market, date(2026, 9, 18)).opened.isoformat()
+        for lot in ({"strategy_id": "unknown", "buy_fill_observed_at": valid},
+                    {"strategy_id": "mark1-11-prototype", "buy_fill_observed_at": None},
+                    {"strategy_id": "mark1-11-prototype", "buy_fill_observed_at": "not-a-date"},
+                    {"strategy_id": "mark1-11-prototype", "buy_fill_observed_at": "2026-09-18T09:30:00"}):
+            with self.subTest(lot=lot):
+                self.assertIsNone(planned_model_exit(lot, market))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ examples/train_mark1_2.py -text
 examples/export_mark1_2.py -text
 examples/backtest_mark1_2.py -text
 examples/finish_mark1_2.py -text
+# Mark1.3 verifies the bundle and the original feature source by raw SHA-256.
+models/mark1_3/** -text whitespace=cr-at-eol
+dockdack/mark1_3_research.py -text
 # Source bytes recorded in the frozen training/export contracts.
 dockdack/mark1_prototype_inference.py -text
 dockdack/mark1_0504_inference.py -text

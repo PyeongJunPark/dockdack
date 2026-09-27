@@ -87,7 +87,7 @@ class DashboardIntegrationTests(unittest.TestCase):
     def test_holdings_is_default_and_opening_does_not_arm_or_invent_empty_account(self):
         self.assertIs(self.window.workspace_tabs.currentWidget(), self.window.portfolio_panel)
         self.assertEqual([self.window.workspace_tabs.tabText(i) for i in range(4)],
-                         ["보유종목", "실제 주문·체결", "매매일지", "서버·감시 로그"])
+                         ["보유종목", "주문·체결", "매매일지", "서버·감시 로그"])
         self.assertIn("미확인", self.window.portfolio_panel.summary_label.text())
         self.assertEqual(self.window.portfolio_panel.table.rowCount(), 0)
         self.assertEqual(self.service.account_calls, [])

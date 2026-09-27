@@ -19,7 +19,7 @@ class WorkspaceReadWorker(Worker):
                 db.execute('UPDATE watchlist SET days=? WHERE days<?',
                            (self.minimum_days, self.minimum_days))
         items = self.store.items()
-        return self.store, items, self.store.rules(limit=500), self.store.cached_snapshots(items)
+        return self.store, items, self.store.rules(limit=500), self.store.cached_snapshots(items), self.store.rankings()
 
 
 class ActivityReadWorker(Worker):

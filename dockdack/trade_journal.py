@@ -21,7 +21,7 @@ from dockdack.performance import realized_performance
 ZERO = Decimal("0")
 MARKETS = {"domestic": ("KRW", "Asia/Seoul"), "us": ("USD", "America/New_York")}
 DATE_DESCRIPTION = "주문일 기준: 한국은 서울, 미국은 뉴욕 날짜 · 정확한 체결일별 집계가 아닙니다."
-RETURN_DESCRIPTION = "매도 실현 수익률 = 확인된 실현손익 ÷ 해당 매수원가 · 모델 매도는 지정 매수분, 일반 매도는 FIFO · 계좌 전체 일수익률 아님"
+RETURN_DESCRIPTION = "매도 실현 수익률 = 확인된 실현손익 ÷ 해당 매수원가 · 모델 매도는 지정 매수분, 일반 매도는 FIFO · 계좌 전체 기간 수익률 아님"
 _INVALID_CASH = {"duplicate_rule_id", "missing_rule_id", "invalid_quantity", "invalid_instrument", "invalid_side"}
 
 
@@ -171,3 +171,54 @@ def daily_trade_journal(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "return_description": RETURN_DESCRIPTION,
         "description": "전체 로컬 주문 장부 · 주문일 기준 · 수수료·세금 제외 · 시장·통화별 분리",
     }
+
+
+def period_trade_journal(journal: Mapping[str, Any], market: str, selected: date,
+                         period: str) -> dict[str, Any]:
+    """Group existing market-local order days without reinterpreting executions.
+
+    Unknown amounts remain unknown; visible known subtotals never silently
+    become full monthly/yearly totals. Returns are cost-weighted across known
+    sales, not averages of daily percentages.
+    """
+    if market not in MARKETS or period not in {"day", "month", "year"}:
+        raise ValueError("지원하지 않는 매매일지 시장 또는 기간입니다.")
+    if period == "day":
+        return journal["days"].get((market, selected), empty_day(market, selected))
+
+    def included(day: date) -> bool:
+        return (day.year == selected.year and
+                (period == "year" or day.month == selected.month))
+
+    result = empty_day(market, selected)
+    counts = ("order_count", "pending_count", "rejected_count", "other_count",
+              "invalid_count", "buy_count", "sell_count", "known_buy_count",
+              "known_sell_amount_count", "unknown_buy_count",
+              "unknown_sell_amount_count", "known_profit_count",
+              "unknown_profit_count")
+    quantities = ("buy_quantity", "sell_quantity", "known_buy_amount",
+                  "known_sell_amount")
+    for (row_market, day), summary in journal["days"].items():
+        if row_market != market or not included(day):
+            continue
+        for key in counts:
+            result[key] += summary[key]
+        for key in quantities:
+            result[key] += summary[key]
+        for key in ("known_realized_profit", "known_cost_basis"):
+            if summary[key] is not None:
+                result[key] = (result[key] or ZERO) + summary[key]
+        result["complete"] = result["complete"] and summary["complete"]
+    for side, count_key in (("buy", "buy"), ("sell", "sell_amount")):
+        result[f"{side}_amount"] = (None if result[f"unknown_{count_key}_count"]
+                                     else result[f"known_{side}_amount"])
+    cost = result["known_cost_basis"]
+    if cost is not None and cost > ZERO:
+        result["known_return_pct"] = result["known_realized_profit"] / cost * Decimal("100")
+    if not result["unknown_profit_count"]:
+        result["realized_profit"] = result["known_realized_profit"]
+        result["return_pct"] = result["known_return_pct"]
+    result["rows"] = tuple(row for row in journal["rows"]
+                           if row["market"] == market and row["day"] is not None
+                           and included(row["day"]))
+    return result

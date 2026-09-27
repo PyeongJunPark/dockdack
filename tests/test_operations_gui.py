@@ -72,8 +72,8 @@ class OperationsGuiTests(unittest.TestCase):
         self.operations.reload(self.store)
         self.assertEqual(self.orders.table.rowCount(), 0)
         self.assertEqual(self.orders.audit.table.rowCount(), 0)
-        self.assertIn("매수 0건 / 매도 0건", self.orders.summary.text())
-        self.assertIn("신호만 수신해도", self.orders.count_label.text())
+        self.assertIn("매수 체결 0건 · 매도 체결 0건", self.orders.summary.text())
+        self.assertIn("주문 기록 없음", self.orders.count_label.text())
         self.assertEqual(self.operations.logs["system"].table.rowCount(), 1)
         self.assertEqual(self.operations.logs["monitor"].table.rowCount(), 1)
         self.assertEqual(self.operations.logs["signal"].table.rowCount(), 500)
@@ -84,8 +84,8 @@ class OperationsGuiTests(unittest.TestCase):
         self.order("filled")
         self.order("accepted", side="sell")
         self.orders.reload(self.store)
-        self.assertIn("매수 1건 / 매도 0건", self.orders.summary.text())
-        self.assertIn("접수·확인 대기 1건", self.orders.summary.text())
+        self.assertIn("매수 체결 1건 · 매도 체결 0건", self.orders.summary.text())
+        self.assertIn("대기 1건", self.orders.summary.text())
         self.assertIn("접수", self.orders.table.item(0, 7).text())
         self.assertEqual(self.orders.table.item(0, 5).text(), "—")
         self.assertEqual(self.orders.table.item(1, 5).text(), "1")
@@ -99,8 +99,8 @@ class OperationsGuiTests(unittest.TestCase):
     def test_cancelled_partial_fill_remains_in_fill_history_with_confirmed_quantity(self):
         self.order("cancelled", side="sell", quantity=2, filled="1", remaining="0", price="101")
         self.orders.reload(self.store)
-        self.assertIn("매수 0건 / 매도 1건", self.orders.summary.text())
-        self.assertIn("접수·확인 대기 0건", self.orders.summary.text())
+        self.assertIn("매수 체결 0건 · 매도 체결 1건", self.orders.summary.text())
+        self.assertIn("대기 0건", self.orders.summary.text())
         self.assertEqual(self.orders.table.item(0, 4).text(), "2")
         self.assertEqual(self.orders.table.item(0, 5).text(), "1")
         self.assertIn("취소", self.orders.table.item(0, 7).text())
@@ -126,7 +126,7 @@ class OperationsGuiTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.select_filter(key)
                 self.assertEqual(self.orders.table.rowCount(), expected)
-        self.assertIn("매수 1건 / 매도 1건", self.orders.summary.text())
+        self.assertIn("매수 체결 1건 · 매도 체결 1건", self.orders.summary.text())
 
     def test_us_partial_fill_requires_price_evidence_and_has_distinct_buy_color(self):
         self.order("accepted", symbol="AAPL", quantity=2, filled="1", remaining="1", price="123.4567")
@@ -153,7 +153,7 @@ class OperationsGuiTests(unittest.TestCase):
         self.orders.reload(self.store)
         self.assertEqual(self.orders.table.item(0, 8).text(), "101 KRW")
         self.assertEqual(self.orders.table.item(0, 11).text(), "미확인")
-        self.assertIn("미확인", self.orders.performance_label.text())
+        self.assertIn("—", self.orders.performance_label.text())
 
     def test_manual_recovery_button_only_emits_readonly_request(self):
         requests = []

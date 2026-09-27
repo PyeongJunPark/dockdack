@@ -7,14 +7,11 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QHeaderView, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget
 
 from dockdack.gui import label, table
+from dockdack.model_performance import MODELS
 from dockdack.models import TradingMode
 from dockdack.ui.operations_gui import populate
 
 
-MODELS = (("mark1-prototype", "mark1.0 prototype"),
-          ("mark1-1-prototype", "mark1.1 prototype"),
-          ("mark1-2-prototype", "mark1.2 prototype"),
-          ("mark1-4-prototype", "mark1.4 prototype"))
 MARKETS = (("domestic", "국내 · KRW", "KRW"), ("us", "미국 · USD", "USD"))
 RETURN_DESCRIPTION = "누적 실현 수익률 = 확인된 매도 실현손익 ÷ 해당 매도분의 매입원가 × 100 · 수수료·세금 제외"
 WARNING_TEXT = {
@@ -83,10 +80,8 @@ class ModelPerformancePanel(QWidget):
         self.refresh_button.clicked.connect(self.request_refresh.emit)
         heading.addWidget(self.refresh_button)
         layout.addLayout(heading)
-        self.explanation = label(RETURN_DESCRIPTION + "\n계좌 전체 수익률·평가손익·복리 수익률이 아닙니다. KRW와 USD는 합산하지 않습니다.", "muted", wrap=True)
-        basis = label('확인된 매도 체결 기준 · 매도분 매입원가 대비 · 수수료·세금 및 미매도 평가손익 제외', 'muted', wrap=True)
-        basis.setToolTip(RETURN_DESCRIPTION)
-        layout.addWidget(basis)
+        self.explanation = label("매도분 기준 · 수수료·세금 제외 · 시장별 집계", "muted", wrap=True)
+        self.explanation.setToolTip(RETURN_DESCRIPTION + "\n계좌 전체 수익률·평가손익·복리 수익률이 아닙니다. KRW와 USD는 합산하지 않습니다.")
         self.coverage_label = label("현재 계정의 저장된 장부 집계 대기", "muted", wrap=True)
         self.refresh_error = label("", "error", wrap=True)
         self.refresh_error.hide()
@@ -114,7 +109,6 @@ class ModelPerformancePanel(QWidget):
             self.tables[market] = view
             content.addWidget(view, 1)
             content.addWidget(summary)
-            content.addWidget(label(f"{currency} 체결분만 표시 · 모델 이름은 당시 매수 기록 기준 · 현재 모델 선택과 무관", "muted", wrap=True))
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -127,8 +121,8 @@ class ModelPerformancePanel(QWidget):
         layout.addWidget(self.explanation)
         self.warning = label("", "error", wrap=True)
         layout.addWidget(self.warning)
-        self.read_only_notice = label("기록 조회 전용 · 실전 기록을 보더라도 주문은 켜지지 않습니다. 모의·실전과 계정 장부는 분리됩니다.\n앱 재시작 후에도 저장된 체결 장부에서 전체 기간을 다시 집계합니다. 과거 기록이 없거나 출처·원가가 불명확하면 추정하지 않습니다.", "muted", wrap=True)
-        layout.addWidget(self.read_only_notice)
+        self.read_only_notice = label("", "muted", wrap=True)
+        self.read_only_notice.setToolTip("성과 조회는 주문을 켜지 않습니다. 계정별 저장 장부에서 전체 이력을 다시 집계합니다.")
         self.set_context(store, mode=mode)
 
     def set_context(self, store=None, *, mode=None):
@@ -137,7 +131,7 @@ class ModelPerformancePanel(QWidget):
         target_mode = _mode(mode if mode is not None else getattr(target_store, "mode", self.mode))
         key = (target_mode, str(getattr(target_store, "path", "")), getattr(target_store, "storage_scope", None))
         self.store, self.mode = target_store, target_mode
-        self.mode_badge.setText("실전 기록 · REAL" if target_mode is TradingMode.REAL else "모의투자 기록 · DEMO")
+        self.mode_badge.setText("실전" if target_mode is TradingMode.REAL else "모의투자")
         self.mode_badge.setStyleSheet("color: #ffd2d8; background: #4b2432; border: 1px solid #a65066;" if target_mode is TradingMode.REAL else "")
         self.mode_badge.setToolTip("현재 선택한 환경의 계정 장부만 표시합니다. 기록 조회는 주문을 활성화하지 않습니다.\n" + key[1])
         if key == self._context_key:

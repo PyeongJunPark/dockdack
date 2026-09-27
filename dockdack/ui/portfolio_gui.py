@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from dockdack.models import Market
 from dockdack.portfolio import PortfolioMarketState, utc_now
 from dockdack.execution_policy import account_equity_cash
+from dockdack.trading.model_exit_schedule import model_exit_schedule, planned_model_exit
 
 
 def _label(text: str, name: str = "") -> QLabel:
@@ -53,6 +54,25 @@ def _target_price(value: Decimal) -> str:
 
 def _time(value: datetime | None) -> str:
     return "조회 전" if value is None else value.astimezone().strftime("%m/%d %H:%M:%S")
+
+
+def _planned_exit_label(target: dict, market: Market, upper=None, lower=None) -> str:
+    """Describe the model's earliest time exit without implying an order filled."""
+    if "lots" in target and not target.get("reconciled"):
+        return "장부 대조 필요"
+    if target.get("error"):
+        return "매도 확인 필요"
+    strategy_id = target.get("strategy_id") or target.get("model_id")
+    if model_exit_schedule(strategy_id) is None:
+        return "가격 조건 시" if upper is not None or lower is not None else "예정일 없음"
+    try:
+        planned = planned_model_exit({**target, "strategy_id": strategy_id}, market)
+    except (ValueError, OverflowError):
+        return "일정 확인 필요"
+    if planned is None:
+        return "체결일 미확인"
+    timing = "마감 5분 전" if planned.timing == "preclose" else "장중"
+    return f"{planned.day:%Y-%m-%d} {timing}"
 
 
 def _cash_context(account, currency):
@@ -210,10 +230,11 @@ class PortfolioPanel(QWidget):
 
     @staticmethod
     def _make_table() -> QTableWidget:
-        result = QTableWidget(0, 12)
+        result = QTableWidget(0, 13)
         result.setHorizontalHeaderLabels([
             "시장 / 통화", "종목명 / 코드", "보유", "매도 가능", "평균 매수가", "현재가",
             "평가금액", "평가손익", "수익률", "익절 매도 예정", "손절 매도 예정", "매수 모델",
+            "기간 매도 예정",
         ])
         result.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         result.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -235,6 +256,8 @@ class PortfolioPanel(QWidget):
         header.moveSection(header.visualIndex(10), 3)
         result.setColumnWidth(11, 160)
         header.moveSection(header.visualIndex(11), 2)
+        result.setColumnWidth(12, 195)
+        header.moveSection(header.visualIndex(12), 3)
         # Market/currency are already prominent in the selected tab. Keep the
         # data column for selection keys and copy/export compatibility, without
         # sacrificing scarce horizontal space to duplicate information.
@@ -348,6 +371,7 @@ class PortfolioPanel(QWidget):
                     '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else f'≥ {_target_price(upper)}',
                     '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else f'≤ {_target_price(lower)}',
                     target.get('model_title') or '미확인 / 수동·외부',
+                    _planned_exit_label(target, position.market, upper, lower),
                 )
                 rows.append((values, position, status, state.fetched_at))
             self._apply_rows(market, rows)
@@ -366,7 +390,8 @@ class PortfolioPanel(QWidget):
         def structure(value):
             return (value.get('reconciled'), tuple(
                 (lot.get('lot_id'), lot.get('quantity'), lot.get('average_price'),
-                 lot.get('sellable_quantity'), lot.get('broker_sellable_quantity'), lot.get('sellable_is_shared'))
+                 lot.get('sellable_quantity'), lot.get('broker_sellable_quantity'), lot.get('sellable_is_shared'),
+                 lot.get('strategy_id'), lot.get('buy_fill_observed_at'))
                 for lot in value.get('lots', ())))
         if ('lots' in target or 'lots' in previous) and structure(previous) != structure(target):
             self._rendered_states.clear()
@@ -386,6 +411,10 @@ class PortfolioPanel(QWidget):
                 table.item(row, column).setToolTip(self._target_tooltip(key, lot_id))
             table.item(row, 11).setText(row_target.get('model_title') or ('모델 장부 대조 필요' if 'lots' in target and not target.get('reconciled') else '미확인 / 수동·외부'))
             table.item(row, 11).setToolTip(self._target_tooltip(key, lot_id))
+            table.item(row, 12).setText(_planned_exit_label(row_target, inst.market,
+                                                              row_target.get('take_profit_price'),
+                                                              row_target.get('stop_loss_price')))
+            table.item(row, 12).setToolTip(self._target_tooltip(key, lot_id))
         self._row_signatures.pop(inst.market, None)
 
     def _target_tooltip(self, key, lot_id=None):
@@ -409,6 +438,13 @@ class PortfolioPanel(QWidget):
             attribution += f'분리 매수분: {lot_id}\n확인된 체결 수량·체결가 기준 가상 구분이며 증권사 잔고는 종목별 합산입니다.\n'
         if target.get('sellable_is_shared'):
             attribution += f"매도가능수량은 계좌 전체 공유 상한 {target['broker_sellable_quantity']}주입니다. 모델별 행의 수량을 더해 팔 수 있다는 뜻이 아닙니다.\n"
+        strategy_id = target.get('strategy_id') or target.get('model_id')
+        if model_exit_schedule(strategy_id) is not None:
+            market = Market(key.split(':', 1)[0])
+            planned = _planned_exit_label(target, market)
+            return (attribution + origin + f'\n기간 매도 예정: {planned} (해당 거래소 현지 기준).\n'
+                    '별도 매도 조건이 먼저 충족되면 일찍 팔릴 수 있고, 주문 OFF·장외·미체결이면 예정일에 매도가 완료되지 않을 수 있습니다. '
+                    '기한이 지나면 다음 유효 정규장에 다시 조건을 확인합니다.')
         return attribution + origin + '\n현재가가 목표에 닿으면 매도 조건을 재확인합니다. 주문 OFF·장외에는 주문하지 않으며 체결을 보장하지 않습니다.'
 
     def set_exit_targets(self, targets):
@@ -454,7 +490,7 @@ class PortfolioPanel(QWidget):
                         item.setToolTip(f"{position.name or position.symbol} · 잔고 기준 {_time(fetched_at)}\n이전 잔고입니다. 현재 보유 상태와 다를 수 있습니다.")
                         if column in {0, 1}:
                             item.setForeground(QColor("#ffb586"))
-                    if column in {9, 10, 11} or (column == 3 and lot_id):
+                    if column in {9, 10, 11, 12} or (column == 3 and lot_id):
                         item.setToolTip(self._target_tooltip(f'{position.market.value}:{position.exchange}:{position.symbol}', lot_id))
                     elif column == 5:
                         live = self._live_quotes.get(f'{position.market.value}:{position.exchange}:{position.symbol}')

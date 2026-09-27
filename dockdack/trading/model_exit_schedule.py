@@ -27,7 +27,16 @@ class ModelExitSchedule:
             raise ValueError("Invalid model exit schedule")
 
 
+@dataclass(frozen=True)
+class PlannedModelExit:
+    """Earliest strategy exit session, not an order or a guaranteed fill."""
+
+    day: date
+    timing: str
+
+
 MODEL_EXIT_SCHEDULES = {
+    "mark1-3-prototype": ModelExitSchedule(0, "preclose"),
     "mark1-4-prototype": ModelExitSchedule(0, "preclose"),
     "mark1-5-prototype": ModelExitSchedule(0, "preclose"),
     "mark1-6-prototype": ModelExitSchedule(0, "preclose"),
@@ -68,6 +77,33 @@ def _target_day(market: Market, first_day: date, later_sessions: int) -> date:
     raise ValueError("Model exit horizon exceeds exchange calendar")
 
 
+def _observed_fill(lot: dict) -> tuple[ModelExitSchedule, datetime] | None:
+    spec = model_exit_schedule(lot.get("strategy_id"))
+    observed = lot.get("buy_fill_observed_at")
+    if spec is None or not isinstance(observed, str) or not observed:
+        return None
+    try:
+        fill_time = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if fill_time.tzinfo is None or fill_time.utcoffset() is None:
+        return None
+    return spec, fill_time
+
+
+def _planned_exit(spec: ModelExitSchedule, fill_time: datetime, market: Market) -> PlannedModelExit:
+    first = _filled_session_day(market, fill_time)
+    target = first if spec.sessions_after_fill == 0 else _target_day(market, first, spec.sessions_after_fill)
+    return PlannedModelExit(target, spec.timing)
+
+
+def planned_model_exit(lot: dict, market: Market | str) -> PlannedModelExit | None:
+    """Read-only exchange-local date for a confirmed model lot, if verifiable."""
+    market = Market(market)
+    observed = _observed_fill(lot)
+    return _planned_exit(*observed, market) if observed is not None else None
+
+
 def timed_exit_due(lot: dict, market: Market | str, now: datetime) -> bool:
     """True only inside this model's own regular-session exit window.
 
@@ -75,24 +111,19 @@ def timed_exit_due(lot: dict, market: Market | str, now: datetime) -> bool:
     overdue fill may exit at the next valid window rather than being stranded.
     """
     market = Market(market)
-    spec = model_exit_schedule(lot.get("strategy_id"))
-    observed = lot.get("buy_fill_observed_at")
-    if spec is None or not isinstance(observed, str) or not observed:
+    observed = _observed_fill(lot)
+    if observed is None:
         return False
-    try:
-        fill_time = datetime.fromisoformat(observed.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-    if (fill_time.tzinfo is None or fill_time.utcoffset() is None
-            or now.tzinfo is None or now.utcoffset() is None
+    spec, fill_time = observed
+    if (now.tzinfo is None or now.utcoffset() is None
             or now.astimezone(timezone.utc) < fill_time.astimezone(timezone.utc)):
         return False
-    first = _filled_session_day(market, fill_time)
-    target = first if spec.sessions_after_fill == 0 else _target_day(market, first, spec.sessions_after_fill)
+    planned = _planned_exit(spec, fill_time, market)
+    target = planned.day
     today = market_time(market, now).date()
     if today < target:
         return False
     session = session_on(market, today)
     if session is None or not session.opened <= now < session.closed:
         return False
-    return spec.timing == "elapsed" or now >= session.closed - timedelta(minutes=5)
+    return planned.timing == "elapsed" or now >= session.closed - timedelta(minutes=5)

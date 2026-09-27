@@ -14,15 +14,15 @@ from decimal import Decimal
 from typing import Any
 
 from dockdack.models import TradingMode
+from dockdack.signal_bridge import prototype_families
 from dockdack.trading.performance import realized_performance
 from dockdack.trading.strategy_lots import row_family
 
 
 ZERO = Decimal("0")
-MODELS = (("mark1-prototype", "mark1 prototype"),
-          ("mark1-1-prototype", "mark1.1 prototype"),
-          ("mark1-2-prototype", "mark1.2 prototype"),
-          ("mark1-4-prototype", "mark1.4 prototype"))
+# A registered order-signal family receives a visible no-sales row immediately.
+# Research-only versions have no family and cannot appear as phantom results.
+MODELS = tuple((family.id, family.title) for family in prototype_families())
 MARKETS = (("domestic", "KRW"), ("us", "USD"))
 UNASSIGNED = "unassigned"
 DESCRIPTION = (

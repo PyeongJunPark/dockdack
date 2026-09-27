@@ -37,6 +37,7 @@ _PROTOTYPE_FAMILIES = (
     PrototypeFamily("mark1-prototype", "mark1.0 prototype", Decimal(".01"), Decimal(".009")),
     PrototypeFamily("mark1-1-prototype", "mark1.1 prototype", Decimal(".005"), Decimal(".004")),
     PrototypeFamily("mark1-2-prototype", "mark1.2 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-3-prototype", "mark1.3 prototype", None, None),
     PrototypeFamily("mark1-4-prototype", "mark1.4 prototype", None, None),
     PrototypeFamily("mark1-5-prototype", "mark1.5 prototype", None, None),
     PrototypeFamily("mark1-6-prototype", "mark1.6 prototype", None, None),
@@ -47,6 +48,11 @@ _PROTOTYPE_FAMILIES = (
     PrototypeFamily("mark1-11-prototype", "mark1.11 prototype", None, None),
     PrototypeFamily("mark1-12-prototype", "mark1.12 prototype", None, None),
 )
+
+
+def prototype_families() -> tuple[PrototypeFamily, ...]:
+    """Registered model identities in their stable display order."""
+    return _PROTOTYPE_FAMILIES
 
 
 def _prototype_source(source):

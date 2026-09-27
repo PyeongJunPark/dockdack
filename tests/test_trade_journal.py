@@ -5,7 +5,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal as D
 
-from dockdack.trade_journal import daily_trade_journal, empty_day, order_day
+from dockdack.trade_journal import daily_trade_journal, empty_day, order_day, period_trade_journal
 
 
 START = datetime(2026, 9, 15, 0, 0, tzinfo=timezone.utc)
@@ -151,6 +151,63 @@ class DailyTradeJournalTests(unittest.TestCase):
         original = copy.deepcopy(rows)
         daily_trade_journal(rows)
         self.assertEqual(rows, original)
+
+    def test_month_and_year_group_existing_market_local_days_without_mixing_currency(self):
+        records = [
+            order(1),
+            order(2, "sell", "110", started_at=(START + timedelta(days=1)).isoformat()),
+            order(3, price="900", started_at="2026-10-02T00:00:00+00:00"),
+            order(4, "sell", "900", started_at="2026-10-03T00:00:00+00:00"),
+            order(5, market="us", exchange="ND", symbol="AAPL", currency="USD"),
+            order(6, market="us", exchange="ND", symbol="AAPL", currency="USD",
+                  started_at="2026-10-01T00:15:00+00:00"),
+        ]
+        journal = daily_trade_journal(records)
+        original = copy.deepcopy(journal["days"])
+        september = period_trade_journal(journal, "domestic", date(2026, 9, 30), "month")
+        october = period_trade_journal(journal, "domestic", date(2026, 10, 1), "month")
+        year = period_trade_journal(journal, "domestic", date(2026, 1, 1), "year")
+        us = period_trade_journal(journal, "us", date(2026, 9, 1), "month")
+        self.assertEqual((september["buy_amount"], september["sell_amount"],
+                          september["realized_profit"], september["return_pct"]),
+                         (D(100), D(110), D(10), D(10)))
+        self.assertEqual(october["realized_profit"], D(0))
+        self.assertEqual((year["buy_amount"], year["sell_amount"], year["realized_profit"]),
+                         (D(1000), D(1010), D(10)))
+        self.assertEqual(year["return_pct"], D(1))
+        self.assertEqual([row["rule_id"] for row in year["rows"]], ["1", "2", "3", "4"])
+        # October 1 UTC is still September 30 in New York.
+        self.assertEqual((us["currency"], us["buy_amount"], us["order_count"]), ("USD", D(200), 2))
+        self.assertEqual(period_trade_journal(journal, "us", date(2026, 10, 1), "month")["order_count"], 0)
+        self.assertEqual(journal["days"], original)
+
+    def test_period_unknown_profit_and_cash_remain_unknown_with_known_subtotals(self):
+        records = [order(1), order(2, "sell", "110"),
+                   order(3, "sell", "105", symbol="000001",
+                         started_at=(START + timedelta(days=1)).isoformat()),
+                   order(4, "buy", price=None, filled_quantity=None,
+                         started_at="2026-10-02T00:00:00+00:00")]
+        journal = daily_trade_journal(records)
+        september = period_trade_journal(journal, "domestic", date(2026, 9, 1), "month")
+        year = period_trade_journal(journal, "domestic", date(2026, 12, 31), "year")
+        self.assertEqual(september["known_realized_profit"], D(10))
+        self.assertIsNone(september["realized_profit"])
+        self.assertEqual(september["known_return_pct"], D(10))
+        self.assertIsNone(september["return_pct"])
+        self.assertEqual(september["unknown_profit_count"], 1)
+        self.assertIsNone(year["buy_amount"])
+        self.assertEqual(year["known_buy_amount"], D(100))
+        self.assertEqual(year["unknown_buy_count"], 1)
+        self.assertIsNone(year["realized_profit"])
+        self.assertFalse(year["complete"])
+        self.assertEqual(period_trade_journal(journal, "domestic", date(2026, 8, 1), "month")["order_count"], 0)
+
+    def test_period_rejects_unknown_market_or_period(self):
+        journal = daily_trade_journal(())
+        with self.assertRaises(ValueError):
+            period_trade_journal(journal, "unknown", date(2026, 9, 1), "month")
+        with self.assertRaises(ValueError):
+            period_trade_journal(journal, "domestic", date(2026, 9, 1), "week")
 
 
 if __name__ == "__main__":

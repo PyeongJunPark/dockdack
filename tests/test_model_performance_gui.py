@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     from PySide6.QtWidgets import QApplication
+    from dockdack.model_performance import MODELS
     from dockdack.ui.model_performance_gui import ModelPerformancePanel
 
 
@@ -51,13 +52,27 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_starts_with_unknown_collection_not_zero_percent(self):
-        self.assertIn("DEMO", self.panel.mode_badge.text())
+        self.assertEqual(self.panel.mode_badge.text(), "모의투자")
         for market in ("domestic", "us"):
-            self.assertEqual(self.panel.tables[market].rowCount(), 4)
-            self.assertEqual(self.panel.tables[market].item(0, 0).text(), "mark1.0 prototype")
-            self.assertEqual(self.panel.tables[market].item(0, 1).text(), "—")
-            self.assertEqual(self.panel.tables[market].item(0, 5).text(), "집계 대기")
+            view = self.panel.tables[market]
+            self.assertEqual(view.rowCount(), len(MODELS))
+            self.assertEqual([view.item(index, 0).text() for index in range(view.rowCount())],
+                             [title for _, title in MODELS])
+            self.assertLess([title for _, title in MODELS].index("mark1.3 prototype"),
+                            [title for _, title in MODELS].index("mark1.4 prototype"))
+            self.assertEqual(view.item(0, 1).text(), "—")
+            self.assertEqual(view.item(0, 5).text(), "집계 대기")
         self.store.order_history.assert_not_called()
+
+    def test_empty_backend_report_shows_all_connected_models_without_fabricated_return(self):
+        from dockdack.model_performance import model_realized_performance
+        self.panel.apply_report(model_realized_performance((), mode="demo"))
+        for market in ("domestic", "us"):
+            view = self.panel.tables[market]
+            self.assertEqual(view.rowCount(), len(MODELS))
+            self.assertEqual(view.item(len(MODELS) - 1, 0).text(), MODELS[-1][1])
+            self.assertEqual(view.item(len(MODELS) - 1, 1).text(), "—")
+            self.assertEqual(view.item(len(MODELS) - 1, 5).text(), "매도 체결 없음")
 
     def test_three_models_in_separate_currencies_and_execution_return(self):
         self.panel.apply_report(performance_report())
@@ -72,7 +87,7 @@ class ModelPerformanceGuiTests(unittest.TestCase):
             self.assertEqual(view.item(0, 4).text(), "1건")
             self.assertIn("수수료·세금 제외", view.item(0, 1).toolTip())
             self.assertEqual(view.item(2, 0).text(), "mark1.2 prototype")
-        self.assertIn("KRW와 USD는 합산하지 않습니다", self.panel.explanation.text())
+        self.assertIn("KRW와 USD는 합산하지 않습니다", self.panel.explanation.toolTip())
         self.store.order_history.assert_not_called()
 
     def test_real_backend_report_schema_and_whole_history_projection(self):
@@ -139,11 +154,11 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         requested.assert_called_once_with()
         self.store.order_history.assert_not_called()
         self.panel.set_mode("real")
-        self.assertIn("REAL", self.panel.mode_badge.text())
+        self.assertEqual(self.panel.mode_badge.text(), "실전")
         self.assertEqual(self.panel.tables["domestic"].item(0, 5).text(), "집계 대기")
         self.assertFalse(self.panel.apply_report(performance_report(mode="demo")))
         self.assertTrue(self.panel.apply_report(performance_report(mode="real")))
-        self.assertIn("주문은 켜지지 않습니다", self.panel.read_only_notice.text())
+        self.assertIn("주문을 켜지 않습니다", self.panel.read_only_notice.toolTip())
 
     def test_same_mode_account_switch_also_clears_old_report(self):
         self.panel.apply_report(performance_report())
@@ -171,15 +186,17 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         self.assertEqual(self.panel.refresh_error.text(), "")
 
     def test_narrow_panel_preserves_table_columns_with_scroll(self):
+        from dockdack.model_performance import model_realized_performance
         self.panel.resize(640, 420)
         self.panel.show()
-        self.panel.apply_report(performance_report(unknown=1))
+        self.panel.apply_report(model_realized_performance((), mode="demo"))
         self.app.processEvents()
         view = self.panel.tables["domestic"]
         self.assertGreater(view.horizontalScrollBar().maximum(), 0)
         self.assertGreaterEqual(view.height(), 140)
-        self.assertGreater(self.panel.scroll_areas["domestic"].verticalScrollBar().maximum(), 0)
-        self.assertGreaterEqual(view.rowHeight(0), 60)
+        self.assertTrue(self.panel.scroll_areas["domestic"].verticalScrollBar().maximum() > 0
+                        or view.verticalScrollBar().maximum() > 0)
+        self.assertGreaterEqual(view.rowHeight(0), 40)
         self.store.order_history.assert_not_called()
 
 
