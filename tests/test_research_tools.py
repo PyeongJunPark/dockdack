@@ -23,7 +23,9 @@ from dockdack.research_tools import (RUNNERS, _fresh_output, compatibility_conte
 class ResearchFixture(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # Match the physical path returned by the resolver on Windows, where
+        # TemporaryDirectory may use an 8.3 alias for the same directory.
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.resolver = ArtifactResolver(self.root, relocations={"C:/old/research": self.root})
         self.database = self.root / "clean.sqlite3"
         with sqlite3.connect(self.database) as db:

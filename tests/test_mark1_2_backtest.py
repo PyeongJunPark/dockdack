@@ -103,7 +103,7 @@ class Mark12BacktestTests(unittest.TestCase):
             train = root / "outputs/mark1/train"
             model = root / "models/model"
             valid = root / "outputs/mark1/evaluation"
-            self.assertEqual(bt.output_path(valid, root, train, model), valid)
+            self.assertEqual(bt.output_path(valid, root, train, model), valid.resolve())
             for target in (train, train / "nested", root / "elsewhere", root / "outputs/mark1/cache"):
                 with self.assertRaises(ValueError):
                     bt.output_path(target, root, train, model)
@@ -177,7 +177,7 @@ class Mark12BacktestTests(unittest.TestCase):
         previous = torch.get_num_threads()
         torch.set_num_threads(2)
         try:
-            with tempfile.TemporaryDirectory(prefix="mark12-export-test-", dir=bt.ROOT / "outputs") as temporary:
+            with tempfile.TemporaryDirectory(prefix="mark12-export-test-", dir=bt.ROOT) as temporary:
                 root = Path(temporary)
                 run, bundle = root / "run", root / "bundle"
                 make_run(run)
@@ -233,7 +233,7 @@ class Mark12BacktestTests(unittest.TestCase):
             report = bt.report_text(summaries, root)
             self.assertIn("실거래 아님", report)
             self.assertIn("새 테스트", report)
-            self.assertIn(root.as_posix(), report)
+            self.assertIn(root.resolve().as_posix(), report)
             self.assertIn("1천만 원", report)
 
     def test_main_writes_completion_seal_only_after_both_markets(self):

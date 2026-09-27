@@ -246,7 +246,7 @@ class Mark12FrozenLoadTests(unittest.TestCase):
         self.assertEqual(source, self.source)
         self.assertEqual(len(dataset.starts), 2)
         self.assertEqual(receipt["cache_key"], cache_key(self.source))
-        self.assertEqual(Path(receipt["source"]["physical_path"]), self.database)
+        self.assertTrue(Path(receipt["source"]["physical_path"]).samefile(self.database))
         self.assertTrue(receipt["read_only"])
         self.assertEqual(receipt["experiment"]["raw_bar_count"], 100)
         self.assertEqual(before, {path: sha256_file(path) for path in paths})

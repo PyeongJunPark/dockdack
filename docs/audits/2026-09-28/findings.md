@@ -30,6 +30,10 @@
 | A-11 | P2 | 완전한 TOP100이 저장된 뒤 순위 밖 신규 종목을 수동 주문으로 접수하면 `_claim_manual`이 `watchlist.active=1`로 추가해 일반 감시가 101종목으로 늘었다. | 임시 SQLite에서 국내 순위 100개 적용 후 별도 코드 `999999` 수동 claim: 활성 100→101. 주문 전송 없이 기록 경로만 재현. |
 | A-12 | P2/검증 | CI는 전체 테스트와 wheel 빌드까지만 하고, 빌드 산출물에 CLI 진입점과 GUI 자산이 들어 있는지·소스 트리 밖에서 가져올 수 있는지 검사하지 않았다. | `.github/workflows/check.yml`과 기존 수동 `scripts/smoke_installed.py` 비교. 빌드 성공만으로 실행 진입점 포함을 증명하지 못함. |
 | A-13 | P1/검증 | 2,242개 회귀를 GitHub Windows 작업 하나에서 순차 실행하자 설정된 30분을 넘겨 job이 취소됐고, 뒤의 wheel/패키지 검사는 시작조차 못 했다. 코드 실패 여부가 아니라 검증 경로의 시간 한계다. | [원격 실행 #36336777175](https://github.com/PyeongJunPark/dockdack/actions/runs/36336777175)에서 `scripts/check.py` 단계 30분 시간 초과, 이후 단계 skipped. 로컬 4개 독립 분할은 모두 성공. |
+| A-14 | P2/검증 | Windows 임시 디렉터리가 `RUNNER~1` 짧은 경로를 돌려주지만 제품의 안전한 경로 해석은 `runneradmin` 긴 경로를 돌려줘, 같은 파일을 서로 다른 것으로 단정하는 테스트가 다수 실패했다. 제품 경로 격리 실패로 오인할 위험이 있다. | [원격 실행 #36338869523](https://github.com/PyeongJunPark/dockdack/actions/runs/36338869523)의 네 회귀 분할에서 실제 파일은 같은데 문자열·`Path` 동등성만 다른 실패를 확인했다. |
+| A-15 | P2/검증 | 두 테스트 모듈은 `pytest` 함수로 작성됐으나 공식 검사기는 `unittest` 탐색만 사용했다. 로컬에 우연히 `pytest`가 있으면 테스트가 0건 수집된 채 통과하고, 깨끗한 CI에는 없어 import 오류가 났다. | 같은 원격 실행의 2/4 분할에서 `ModuleNotFoundError: pytest` 2건. 로컬 공식 검사에서 두 모듈의 함수형 테스트가 미수집되는 것도 확인. |
+| A-16 | P2/검증 | Mark1.2 export 회귀 테스트가 무시 대상 `outputs/` 폴더가 체크아웃에 이미 있다고 가정했다. 개발 PC에서는 통과해도 깨끗한 CI에서는 임시 디렉터리 생성이 실패한다. | 같은 원격 실행의 2/4 분할에서 `FileNotFoundError: ...\\outputs\\mark12-export-test-*`. |
+| A-17 | P3/유지보수 | CI의 `actions/checkout@v4`·`astral-sh/setup-uv@v6`가 Node 20 대상이라 현재 GitHub runner에서 강제로 Node 24로 실행되며 폐기 경고가 난다. 동작은 했지만 향후 호환성 경고를 방치할 이유가 없다. | [두 번째 원격 실행](https://github.com/PyeongJunPark/dockdack/actions/runs/36338869523)의 모든 작업 경고. 각 action의 Node 24 대상 버전을 upstream 메타데이터로 확인. |
 
 ## 삭제·구조 판단과 미검증 영역
 

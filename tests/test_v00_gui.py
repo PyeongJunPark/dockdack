@@ -930,7 +930,8 @@ class V00GuiTests(unittest.TestCase):
         self.assertIs(self.window.service, candidate)
         self.assertIs(self.window.store.mode, TradingMode.REAL)
         self.assertNotEqual(self.window.store.path, self.store.path)
-        self.assertTrue(self.window.store.path.is_relative_to(self.folder))
+        self.assertTrue(self.window.store.path.resolve(strict=False).is_relative_to(
+            self.folder.resolve(strict=False)))
         self.assertEqual(self.window.store.order_history(), ())
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.monitoring)

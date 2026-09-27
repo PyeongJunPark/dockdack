@@ -71,7 +71,7 @@ class DesktopLauncherScopeTests(unittest.TestCase):
         self.assertEqual(self.launch(), 0)
         self.question.assert_called_once()
         self.assertEqual(self.question.call_args.args[-1], QMessageBox.StandardButton.Cancel)
-        self.assertIn(str(self.source), self.question.call_args.args[2])
+        self.assertIn(str(self.source.resolve()), self.question.call_args.args[2])
         self.window.assert_not_called()
         self.warning.assert_not_called()
         self.assertFalse(self.target.exists())
@@ -134,7 +134,7 @@ class DesktopLauncherScopeTests(unittest.TestCase):
         with patch('dockdack.runtime_paths.app_home', return_value=sibling_root):
             self.assertEqual(self.launch(), 0)
         self.question.assert_called_once()
-        self.assertIn(str(self.source), self.question.call_args.args[2])
+        self.assertIn(str(self.source.resolve()), self.question.call_args.args[2])
         self.assertFalse(self.target.exists())
         self.assert_source_preserved()
 

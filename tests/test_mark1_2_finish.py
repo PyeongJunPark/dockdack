@@ -18,7 +18,7 @@ class FinishMark12Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary) / "outputs"
             parent.mkdir()
-            self.assertEqual(owned_child(parent / "new-run", parent), parent / "new-run")
+            self.assertEqual(owned_child(parent / "new-run", parent), (parent / "new-run").resolve())
             for target in (parent, parent / ".." / "other"):
                 with self.assertRaises(ValueError):
                     owned_child(target, parent)

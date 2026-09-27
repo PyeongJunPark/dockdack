@@ -185,7 +185,8 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertIsNot(self.window.engine, old_engine)
         self.assertTrue(old_engine._stop.is_set())
         self.assertIs(self.window.store.mode, TradingMode.REAL)
-        self.assertEqual(self.window.store.path, Path(self.temp.name) / "real" / "unconfigured" / "watchlist.sqlite3")
+        self.assertEqual(self.window.store.path.resolve(strict=False),
+                         (Path(self.temp.name) / "real" / "unconfigured" / "watchlist.sqlite3").resolve(strict=False))
         self.assertNotEqual(self.window.store.path, self.store.path)
         self.assertFalse(self.window.store.rules())
         self.assertEqual(len(self.store.rules()), 1)
