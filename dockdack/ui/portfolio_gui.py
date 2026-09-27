@@ -122,8 +122,10 @@ class PortfolioPanel(QWidget):
         self.market_tabs.tabBar().setDrawBase(False)
         self.tables: dict[Market, QTableWidget] = {}
         self.market_cards: dict[Market, QFrame] = {}
+        self.detail_buttons: dict[Market, QPushButton] = {}
         self.summaries: dict[Market, QLabel] = {}
         self.market_labels: dict[Market, dict[str, QLabel]] = {}
+        self._compact = False
         for market, title in ((Market.DOMESTIC, "한국 · KRW"), (Market.US, "미국 · USD")):
             page = QWidget()
             page_layout = QVBoxLayout(page)
@@ -166,6 +168,15 @@ class PortfolioPanel(QWidget):
             grid.addWidget(labels["updated"], 2, 0, 1, 4)
             self.market_labels[market] = labels
             self.market_cards[market] = frame
+            details = QPushButton("계좌 금액·조회 정보 펼치기")
+            details.setCheckable(True)
+            details.setAutoDefault(False)
+            details.setAccessibleName(f"{title} 계좌 금액과 조회 정보")
+            details.setToolTip("보유종목 표는 그대로 두고 계좌 금액과 잔고 조회 정보를 펼칩니다.")
+            details.toggled.connect(lambda _checked, selected=market: self._update_card_visibility(selected))
+            details.hide()
+            self.detail_buttons[market] = details
+            page_layout.addWidget(details)
             page_layout.addWidget(frame)
 
             summary = _label("잔고 조회 전 · 미확인은 보유종목 0개를 의미하지 않습니다.", "muted")
@@ -180,6 +191,22 @@ class PortfolioPanel(QWidget):
         footer.setWordWrap(True)
         layout.addWidget(footer)
         self.apply({})
+
+    def set_compact(self, compact: bool) -> None:
+        """Use the available height for holdings rows; account details can expand."""
+        compact = bool(compact)
+        if self._compact == compact:
+            return
+        self._compact = compact
+        for market, table in self.tables.items():
+            table.verticalHeader().setDefaultSectionSize(34 if compact else 42)
+            self._update_card_visibility(market)
+
+    def _update_card_visibility(self, market: Market) -> None:
+        button = self.detail_buttons[market]
+        button.setVisible(self._compact)
+        self.market_cards[market].setVisible(not self._compact or button.isChecked())
+        button.setText("계좌 금액·조회 정보 접기" if button.isChecked() else "계좌 금액·조회 정보 펼치기")
 
     @staticmethod
     def _make_table() -> QTableWidget:

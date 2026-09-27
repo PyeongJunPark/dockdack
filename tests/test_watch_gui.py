@@ -72,6 +72,18 @@ class WatchGuiTests(unittest.TestCase):
         self.assertEqual(self.service.quote_calls, 0)
         self.assertEqual(self.window.watch_table.rowCount(), 1)
 
+    def test_short_window_collapses_holdings_account_details(self):
+        self.window.resize(980, 620)
+        self.window.workspace_tabs.setCurrentWidget(self.window.portfolio_panel)
+        self.app.processEvents()
+        self.assertTrue(self.window.portfolio_panel._compact)
+        self.assertFalse(self.window.portfolio_panel.market_cards[Market.DOMESTIC].isVisible())
+        self.assertTrue(self.window.portfolio_panel.detail_buttons[Market.DOMESTIC].isVisible())
+        self.window.resize(1360, 900)
+        self.app.processEvents()
+        self.assertFalse(self.window.portfolio_panel._compact)
+        self.assertTrue(self.window.portfolio_panel.market_cards[Market.DOMESTIC].isVisible())
+
     def test_refresh_renders_n_bars_and_price_without_orders(self):
         self.window.refresh_button.click()
         self.wait_idle()

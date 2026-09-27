@@ -108,9 +108,11 @@ def project_prototype_inventory(rows, allocations, *, mode="demo", scope="demo")
             "filled_quantity": filled, "quantity_sold": ZERO,
             "quantity_remaining": filled, "quantity_reserved_sell": ZERO,
             "available_quantity": filled, "average_price": average,
-            "take_profit_price": average * (1 + family.take_profit) if average else None,
-            "stop_loss_price": average * (1 - family.stop_loss) if average else None,
-            "buy_started_at": row["started_at"], "issues": problems,
+            "take_profit_price": average * (1 + family.take_profit) if average and family.take_profit is not None else None,
+            "stop_loss_price": average * (1 - family.stop_loss) if average and family.stop_loss is not None else None,
+            "buy_started_at": row["started_at"],
+            "buy_fill_observed_at": row.get("observed_at") if filled > ZERO else None,
+            "issues": problems,
         }
     mapped = set()
     bulk_ranges = {}

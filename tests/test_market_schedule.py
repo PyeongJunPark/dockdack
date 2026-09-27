@@ -127,6 +127,24 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(sum(i.instrument.market is Market.US for i in self.store.items()),100)
         self.assertEqual(self.store.attempts()[0]["status"],"submitting")
 
+    def test_prepared_open_selection_survives_only_the_opening_rotation(self):
+        self.store.add_ranked(ranks())
+        frozen = self.store.items()[0].id
+        removed = self.store.items()[1].id
+        self.data = ranks(101)
+        self.now = self.now.replace(hour=9, minute=1)
+        self.scheduler.preserve_watch_ids = lambda market, now: ((frozen,)
+            if market is Market.DOMESTIC and now < session_on(market, now.date()).opened + timedelta(minutes=5)
+            else ())
+        self.assertTrue(self.scheduler.tick())
+        active = {item.id for item in self.store.items()}
+        self.assertIn(frozen, active)
+        self.assertNotIn(removed, active)
+        self.assertEqual(len(active), 101)
+        self.now = self.now.replace(hour=10, minute=0)
+        self.assertTrue(self.scheduler.tick())
+        self.assertNotIn(frozen, {item.id for item in self.store.items()})
+
     def test_protection_lookup_failure_rolls_back_and_close_blocks_apply(self):
         self.now += timedelta(minutes=1)
         with patch.object(self.service,"protected_symbols",side_effect=ValueError("bad account")):

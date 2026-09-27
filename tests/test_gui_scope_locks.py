@@ -3,7 +3,6 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -164,124 +163,16 @@ class GuiScopeLockTests(unittest.TestCase):
         self.window.monitoring = True
         self.window.hourly_ranking.setChecked(False)
 
-    def test_normal_gui_approval_arms_the_configured_close_policy_only_after_warmup(self):
+    def test_normal_gui_has_no_account_wide_close_authority_or_confirmation(self):
         from PySide6.QtWidgets import QMessageBox
         self.normal_window()
-        liquidator = self.window.engine.close_liquidator
-        self.assertTrue(liquidator.enabled)
-        with patch.object(liquidator, 'tick') as tick, \
-                patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.Yes) as question, \
-                patch.object(self.window, '_begin_manual_warmup'), \
-                patch.object(self.window, 'refresh_all'), \
-                patch.object(self.window, 'activation_failure', return_value=''):
-            self.window.engine.maintenance_checkpoint()
-            tick.assert_not_called()
-            self.window.enable_auto_orders()
-            self.assertTrue(self.window.pending_auto_arm)
-            self.assertFalse(self.window.engine.orders_enabled)
-            self.assertIn('모든 국내·미국', question.call_args.args[2])
-            self.assertIn('5분', question.call_args.args[2])
-            self.window._advance_manual_activation('quotes', {}, None)
-            self.assertTrue(self.window.engine.orders_enabled)
-            self.window.engine.maintenance_checkpoint()
-            tick.assert_called_once_with()
-            self.window.disable_auto_orders()
-            self.window.engine.maintenance_checkpoint()
-            tick.assert_called_once_with()
-        self.assertEqual(self.window.service.submitted, [])
-
-    def test_idle_close_wakeup_runs_on_worker_without_postponing_hourly_poll(self):
-        self.normal_window()
-        self.window.engine.enable_orders('DEMO_AUTOTRADE')
-        self.window.interval.setValue(3600)
-        self.window.timer.start(3600 * 1000)
-        before = self.window.timer.remainingTime()
-        main_thread = threading.get_ident()
-        called_from = []
-        with patch.object(self.window.engine.close_liquidator, 'tick', side_effect=lambda: called_from.append(threading.get_ident())) as tick, \
-                patch.object(self.window.engine, 'close_liquidation_status', return_value={'enabled': True}), \
-                patch.object(self.window.timer, 'start', wraps=self.window.timer.start) as reschedule:
-            self.window._close_wakeup()
-            self.assertEqual(self.window._worker_kind, 'close-maintenance')
-            self.drain()
-        tick.assert_called_once_with()
-        self.assertNotEqual(called_from[0], main_thread)
-        reschedule.assert_not_called()
-        self.assertTrue(self.window.timer.isActive())
-        self.assertLessEqual(self.window.timer.remainingTime(), before)
-        self.assertGreater(self.window.timer.remainingTime(), before - 5000)
-        self.assertEqual(self.window.service.submitted, [])
-
-    def test_poll_deadline_expiring_during_maintenance_is_run_immediately_afterward(self):
-        self.normal_window()
-        self.window.engine.enable_orders('DEMO_AUTOTRADE')
-        entered, release = threading.Event(), threading.Event()
-        def delayed():
-            entered.set()
-            release.wait(3)
-        with patch.object(self.window.engine.close_liquidator, 'tick', side_effect=delayed), \
-                patch.object(self.window.engine, 'close_liquidation_status', return_value={'enabled': True}):
-            self.window._close_wakeup()
-            self.assertTrue(entered.wait(1))
-            self.window.timer.stop()  # A single-shot timer is inactive when its callback fires.
-            self.window.refresh_all()
-            self.assertTrue(self.window._poll_after_maintenance)
-            with patch.object(self.window, 'refresh_all') as refresh:
-                release.set()
-                self.drain()
-            refresh.assert_called_once_with()
-        self.assertFalse(self.window._poll_after_maintenance)
-        self.assertEqual(self.window.service.submitted, [])
-
-    def test_close_wakeup_error_disarms_and_off_real_or_transition_do_not_dispatch(self):
-        self.normal_window()
-        with patch.object(self.window, '_run') as dispatch:
-            self.window._close_wakeup()
-            dispatch.assert_not_called()
-        self.window.engine.enable_orders('DEMO_AUTOTRADE')
-        self.window.service.mode = TradingMode.REAL
-        try:
-            with patch.object(self.window, '_run') as dispatch:
-                self.window._close_wakeup()
-                dispatch.assert_not_called()
-        finally:
-            self.window.service.mode = TradingMode.DEMO
-        self.window._pending_environment = (self.candidate, self.store)
-        try:
-            with patch.object(self.window, '_run') as dispatch:
-                self.window._close_wakeup()
-                dispatch.assert_not_called()
-        finally:
-            self.window._pending_environment = None
-        with patch.object(self.window.engine.close_liquidator, 'tick', side_effect=RuntimeError('fixture close failure')), \
-                patch.object(self.window.timer, 'start') as reschedule:
-            self.window._close_wakeup()
-            self.drain()
-        self.assertFalse(self.window.engine.orders_enabled)
-        self.assertFalse(self.window.pending_auto_arm)
-        reschedule.assert_not_called()
-        self.assertIn('fixture close failure', self.window.message.text())
-
-    def test_separately_confirmed_on_during_maintenance_only_requests_fresh_warmup(self):
-        self.normal_window()
-        self.window.engine.enable_orders('DEMO_AUTOTRADE')
-        entered, release = threading.Event(), threading.Event()
-        def delayed():
-            entered.set()
-            release.wait(3)
-        with patch.object(self.window.engine.close_liquidator, 'tick', side_effect=delayed), \
-                patch.object(self.window.engine, 'close_liquidation_status', return_value={'enabled': True}), \
-                patch.object(self.window, '_begin_manual_warmup') as warmup:
-            self.window._close_wakeup()
-            self.assertTrue(entered.wait(1))
-            self.window.disable_auto_orders()
-            # Stand in for a separately confirmed new ON request, not a timer's permission.
-            self.window._manual_arm_pending = True
-            self.window.pending_auto_arm = True
-            release.set()
-            self.drain()
-            warmup.assert_called_once_with()
-        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(hasattr(self.window.engine, "close_liquidator"))
+        self.assertFalse(hasattr(self.window, 'close_all_at_market_end'))
+        self.assertFalse(hasattr(self.window, 'close_maintenance_timer'))
+        self.assertFalse(hasattr(self.window, 'closing_confirmation_notice'))
+        with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as question:
+            self.window.confirm_automation()
+        self.assertNotIn('모든 국내·미국', question.call_args.args[2])
         self.assertEqual(self.window.service.submitted, [])
 
 

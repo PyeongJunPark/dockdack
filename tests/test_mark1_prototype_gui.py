@@ -98,7 +98,9 @@ class PrototypeGuiTests(unittest.TestCase):
 
     def test_startup_off_warning_and_permanent_ui_order_block(self):
         window = self.window()
-        self.assertIn("mark1 prototype", window.windowTitle())
+        self.assertIn("mark1.0 prototype", window.windowTitle())
+        self.assertIn("mark1.0 prototype", window.mark1_limitations.text())
+        self.assertIn("mark1.0 prototype", window.order_status_detail.text())
         self.assertFalse(window.monitoring)
         self.assertFalse(window.engine.orders_enabled)
         self.assertEqual((self.service.quote_calls, self.service.history_calls), (0, 0))
@@ -172,16 +174,16 @@ class PrototypeGuiTests(unittest.TestCase):
         self.assertEqual((signal["action"], signal["cost_loss_pct"]), ("sell", "0.9"))
         self.assertEqual(self.service.submitted, [])
 
-    def test_backend_and_close_liquidation_paths_cannot_write(self):
+    def test_backend_paths_cannot_write_and_blanket_close_is_absent(self):
         window = self.window()
         window.engine._armed.set()
         self.assertFalse(window.engine.orders_enabled)
-        for method in (window.service.submit, window.service.prepare,
-                       window.close_liquidator.service.submit, window.engine._before_order_send):
+        for method in (window.service.submit, window.service.prepare, window.engine._before_order_send):
             with self.assertRaises(OrderNotSent):
                 method(None)
-        self.assertFalse(window.close_liquidator.enabled)
-        self.assertFalse(window.close_timer.isActive())
+        self.assertFalse(hasattr(window, "close_liquidator"))
+        self.assertFalse(hasattr(window.engine, "close_liquidator"))
+        self.assertFalse(hasattr(window, "close_timer"))
         self.assertEqual(self.service.submitted, [])
 
     def test_close_all_configuration_rejected_before_any_mutation(self):

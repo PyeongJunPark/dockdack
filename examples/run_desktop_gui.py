@@ -48,11 +48,16 @@ def main(argv=None):
         from dockdack.mark1_prototype_inference import PrototypePredictor
         from dockdack.mark1_1_prototype_inference import Mark11PrototypePredictor
         from dockdack.signals.mark1_2_trigger import Mark12PrototypePredictor
+        from dockdack.mark1_4_inference import Mark14Predictor
+        from dockdack.signals.preopen_series import PREOPEN_MODELS, load_preopen_predictor
         for market in ("domestic", "us"):
             PrototypePredictor(ROOT / "models/mark1_prototype", market)
             Mark11PrototypePredictor(ROOT / "models/mark1_1_prototype", market)
             Mark12PrototypePredictor(ROOT / "models/mark1_2_prototype", market)
-        print("Unified GUI + saved KR/US mark1 prototype, mark1.1 prototype and mark1.2 prototype models: OK; no monitoring, orders or network")
+            Mark14Predictor(ROOT / "models/mark1_4", market)
+            for model_id, spec in PREOPEN_MODELS.items():
+                load_preopen_predictor(model_id, ROOT / spec.bundle_directory, market)
+        print("Unified GUI + saved KR/US mark1.0-mark1.12 model bundles: OK; no monitoring, orders or network")
         return 0
     return desktop_main(desktop_arguments(args))
 

@@ -205,7 +205,7 @@ class DurableOrderProvenanceTests(unittest.TestCase):
         self.store.finish(rule.id, 'filled', 'offline fixture')
         row = self.store.order_history()[0]
         self.assertEqual(row['status'], 'filled')
-        self.assertEqual(prototype_order_label(row), 'mark1 prototype')
+        self.assertEqual(prototype_order_label(row), 'mark1.0 prototype')
         self.assertEqual(self.store.exit_targets(self.item.id), None)
 
 

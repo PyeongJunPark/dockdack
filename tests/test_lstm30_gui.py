@@ -591,58 +591,21 @@ class LSTM30GuiTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
         self.assertIn("035420", str(window.lstm_bridge.diagnostics))
 
-    def test_closing_window_pauses_new_buy_without_disarming_liquidation_authority(self):
+    def test_account_wide_close_cannot_be_configured_or_armed(self):
+        from dockdack.lstm30_gui import main
         window = self.window()
-        closer = SimpleNamespace(tick=Mock(), buy_blocked=Mock(return_value=True), enabled=True,
-                                 status=Mock(return_value={"enabled": True, "unsold": [], "errors": []}))
-        window.engine.close_liquidator = closer
-        window.start_session("DEMO_AUTOTRADE")
-        self.wait_idle(window)
-        self.assertTrue(window.engine.orders_enabled)
-        self.assertEqual(self.service.submitted, [])
-        self.assertEqual(window.store.attempts(), ())
-        self.assertTrue(closer.tick.called)
-        self.assertTrue(closer.buy_blocked.called)
-        self.assertEqual(window.lstm_policy.max_quantity, 1)
-        self.assertEqual(window.lstm_policy.max_krw, Decimal(1000))
-
-    def test_final_buy_guard_rechecks_closing_boundary_after_parent_guard(self):
-        from dockdack.autotrade import AutoTrader
-        from dockdack.exceptions import OrderNotSent
-        window = self.window()
-        closer = SimpleNamespace(buy_blocked=Mock(side_effect=(False, True)))
-        window.engine.close_liquidator = closer
-        rule = TriggerRule.create(self.item, "price_ge", "buy", 1, Decimal(1000), Decimal(100))
-        with patch.object(AutoTrader, "_before_order_send") as parent_guard:
-            with self.assertRaises(OrderNotSent):
-                window.engine._before_order_send(self.item, rule, None)
-        parent_guard.assert_called_once()
-        self.assertEqual(closer.buy_blocked.call_count, 2)
-        self.assertEqual(self.service.submitted, [])
-
-    def test_close_timer_only_wakes_authorized_idle_same_worker(self):
-        window = self.window()
-        window.close_liquidator = SimpleNamespace(closing_markets=Mock(return_value={Market.US}))
-        with patch.object(window, "refresh_all") as refresh:
-            window._close_wakeup()
-            refresh.assert_not_called()
-            window.monitoring = True
-            window.engine._armed.set()
-            window._close_wakeup()
-            refresh.assert_called_once()
-            refresh.reset_mock()
-            window.worker = object()
-            try:
-                window._close_wakeup()
-                refresh.assert_not_called()
-            finally:
-                window.worker = None
-
-    def test_close_policy_requires_both_minutes_and_explicit_confirmation(self):
+        self.assertFalse(hasattr(window, "close_liquidator"))
+        self.assertFalse(hasattr(window.engine, "close_liquidator"))
+        self.assertFalse(hasattr(window, "close_timer"))
         for settings in ({"close_all_before_minutes": 5},
                          {"close_all_confirmation": "DEMO_CLOSE_ALL_SELLABLE"}):
-            with self.subTest(settings=settings), self.assertRaises(ValueError):
+            with self.subTest(settings=settings), self.assertRaises(TypeError):
                 self.window(**settings)
+        for arguments in (("--close-all-before-minutes", "5"),
+                          ("--confirm-close-all", "DEMO_CLOSE_ALL_SELLABLE")):
+            with self.subTest(arguments=arguments), patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+                main(arguments)
+            self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":

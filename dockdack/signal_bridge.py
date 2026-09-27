@@ -29,14 +29,23 @@ class PrototypeFamily:
 
     id: str
     title: str
-    take_profit: Decimal
-    stop_loss: Decimal
+    take_profit: Decimal | None
+    stop_loss: Decimal | None
 
 
 _PROTOTYPE_FAMILIES = (
-    PrototypeFamily("mark1-prototype", "mark1 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-prototype", "mark1.0 prototype", Decimal(".01"), Decimal(".009")),
     PrototypeFamily("mark1-1-prototype", "mark1.1 prototype", Decimal(".005"), Decimal(".004")),
     PrototypeFamily("mark1-2-prototype", "mark1.2 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-4-prototype", "mark1.4 prototype", None, None),
+    PrototypeFamily("mark1-5-prototype", "mark1.5 prototype", None, None),
+    PrototypeFamily("mark1-6-prototype", "mark1.6 prototype", None, None),
+    PrototypeFamily("mark1-7-prototype", "mark1.7 prototype", None, None),
+    PrototypeFamily("mark1-8-prototype", "mark1.8 prototype", None, None),
+    PrototypeFamily("mark1-9-prototype", "mark1.9 prototype", None, None),
+    PrototypeFamily("mark1-10-prototype", "mark1.10 prototype", None, None),
+    PrototypeFamily("mark1-11-prototype", "mark1.11 prototype", None, None),
+    PrototypeFamily("mark1-12-prototype", "mark1.12 prototype", None, None),
 )
 
 
@@ -364,7 +373,7 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
     for entry in entries:
         required = {"signal_id", "export_id", "market", "symbol", "exchange", "action", "generated_at", "expires_at"}
         model_fields = {"strategy_id", "model_title", "model_version", "model_manifest_sha256"}
-        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"} - model_fields:
+        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price", "target_equity_fraction"} - model_fields:
             raise ValueError("외부 신호의 필수/허용 필드를 확인하세요.")
         sid, export_id = identifier(entry["signal_id"], "signal_id"), identifier(entry["export_id"], "export_id")
         inst = Instrument(Market(entry["market"]), entry["symbol"], entry["exchange"])
@@ -387,6 +396,11 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
         action = entry["action"]
         if action not in {"buy", "sell", "hold"}:
             raise ValueError("action은 buy, sell, hold 중 하나여야 합니다.")
+        if "target_equity_fraction" in entry:
+            fraction = decimal_string(entry["target_equity_fraction"], "target_equity_fraction")
+            if (source != "mark1-8-prototype-demo-trigger" or action != "buy"
+                    or not 0 < fraction <= Decimal("0.1")):
+                raise ValueError("모델 투자비중은 Mark1.8 모의 매수에서만 0~10%를 허용합니다.")
         created, expiry = timestamp(entry["generated_at"], "generated_at"), timestamp(entry["expires_at"], "expires_at")
         if not created < expiry <= created + timedelta(minutes=10):
             raise ValueError("신호 유효기간은 생성 이후 최대 10분입니다.")

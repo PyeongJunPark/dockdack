@@ -11,9 +11,10 @@ from dockdack.models import TradingMode
 from dockdack.ui.operations_gui import populate
 
 
-MODELS = (("mark1-prototype", "mark1 prototype"),
+MODELS = (("mark1-prototype", "mark1.0 prototype"),
           ("mark1-1-prototype", "mark1.1 prototype"),
-          ("mark1-2-prototype", "mark1.2 prototype"))
+          ("mark1-2-prototype", "mark1.2 prototype"),
+          ("mark1-4-prototype", "mark1.4 prototype"))
 MARKETS = (("domestic", "국내 · KRW", "KRW"), ("us", "미국 · USD", "USD"))
 RETURN_DESCRIPTION = "누적 실현 수익률 = 확인된 매도 실현손익 ÷ 해당 매도분의 매입원가 × 100 · 수수료·세금 제외"
 WARNING_TEXT = {
@@ -204,7 +205,8 @@ class ModelPerformancePanel(QWidget):
                 if row.get("strategy_id") == "unassigned" or row.get("attribution_complete") is False:
                     state = "모델 출처 미확인\n" + state
                 count = row.get("executed_sell_count", known + unknown)
-                cells.append((row["model_title"], rate_text, cost, profit, f"{count}건", state))
+                display_title = dict(MODELS).get(row["strategy_id"], row["model_title"])
+                cells.append((display_title, rate_text, cost, profit, f"{count}건", state))
             view = self.tables[market]
             populate(view, cells, [row["strategy_id"] for row in selected])
             for index, row in enumerate(selected):

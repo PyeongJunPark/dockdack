@@ -1,0 +1,982 @@
+{
+  "bar_columns": [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume"
+  ],
+  "cost_bps": 20.0,
+  "deployment_allowed": false,
+  "entry": "next_session_open",
+  "exit": "same_session_close",
+  "lookback": 30,
+  "markets": {
+    "domestic": {
+      "catalog_point_in_time": false,
+      "models": {
+        "mark1.5": {
+          "cpu_gpu_audit_candidate_rows": 154216,
+          "cpu_gpu_observed_max_abs_score_delta": 0.004840373992919922,
+          "cpu_gpu_observed_threshold_flips": 4,
+          "cpu_numeric_guard_margin": 0.005,
+          "development_2022_exact_fills": 555,
+          "development_2022_net_return_after_20bps": -0.04717038689999509,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": 0.06325438618659973,
+          "model_file": "domestic-mark1.5-seed42-model.json",
+          "model_sha256": "479a97737962a6d65bedf4d4954726f9c5cd8c0654d7b14001ebaaffdf9adbb6",
+          "score_unit": "predicted_t_plus_1_net_open_to_close_return_percent",
+          "seed": 42,
+          "signal_phase": "preopen",
+          "source_report_sha256": "643b83074b33921788f2eddf4a0f664e26b3bd376c2ec88197d82eb4311b8f69",
+          "strategy_id": "mark1-5-prototype",
+          "target_train_candidate_coverage": 0.05,
+          "weights_file": "domestic-mark1.5-seed42-weights.npz",
+          "weights_sha256": "ada3abaa43c14101237859a1e4fb58d65033258db300fc63d5076c97fae66f03"
+        },
+        "mark1.6": {
+          "cpu_gpu_audit_candidate_rows": 154216,
+          "cpu_gpu_observed_max_abs_score_delta": 1.2516975402832031e-05,
+          "cpu_gpu_observed_threshold_flips": 1,
+          "cpu_numeric_guard_margin": 2e-05,
+          "development_2022_exact_fills": 919,
+          "development_2022_net_return_after_20bps": -0.15353480659999041,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": 0.4661358892917633,
+          "model_file": "domestic-mark1.6-seed42-model.json",
+          "model_sha256": "26c0d549d73cf9bc613ee96f53558023b09f1cbc462a6a12782c7c325f0996c1",
+          "score_unit": "estimated_probability_positive_t_plus_1_net_open_to_close_return",
+          "seed": 42,
+          "signal_phase": "preopen",
+          "source_report_sha256": "98a3244df80fdaa993971960ca5973e9ddd13f87f29fbe417f865e163c549a5f",
+          "strategy_id": "mark1-6-prototype",
+          "target_train_candidate_coverage": 0.05,
+          "weights_file": "domestic-mark1.6-seed42-weights.npz",
+          "weights_sha256": "74585ebc79f8964072cc383a95a3ae6b26e48efb4756277491b404a32dc76c68"
+        },
+        "mark1.7": {
+          "cpu_gpu_audit_candidate_rows": 154216,
+          "cpu_gpu_observed_max_abs_score_delta": 4.76837158203125e-07,
+          "cpu_gpu_observed_threshold_flips": 0,
+          "cpu_numeric_guard_margin": 1e-06,
+          "development_2022_exact_fills": 658,
+          "development_2022_net_return_after_20bps": -0.11070209899999373,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": -0.23742200434207916,
+          "model_file": "domestic-mark1.7-seed41-model.json",
+          "model_sha256": "d75cc1466390952b5071b200da5f5f6d868171371594d27ee60f69fbdd69d436",
+          "score_unit": "unscaled_same_session_pairwise_ranking_score",
+          "seed": 41,
+          "signal_phase": "preopen",
+          "source_report_sha256": "36185427f6facfcb54fa7e915fe7da1415f1f25f887b3ad449a7b00287b904cc",
+          "strategy_id": "mark1-7-prototype",
+          "target_train_candidate_coverage": 0.05,
+          "weights_file": "domestic-mark1.7-seed41-weights.npz",
+          "weights_sha256": "3c54c3cfe8574aca1e1d5a8cc1b22587fd25884c3e9a445b04db0dc6b556a8f0"
+        }
+      },
+      "reference_cross_section_size": 92,
+      "reference_file": "domestic-reference.npz",
+      "reference_sha256": "fc2dd1bae719d6cb3f81f8cbff42daeb6e1006bc9aca523e5e649981332dfcce",
+      "reference_target_date": "2022-01-03",
+      "selected_symbols": [
+        {
+          "exchange": "KRX",
+          "symbol": "005930"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "215600"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "000660"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "068270"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "200230"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "007390"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "058820"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "035720"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "036570"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "121800"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "066570"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "036120"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "005490"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "207940"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "034220"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "085660"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "035420"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "051910"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "068760"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "005380"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "251270"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "006400"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "028300"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "105560"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "009150"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "011070"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "033320"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "010140"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "090430"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "055550"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "017670"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "012330"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "051370"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "041190"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "096770"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "034230"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "008770"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "263750"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "015760"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "019550"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "057680"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "086790"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "084990"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "174900"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "123840"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "006800"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "033780"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "028260"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "051900"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "010950"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "128940"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "090460"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "034730"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "004720"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "069080"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "010060"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "000270"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "178920"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "009830"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "032640"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "000810"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "032830"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "086520"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "028670"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "144510"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "267250"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "078160"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "011170"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "003670"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "010170"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "028050"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "004020"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "003490"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "073240"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "018260"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "064240"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "004800"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "025320"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "030200"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "038290"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "003550"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "139480"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "009540"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "001820"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "009420"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "005420"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "131370"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "004170"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "066970"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "120110"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "021240"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "066700"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "118000"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "020150"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "046890"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "035900"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "201490"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "102940"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "000720"
+        },
+        {
+          "exchange": "KRX",
+          "symbol": "272290"
+        }
+      ],
+      "selected_universe_size": 100
+    },
+    "us": {
+      "catalog_point_in_time": false,
+      "models": {
+        "mark1.5": {
+          "cpu_gpu_audit_candidate_rows": 172680,
+          "cpu_gpu_observed_max_abs_score_delta": 0.0026769042015075684,
+          "cpu_gpu_observed_threshold_flips": 3,
+          "cpu_numeric_guard_margin": 0.003,
+          "development_2022_exact_fills": 1232,
+          "development_2022_net_return_after_20bps": -0.2833539669199904,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": 0.08753113374114073,
+          "model_file": "us-mark1.5-seed41-model.json",
+          "model_sha256": "3c54aadb4154ce23cfef2c80e52ea938b83dc7a339926d817283fbb06e11afe8",
+          "score_unit": "predicted_t_plus_1_net_open_to_close_return_percent",
+          "seed": 41,
+          "signal_phase": "preopen",
+          "source_report_sha256": "e9d4a8c329673419764f365951b98fa33e7cd493f6c08dac642f8a05448e3a47",
+          "strategy_id": "mark1-5-prototype",
+          "target_train_candidate_coverage": 0.05,
+          "weights_file": "us-mark1.5-seed41-weights.npz",
+          "weights_sha256": "81fbde444884d3ea5674f7743d5dd31ae4141e6b94ca6c8908f74975330643e4"
+        },
+        "mark1.6": {
+          "cpu_gpu_audit_candidate_rows": 172680,
+          "cpu_gpu_observed_max_abs_score_delta": 1.4036893844604492e-05,
+          "cpu_gpu_observed_threshold_flips": 3,
+          "cpu_numeric_guard_margin": 2e-05,
+          "development_2022_exact_fills": 686,
+          "development_2022_net_return_after_20bps": -0.00806674822999287,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": 0.47113201320171355,
+          "model_file": "us-mark1.6-seed43-model.json",
+          "model_sha256": "23f91eeff15ad63599b6c7cc58295e9f4e92fa5ab057a9dc378de46f9a10cf14",
+          "score_unit": "estimated_probability_positive_t_plus_1_net_open_to_close_return",
+          "seed": 43,
+          "signal_phase": "preopen",
+          "source_report_sha256": "121d63a21b11182f83c1995ce7c3e7e26700b1a3560397cca0b2b7f172bc1173",
+          "strategy_id": "mark1-6-prototype",
+          "target_train_candidate_coverage": 0.02,
+          "weights_file": "us-mark1.6-seed43-weights.npz",
+          "weights_sha256": "262ea668196b8e1ae0d61a6e01658a939747958597dcb5cfef7ea21ed4ffd2dd"
+        },
+        "mark1.7": {
+          "cpu_gpu_audit_candidate_rows": 172680,
+          "cpu_gpu_observed_max_abs_score_delta": 5.960464477539062e-07,
+          "cpu_gpu_observed_threshold_flips": 0,
+          "cpu_numeric_guard_margin": 1e-06,
+          "development_2022_exact_fills": 216,
+          "development_2022_net_return_after_20bps": -0.04065396116999764,
+          "exit_after_sessions": 0,
+          "exit_timing": "preclose",
+          "frozen_numeric_score_threshold": -0.401003232002258,
+          "model_file": "us-mark1.7-seed41-model.json",
+          "model_sha256": "fb5ab44cf8b38e884c574f65cd69289bab6556bcb97b1d489adcd732b9d19be4",
+          "score_unit": "unscaled_same_session_pairwise_ranking_score",
+          "seed": 41,
+          "signal_phase": "preopen",
+          "source_report_sha256": "89082bcf60854547faf65f0ec98bcb715dc4fea253ad4d562ecd8064d90703d0",
+          "strategy_id": "mark1-7-prototype",
+          "target_train_candidate_coverage": 0.02,
+          "weights_file": "us-mark1.7-seed41-weights.npz",
+          "weights_sha256": "b8dda03e3b7bb4fb716d99bb59a4a30f84adc58c676a25e1793383c93240ac52"
+        }
+      },
+      "reference_cross_section_size": 100,
+      "reference_file": "us-reference.npz",
+      "reference_sha256": "e6cb974fa05d8896bf9e3ff982384db6db95f02e91e3437341116e38169c1809",
+      "reference_target_date": "2022-01-03",
+      "selected_symbols": [
+        {
+          "exchange": "ND",
+          "symbol": "AAPL"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "BABA"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "AMZN"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "META"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "NVDA"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "BAC"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "MSFT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "MU"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "TSLA"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "GOOGL"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "JPM"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "GOOG"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "C"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "INTC"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "WFC"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "T"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "GE"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "BA"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "NFLX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "DIS"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "HD"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "CMCSA"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "V"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "XOM"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "AVGO"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "JNJ"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "CVS"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "WMT"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "ORCL"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "VZ"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "BKNG"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MRK"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "CHTR"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "CSCO"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "GS"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "IBM"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "UNP"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "COST"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "LRCX"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "GILD"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "PG"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "SLB"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "UNH"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "CVX"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "AMAT"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "LOW"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "PYPL"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "NKE"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "PFE"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "FOXA"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MO"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "JD"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "CAT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "TXN"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "BIDU"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MA"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "PM"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "AMGN"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "ADBE"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "NTES"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "SBUX"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "QCOM"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "GM"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MMM"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MCD"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "KO"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "CRM"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MS"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "ABBV"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "CSX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "MDT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "PEP"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "TEVA"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "TGT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "MDLZ"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "HAL"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "FDX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "DAL"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "AMD"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "UPS"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "SCHW"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "ROKU"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "F"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "WDC"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "FCX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "AXP"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "EIX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "AZO"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "CMG"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "LLY"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "BMY"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "TJX"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "ABT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "BIIB"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "ISRG"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "STZ"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "M"
+        },
+        {
+          "exchange": "NY",
+          "symbol": "AMT"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "EBAY"
+        },
+        {
+          "exchange": "ND",
+          "symbol": "ULTA"
+        }
+      ],
+      "selected_universe_size": 100
+    }
+  },
+  "research_only": true,
+  "research_qualified": false,
+  "schema_version": 1,
+  "scoring_code_sha256": {
+    "mark1_4_evolution.py": "81b17fc137cf011d03a117efe6392c4bfb424cfb38d5ab37b56116ad565cd834",
+    "mark1_series_models.py": "bf43c5dfc70227c7d2e25e6e16ce599716ccabdc03f14a09acfd50c6a5a887b0"
+  },
+  "source_run_manifest_sha256": "b3d62bfa81ab1e2f1a8564e3e62559964c23967b309c8e6de65a6c3fc2dc4f7d",
+  "threshold_comparison": "strict_greater_than",
+  "title": "mark1-series",
+  "training_device": "cuda",
+  "versions": [
+    "mark1.5",
+    "mark1.6",
+    "mark1.7"
+  ]
+}

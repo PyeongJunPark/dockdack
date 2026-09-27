@@ -21,10 +21,7 @@ SOURCE_ID = "mark1-2-prototype-demo-trigger"
 STRATEGY_ID = "mark1-2-prototype"
 TITLE = "mark1.2 prototype"
 STRATEGY_NOTICE = "매수 추정 확률 > 50% · 평균매수가 +1% 익절 / -0.9% 손절 · 모의 전용"
-RISK_NOTICE = (
-    "연구 검증 미통과 · 2025+ 과거 비용 반영 백테스트 국내/미국 모두 손실 · "
-    "장중 진입 이후의 고가/저가 순서 미검증 · 추정 확률은 실제 성공률이 아님"
-)
+RISK_NOTICE = "가상 매수가 증강 · 국내 CNN / 미국 LSTM 3시드 앙상블 · 추정 확률은 실제 적중률과 다름"
 
 
 class Mark12PrototypePredictor:

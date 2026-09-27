@@ -6,9 +6,9 @@
 
 ## 일반 실행과 모델 파일
 
-저장소에서는 `uv sync --locked --extra gui --extra prototype` 후 `uv run dockdack-gui` 또는 기존 `DockDack.vbs`를 사용한다. 시작 시 감시·자동주문 OFF다. 일반 GUI의 마감 5분 전 모의 전량매도 정책은 기본 선택되지만 ON 승인이 필요하다.
+저장소에서는 `uv sync --locked --extra gui --extra prototype` 후 `uv run dockdack-gui` 또는 기존 `DockDack.vbs`를 사용한다. 시작 시 감시·자동주문 OFF다. 모의계좌 전체의 마감 전량매도 기능은 제거했다. 장전 모델별 기간 매도는 확인된 해당 모델 매수분에만 적용되며, 감시·모의 자동주문 ON과 주문별 검사가 필요하다.
 
-wheel에는 코드/worker/UI 자산이 들어가고 모델·API 키·거래 DB는 포함하지 않는다. 설치본은 `DOCKDACK_HOME`을 데이터 홈으로 사용하며, 미지정 시 Windows `%LOCALAPPDATA%/DockDack`이다. 저장소 실행은 기존 저장소 홈을 유지한다. `DOCKDACK_MODEL_ROOT`로 **models의 상위 폴더가 아니라 models 폴더 자체**를 지정한다. 그 아래 `mark1_prototype`, `mark1_1_prototype` 묶음을 그대로 둔다. manifest와 runtime 소스 검증을 통과한 모델만 읽는다.
+wheel에는 코드/worker/UI 자산이 들어가고 모델·API 키·거래 DB는 포함하지 않는다. 설치본은 `DOCKDACK_HOME`을 데이터 홈으로 사용하며, 미지정 시 Windows `%LOCALAPPDATA%/DockDack`이다. 저장소 실행은 기존 저장소 홈을 유지한다. `DOCKDACK_MODEL_ROOT`로 **models의 상위 폴더가 아니라 models 폴더 자체**를 지정한다. 그 아래 장중 `mark1_prototype`, `mark1_1_prototype`, `mark1_2_prototype` 및 장전 `mark1_4`, `mark1_series`, `mark1_8`, `mark1_9`, `mark1_10`, `mark1_horizons` 묶음을 상대 구조 그대로 둔다. manifest와 runtime 소스 검증을 통과한 모델만 읽는다.
 
 ```powershell
 $env:DOCKDACK_HOME = 'C:/DockDack'

@@ -55,7 +55,7 @@ python -m examples.run_prototype_signal --model mark1-prototype --chart charts.j
 python -m examples.run_prototype_signal --model mark1-1-prototype --chart charts.json --positions positions.json --output mark11-signals.json --state mark11-state.json --once
 ```
 
-모델별 파일은 서로 다르게 지정해야 한다. 단독 실행은 JSON을 만드는 것일 뿐 자동주문 활성화가 아니다. 과거의 `--trigger mark1-prototype` 실행 옵션도 외부 체크박스로 이전하지만 새 실행에서는 `--no-model --external-model mark1-prototype --external-model mark1-1-prototype`을 사용한다.
+모델별 파일은 서로 다르게 지정해야 한다. 단독 실행은 JSON을 만드는 것일 뿐 자동주문 활성화가 아니다. 과거의 `--trigger mark1-prototype` 실행 옵션도 외부 체크박스로 이전한다. 기본 실행은 마지막으로 저장한 모델 선택을 복원하며, 명령줄에 `--no-model`이나 `--external-model`을 명시하면 이번 실행에서는 그 선택이 저장 설정보다 우선한다.
 
 ## 저장본과 연구 한계
 

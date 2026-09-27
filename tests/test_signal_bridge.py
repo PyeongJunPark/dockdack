@@ -216,6 +216,39 @@ class SignalBridgeTests(unittest.TestCase):
         self.engine.poll(progress=progress)
         self.assertEqual(visited, [self.item.id, items[1].id, items[0].id])
 
+    def test_frozen_open_priority_is_read_after_checkpoint_and_precedes_other_ready_rules(self):
+        selected = WatchItem(self.service.resolve("035420"))
+        self.store.save_item(selected)
+        self.engine.snapshot(selected)
+        self.export = export_charts(self.store, self.path / "charts.json", now=NOW)
+        payload = self.payload()
+        payload["signals"].append(self.payload(symbol="035420", signal_id="decision-selected")["signals"][0])
+        self.ingest(payload)
+        state = {"prepared": False}
+        self.engine.poll_priority_watch_ids = lambda: ((selected.id,) if state["prepared"] else ())
+        visited = []
+        def checkpoint():
+            state["prepared"] = True
+            return False
+        def progress(data):
+            if len(data) == 4:
+                visited.append(data[0])
+        self.engine.poll(progress=progress, checkpoint=checkpoint)
+        self.assertEqual(visited, [selected.id, self.item.id])
+        self.assertEqual(self.service.submitted, [])
+
+    def test_frozen_candidate_without_ready_file_precedes_unrelated_ready_rule(self):
+        selected = WatchItem(self.service.resolve("035420"))
+        self.store.save_item(selected)
+        self.engine.snapshot(selected)
+        self.export = export_charts(self.store, self.path / "charts.json", now=NOW)
+        self.ingest(self.payload())  # Only the unrelated name has a ready file.
+        self.engine.poll_priority_watch_ids = lambda: (selected.id,)
+        visited = []
+        self.engine.poll(progress=lambda data: visited.append(data[0]) if len(data) == 4 else None)
+        self.assertEqual(visited, [selected.id, self.item.id])
+        self.assertEqual(self.service.submitted, [])
+
     def test_unknown_submission_disarms_and_never_retries_signal(self):
         self.ingest()
         self.service.submit_error = TimeoutError("timeout")

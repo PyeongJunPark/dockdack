@@ -23,11 +23,18 @@ from uuid import uuid4
 import dockdack
 from dockdack.runtime_paths import app_home, checkout_root, model_bundle
 
-MODEL_IDS = ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype")
+MODEL_IDS = ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype",
+             "mark1-4-prototype", "mark1-5-prototype", "mark1-6-prototype",
+             "mark1-7-prototype", "mark1-8-prototype", "mark1-9-prototype",
+             "mark1-10-prototype", "mark1-11-prototype", "mark1-12-prototype")
 MAX_RPC_BYTES = 12_000_000
 # Package import root (checkout or site-packages), independent of this module's
 # internal location. Model/artifact paths come from runtime_paths, never ROOT.
 ROOT = Path(dockdack.__file__).resolve().parent.parent
+
+
+class RemoteWorkerError(ValueError):
+    """The isolated worker returned a structured, handled rejection."""
 
 
 def model_bridge_type(model_id):
@@ -40,6 +47,12 @@ def model_bridge_type(model_id):
     if model_id == "mark1-2-prototype":
         from dockdack.signals.mark1_2_trigger import Mark12TriggerBridge
         return Mark12TriggerBridge
+    if model_id == "mark1-4-prototype":
+        from dockdack.signals.mark1_4_external import Mark14TriggerBridge
+        return Mark14TriggerBridge
+    if model_id in MODEL_IDS[4:]:
+        from dockdack.signals.preopen_series import preopen_bridge_type
+        return preopen_bridge_type(model_id)
     raise ValueError("Unknown prototype model identity")
 
 
@@ -80,6 +93,17 @@ class PrototypeWorker:
         self.now = None
         self.started = 0.
         self.limits = None
+        self.special = None
+        if model_id == "mark1-4-prototype":
+            from dockdack.signals.mark1_4_external import Mark14Worker
+            self.special = Mark14Worker(bundle_root=self.bundle_root, predictors=self.predictors)
+        elif model_id in MODEL_IDS[4:]:
+            from dockdack.signals.mark1_4_external import Mark14Worker
+            from dockdack.signals.preopen_series import load_preopen_predictor
+            self.special = Mark14Worker(
+                bundle_root=self.bundle_root, predictors=self.predictors, model_id=model_id,
+                predictor_loader=lambda root, market: load_preopen_predictor(model_id, root, market),
+            )
 
     def _clock(self):
         return self.now + timedelta(seconds=max(0., time.monotonic() - self.started))
@@ -106,6 +130,8 @@ class PrototypeWorker:
         if (not isinstance(request, dict) or request.get("schema_version") != 1
                 or request.get("model_id") != self.model_id):
             raise ValueError("External prototype request identity mismatch")
+        if self.special is not None:
+            return self.special.dispatch(request)
         operation = request.get("operation")
         if operation == "health":
             return {"model_id": self.model_id, "source_id": self.bridge_type.source_id,
@@ -290,7 +316,7 @@ class PrototypeProcessClient:
         threading.Thread(target=read_responses, name=f"prototype-{self.model_id}", daemon=True).start()
         return process, responses
 
-    def request(self, operation, *, start=True, **values):
+    def request(self, operation, *, start=True, preserve_remote_error=False, **values):
         # One budget covers serialization, queueing, startup, pipe write and
         # response. Blocking OS/pipe operations live on a cancellable worker;
         # close() does not wait on this request's serialization lock.
@@ -350,10 +376,10 @@ class PrototypeProcessClient:
                     return result
                 except queue.Empty:
                     continue
-        except Exception:
+        except Exception as exc:
             # A waiting second caller must not kill somebody else's request
             # merely because its own queueing budget expired.
-            if acquired:
+            if acquired and not (preserve_remote_error and isinstance(exc, RemoteWorkerError)):
                 self.close()
             raise
         finally:
@@ -373,7 +399,7 @@ class PrototypeProcessClient:
                 or type(reply.get("ok")) is not bool):
             raise ValueError("External prototype response identity mismatch")
         if not reply["ok"]:
-            raise ValueError(reply.get("error") or "External prototype rejected request")
+            raise RemoteWorkerError(reply.get("error") or "External prototype rejected request")
         return reply["result"]
 
     def close(self):

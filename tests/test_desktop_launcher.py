@@ -61,8 +61,9 @@ class DesktopLauncherTests(unittest.TestCase):
 
     def test_normal_vbs_not_separate_prototype_window(self):
         source = (launcher.ROOT / "DockDack.vbs").read_text(encoding="utf-8")
-        self.assertIn("-m examples.run_desktop_gui --no-model", source)
-        self.assertIn("--external-model mark1-prototype --external-model mark1-1-prototype", source)
+        self.assertIn("-m examples.run_desktop_gui", source)
+        self.assertNotIn("--no-model", source)
+        self.assertNotIn("--external-model", source)
         self.assertNotIn("run_mark1_prototype_gui", source)
 
 

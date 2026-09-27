@@ -130,6 +130,37 @@ class PortfolioPanelTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.panel._payload, payload)
 
+    def test_compact_window_shows_more_holdings_and_keeps_account_details_expandable(self):
+        holdings = tuple(position(symbol=f"{index:06d}") for index in range(20))
+        self.panel.apply({Market.DOMESTIC: PortfolioMarketState(
+            Market.DOMESTIC, account(positions=holdings), NOW, NOW)}, now=NOW)
+        self.panel.resize(1080, 500)
+        self.panel.show()
+        self.app.processEvents()
+        table = self.panel.table
+        regular_height = table.viewport().height()
+
+        self.panel.set_compact(True)
+        self.app.processEvents()
+        details = self.panel.detail_buttons[Market.DOMESTIC]
+        self.assertTrue(details.isVisible())
+        self.assertFalse(self.panel.market_cards[Market.DOMESTIC].isVisible())
+        self.assertGreater(table.viewport().height(), regular_height)
+        self.assertEqual(table.verticalHeader().defaultSectionSize(), 34)
+        self.assertGreater(table.verticalScrollBar().maximum(), 0)
+        self.assertEqual(table.item(19, 1).text(), "삼성전자 · 000019")
+        self.assertIn("잔고", self.panel.summary_label.text())
+
+        details.click()
+        self.app.processEvents()
+        self.assertTrue(self.panel.market_cards[Market.DOMESTIC].isVisible())
+        self.assertEqual(self.panel.market_labels[Market.DOMESTIC]["cash"].text(), "5,000 KRW")
+        self.panel.set_compact(False)
+        self.app.processEvents()
+        self.assertFalse(details.isVisible())
+        self.assertTrue(self.panel.market_cards[Market.DOMESTIC].isVisible())
+        self.assertEqual(table.verticalHeader().defaultSectionSize(), 42)
+
     def test_refresh_preserves_active_market_and_each_markets_selection_and_scroll(self):
         payload = {
             market: PortfolioMarketState(market, account(market, positions=(

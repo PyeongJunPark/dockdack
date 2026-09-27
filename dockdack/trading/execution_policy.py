@@ -116,6 +116,14 @@ def holding_exit_targets(store, position, *, prototype_lots=False):
         if not isinstance(average, Decimal) or not average.is_finite() or average <= 0:
             return {**saved, **provenance, "take_profit_price": None, "stop_loss_price": None,
                     "source": family.title + " · 실제 평균매입가 확인 필요"}
+        if family.take_profit is None or family.stop_loss is None:
+            from dockdack.trading.model_exit_schedule import model_exit_schedule
+            timing = model_exit_schedule(family.id)
+            exit_label = ("당일 마감 5분 전 가격 무관 매도" if timing and timing.timing == "preclose"
+                          else f"{timing.sessions_after_fill + 1}번째 거래일 장중 가격 무관 매도"
+                          if timing else "모델별 기간 매도")
+            return {**saved, **provenance, "take_profit_price": None, "stop_loss_price": None,
+                    "source": family.title + " · " + exit_label + " (가격 목표 없음)"}
         profit_pct = format((family.take_profit * 100).normalize(), "f")
         loss_pct = format((family.stop_loss * 100).normalize(), "f")
         return {**saved, **provenance, "take_profit_price": average * (1 + family.take_profit),

@@ -22,6 +22,7 @@ from dockdack.models import Market, TradingMode
 from dockdack.watchlist import utc_now
 
 DEFAULT_RUNTIME_DIR = Path(".dockdack/mark1-prototype")
+DISPLAY_ORDER_BLOCK_REASON = ORDER_BLOCK_REASON.replace("mark1 prototype", "mark1.0 prototype")
 ACTION_LABELS = {"buy": "매수", "sell": "매도", "hold": "대기", "none": "미전달"}
 REASON_LABELS = {
     "PREDICTED_DAILY_BARRIER_SUCCESS": "모델 추정 확률 50% 초과 · 연구 매수 신호",
@@ -50,10 +51,10 @@ def _marker_for(predictors):
                 or metadata.get("research_only") is not True or metadata.get("deployment_allowed") is not False
                 or not isinstance(fingerprint, str) or len(fingerprint) != 64
                 or any(character not in "0123456789abcdef" for character in fingerprint)):
-            raise ValueError("검증된 mark1 prototype 모델·시장·연구 전용 표시·번들 지문이 필요합니다.")
+            raise ValueError("검증된 mark1.0 prototype 모델·시장·연구 전용 표시·번들 지문이 필요합니다.")
         fingerprints[market] = fingerprint
     if not fingerprints:
-        raise ValueError("mark1 prototype 학습 모델이 필요합니다.")
+        raise ValueError("mark1.0 prototype 학습 모델이 필요합니다.")
     return {"strategy": STRATEGY_ID, "source_id": SOURCE_ID,
             "bundle_manifest_sha256": fingerprints, "observation_only": True, "target_basis": TARGET_BASIS}
 
@@ -97,7 +98,6 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         LSTM30WatchlistDialog.__init__(self, service, runtime_dir=root, predictors=predictors, **kwargs)
         self.engine.predictors = dict(predictors)
         atomic_json(marker, marker_payload)  # Shared initializer now owns SessionLock.
-        self.close_timer.stop()             # No account-wide closing-order worker.
         self.mark1_strategy = QLabel(STRATEGY_NOTICE)
         self.mark1_strategy.setWordWrap(True)
         self.mark1_model_summary = QLabel()
@@ -106,7 +106,7 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         self.mark1_model_summary.setText("연결된 저장 모델 · " + " / ".join(names))
         self.mark1_model_summary.setWordWrap(True)
         self.mark1_limitations = QLabel(
-            RISK_NOTICE + "\n" + ORDER_BLOCK_REASON + "\n"
+            RISK_NOTICE + "\n" + DISPLAY_ORDER_BLOCK_REASON + "\n"
             "완료된 과거 30일 OHLCV와 현재가로 184개 표 특성을 계산합니다. "
             "당일 최종 고가·저가·종가·거래량은 입력하지 않습니다.\n"
             "표시 확률은 하루 전체 구간의 보수적 장벽 사건 추정이며, 장중 진입 이후의 성공확률이나 체결을 보장하지 않습니다. "
@@ -129,7 +129,7 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         layout = QVBoxLayout(page)
         for widget in (self.mark1_strategy, self.mark1_model_summary, self.mark1_limitations, self.mark1_model_table):
             layout.addWidget(widget)
-        self.workspace_tabs.addTab(page, "mark1 prototype · 연구 신호")
+        self.workspace_tabs.addTab(page, "mark1.0 prototype · 연구 신호")
         self.mark1_refresh_timer = QTimer(self)
         self.mark1_refresh_timer.setInterval(500)
         self.mark1_refresh_timer.timeout.connect(lambda: self._update_mark1_table(visible_only=True))
@@ -138,7 +138,7 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         self._update_mark1_table()
         self._sync_environment()
         self._sync_order_controls()
-        self.message.setText("mark1 prototype 연결됨 · 감시 OFF · 주문 항상 차단 · 감시는 직접 시작하세요")
+        self.message.setText("mark1.0 prototype 연결됨 · 감시 OFF · 주문 항상 차단 · 감시는 직접 시작하세요")
 
     def _apply_execution_preferences(self):
         # Main v0.0 defaults to 10% sizing, independent holding exits and extra
@@ -198,8 +198,8 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
 
     def _sync_environment(self):
         LSTM30WatchlistDialog._sync_environment(self)
-        self.setWindowTitle("DOCKDACK | mark1 prototype · 관찰 전용")
-        self.environment_caption.setText("mark1 prototype · 최신 저장 모델 · 모의환경 조회 / 주문 불가")
+        self.setWindowTitle("DOCKDACK | mark1.0 prototype · 관찰 전용")
+        self.environment_caption.setText("mark1.0 prototype · 최신 저장 모델 · 모의환경 조회 / 주문 불가")
         self.environment_notice.setText(RISK_NOTICE + "\n" + STRATEGY_NOTICE)
         self.environment_notice.show()  # Main v0.0 hides this banner; research warnings stay visible here.
         self.portfolio_panel.heading.setText("현재 보유종목 · 모의 계좌 읽기 전용 / +1%·-0.9% 연구 기준")
@@ -216,9 +216,9 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         LSTM30WatchlistDialog._update_connection(self)
         if not getattr(self, "_lstm_configured", False):
             return
-        self.signal_connection_panel.source_label.setText(f"mark1 prototype · 관찰 전용 · source_id: {SOURCE_ID}")
+        self.signal_connection_panel.source_label.setText(f"mark1.0 prototype · 관찰 전용 · source_id: {SOURCE_ID}")
         state = "조회 감시 중" if self.monitoring else "감시 중지"
-        self.connection_summary.setText(f"mark1 prototype · >50% / +1% / -0.9% · 주문 항상 차단 · {state} | {self._market_summary}")
+        self.connection_summary.setText(f"mark1.0 prototype · >50% / +1% / -0.9% · 주문 항상 차단 · {state} | {self._market_summary}")
 
     def _sync_order_controls(self, status=None):
         # Parent health/report timers also call this directly, not just update_controls.
@@ -227,10 +227,10 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
         super()._sync_order_controls()
         self.arm_button.setEnabled(False)
         self.arm_button.setText("자동주문 사용 불가 (관찰 전용)")
-        self.arm_button.setToolTip(ORDER_BLOCK_REASON)
+        self.arm_button.setToolTip(DISPLAY_ORDER_BLOCK_REASON)
         self.disarm_button.setEnabled(False)
         self.mode_label.setText("주문 항상 차단 · 연구 신호 전용")
-        self.order_status_detail.setText(ORDER_BLOCK_REASON)
+        self.order_status_detail.setText(DISPLAY_ORDER_BLOCK_REASON)
 
     def set_pending_auto_arm(self, enabled):
         self.pending_auto_arm = self._manual_arm_pending = False
@@ -242,7 +242,7 @@ class Mark1PrototypeWatchlistDialog(Mark1WatchlistDialog):
     def enable_auto_orders(self):
         self.engine.disarm()
         self.pending_auto_arm = self._manual_arm_pending = False
-        self.message.setText(ORDER_BLOCK_REASON)
+        self.message.setText(DISPLAY_ORDER_BLOCK_REASON)
         self._sync_order_controls()
         return False
 

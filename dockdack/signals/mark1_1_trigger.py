@@ -14,10 +14,7 @@ SOURCE_ID = "mark1-1-prototype-demo-trigger"
 STRATEGY_ID = "mark1-1-prototype"
 TITLE = "mark1.1 prototype"
 STRATEGY_NOTICE = "매수 확률 > 50% · 평균매수가 +0.5% 익절 / -0.4% 손절 · 모의 전용"
-RISK_NOTICE = (
-    "연구 검증 미통과 · 재사용 과거 평가 국내 2신호/미국 123신호 · 비용 후 손실 · "
-    "잔여 기업행사 데이터 위험 · 장중 선후관계 미검증"
-)
+RISK_NOTICE = "30일봉 특징 · +0.5%/−0.4% 목표로 별도 학습한 CatBoost 3시드 앙상블"
 
 
 def decide_position(*, current_price, quantity, sellable_quantity, average_price=None, prediction=None):

@@ -25,7 +25,7 @@ import test_mark1_paper_execution as paper_tests
 MARK1 = "mark1-prototype-demo-trigger"
 MARK11 = "mark1-1-prototype-demo-trigger"
 FAMILIES = {
-    MARK1: ("mark1-prototype", "mark1 prototype"),
+    MARK1: ("mark1-prototype", "mark1.0 prototype"),
     MARK11: ("mark1-1-prototype", "mark1.1 prototype"),
 }
 

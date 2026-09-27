@@ -24,11 +24,12 @@ class TriggerKind(str, Enum):
     SMA_GE = "sma_ge"
     SMA_LE = "sma_le"
     EXTERNAL = "external"
+    TIME_EXIT = "time_exit"
 
 
 TRIGGER_LABELS = {TriggerKind.PRICE_GE: "현재가 ≥ 지정 가격", TriggerKind.PRICE_LE: "현재가 ≤ 지정 가격",
                   TriggerKind.SMA_GE: "현재가 ≥ N일 이동평균", TriggerKind.SMA_LE: "현재가 ≤ N일 이동평균",
-                  TriggerKind.EXTERNAL: "외부 매매 신호"}
+                  TriggerKind.EXTERNAL: "외부 매매 신호", TriggerKind.TIME_EXIT: "모델 보유기간 만료 매도"}
 STATUS_LABELS = {"ready": "대기", "paused": "비활성", "submitting": "전송 여부 확인 필요",
                  "accepted": "접수 · 체결 대기", "unknown": "접수 여부 확인 필요", "rejected": "거절",
                  "filled": "체결 확인", "cancelled": "취소 확인", "not_sent": "전송 전 중지", "reviewed": "수동 확인 완료",
@@ -130,6 +131,8 @@ class TriggerRule:
     def description(self) -> str:
         if self.kind is TriggerKind.EXTERNAL:
             return "외부 매매 신호 · 유효기간 내 1회"
+        if self.kind is TriggerKind.TIME_EXIT:
+            return "모델별 보유기간 만료 · 현재가와 무관한 매도 후보"
         value = str(self.threshold) if self.kind in {TriggerKind.PRICE_GE, TriggerKind.PRICE_LE} else f"{self.period}일"
         return f"{TRIGGER_LABELS[self.kind]} ({value})"
 
@@ -341,6 +344,32 @@ class WatchStore:
         finally:
             db.close()
 
+    def load_ui_preferences(self) -> dict:
+        """Read account-scoped desktop choices, never runtime order state."""
+        with self.connection() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", ("desktop_ui_preferences_v1",)).fetchone()
+        if row is None:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except (TypeError, ValueError):
+            return {}
+        return value if (isinstance(value, dict) and type(value.get("version")) is int
+                         and value["version"] in (1, 2, 3)) else {}
+
+    def save_ui_preferences(self, preferences: dict) -> None:
+        """Replace only the UI settings row in this store's transaction."""
+        if (not isinstance(preferences, dict) or type(preferences.get("version")) is not int
+                or preferences["version"] not in (1, 2, 3)):
+            raise ValueError("지원하지 않는 화면 설정 형식입니다.")
+        data = json.dumps(preferences, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        if len(data) > 65536:
+            raise ValueError("화면 설정이 너무 큽니다.")
+        with self.connection() as db:
+            db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       ("desktop_ui_preferences_v1", data))
+
     def items(self) -> tuple[WatchItem, ...]:
         with self.connection() as db:
             return tuple(WatchItem(Instrument(Market(r["market"]), r["symbol"], r["exchange"]), r["name"], r["days"])
@@ -411,17 +440,22 @@ class WatchStore:
             self._insert_event(db, "SYSTEM", f"시장별 {ranking_label} 상위 {len(items)}종목 추가/갱신 · 기존 관심종목 유지",
                                category="system", at=datetime.fromisoformat(now))
 
-    def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30, *, separate_holdings=False):
+    def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30, *,
+                       separate_holdings=False, preserve_watch_ids=()):
         pairs = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r) for r in rankings]
         if len(pairs) != 100 or len({i.id for i, _ in pairs}) != 100 or any(r.market is not market for _, r in pairs):
             raise ValueError("해당 시장의 서로 다른 100종목이 필요합니다.")
+        frozen = frozenset(preserve_watch_ids)
+        if any(not isinstance(key, str) or not key.startswith(market.value + ":") for key in frozen):
+            raise ValueError("보존할 장전 종목 ID의 시장/형식이 올바르지 않습니다.")
         incoming = {i.id for i, _ in pairs}
         now = utc_now().isoformat()
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             removable = []
             for row in db.execute("SELECT w.* FROM watchlist w JOIN managed_watchlist m ON m.watch_id=w.id WHERE w.active=1 AND w.market=?", (market.value,)):
-                if row["id"] in incoming or (row["symbol"] in protected_symbols and not separate_holdings):
+                if (row["id"] in incoming or row["id"] in frozen
+                        or (row["symbol"] in protected_symbols and not separate_holdings)):
                     continue
                 if db.execute("SELECT 1 FROM attempts WHERE watch_id=? AND status IN ('submitting','unknown','accepted')", (row["id"],)).fetchone():
                     continue
@@ -682,7 +716,9 @@ class WatchStore:
             db.execute("INSERT OR IGNORE INTO watchlist VALUES(?,?,?,?,?,?,0)",
                        (item.id, item.instrument.market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
             db.execute("INSERT INTO rules VALUES(?,?,?,?,?,?,?,?,?)", (rule.id, item.id, rule.kind.value, rule.side.value,
-                       rule.quantity, str(rule.max_notional), str(rule.threshold), rule.period, rule.status))
+                       rule.quantity, str(rule.max_notional),
+                       str(rule.threshold) if rule.threshold is not None else None,
+                       rule.period, rule.status))
 
     def size_ready_rule(self, rule: TriggerRule, quantity: int):
         """Capture the computed actual quantity before durable claim; no sent intent changes."""
@@ -1100,10 +1136,16 @@ class WatchStore:
         if not rule or filled_quantity + remaining_quantity > rule[0]:
             raise ValueError("체결/잔여 수량이 저장된 원주문 수량과 다릅니다.")
         old = db.execute("SELECT * FROM order_execution_snapshots WHERE rule_id=?", (rule_id,)).fetchone()
+        observed_text = observed_at.isoformat()
         if old:
             old_quantity = Decimal(old["filled_quantity"])
             if filled_quantity < old_quantity:
                 raise ValueError("기존에 확인한 체결 수량보다 적은 과거 응답으로 덮어쓰지 않습니다.")
+            if filled_quantity == old_quantity:
+                # A repeated broker snapshot is not a new fill. Preserve the
+                # original observation so a model's holding period cannot be
+                # postponed indefinitely by every reconciliation poll.
+                observed_text = old["observed_at"]
             if filled_quantity == old_quantity and fill_price is None and old["fill_price"] is not None:
                 # Same cumulative quantity with an omitted price does not erase
                 # already-confirmed evidence. More fills need a new known price.
@@ -1113,7 +1155,7 @@ class WatchStore:
                            remaining_quantity=excluded.remaining_quantity,fill_price=excluded.fill_price,
                            observed_at=excluded.observed_at""",
                    (rule_id, str(filled_quantity), str(remaining_quantity),
-                    str(fill_price) if fill_price is not None else None, observed_at.isoformat()))
+                    str(fill_price) if fill_price is not None else None, observed_text))
 
     def record_fill_recovery(self, rule_id: str, *, status: str, message: str, checked_at: datetime,
                              source_api="", price_basis="", order_date="", order_time="", fill_time="",

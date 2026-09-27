@@ -98,6 +98,15 @@ class StrategyLotTests(unittest.TestCase):
         self.assertEqual(first["buy_order_number"], "ORDER1")
         self.assertEqual((first["mode"], first["storage_scope"]), ("demo", "demo"))
 
+    def test_mark14_lot_has_no_invented_intraday_price_barriers(self):
+        self.buy("mark1-4-prototype", average="100")
+        inventory = self.store.prototype_inventory(self.item.id, D(1), D(1))
+        self.assertTrue(inventory["reconciled"])
+        lot, = inventory["lots"]
+        self.assertEqual(lot["strategy_id"], "mark1-4-prototype")
+        self.assertIsNone(lot["take_profit_price"])
+        self.assertIsNone(lot["stop_loss_price"])
+
     def test_same_strategy_holding_blocks_another_buy_but_other_strategy_allowed(self):
         self.buy()
         same = self.rule(OLD)

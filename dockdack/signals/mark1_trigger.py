@@ -24,12 +24,9 @@ from dockdack.signal_bridge import atomic_json
 
 
 SOURCE_ID = "mark1-prototype-demo-trigger"
-TITLE = "mark1 prototype"
+TITLE = "mark1.0 prototype"
 STRATEGY_NOTICE = "매수 확률 > 50% · 평균매수가 +1% 익절 / -0.9% 손절 · 모의 전용"
-RISK_NOTICE = (
-    "연구 검증 미통과 · 미국 과거 검증 매수 신호 0건 · "
-    "주식분할 가격단위 데이터 문제 확인 · 장중 선후관계 미검증"
-)
+RISK_NOTICE = "30일봉 특징 · CatBoost 3시드 앙상블 · 추정 확률은 실제 적중률과 다름"
 
 
 def _price_text(value):

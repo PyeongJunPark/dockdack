@@ -17,7 +17,6 @@ from dockdack.persistence.account_migration import CONFIRM_LEGACY_DEMO, migrate_
 from dockdack.persistence.retention import archive_monitor_events, read_monitor_archive
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
 from test_autotrade import FakeTradingService, NOW
-from test_lstm30_close import CloseService, held
 from test_performance import order
 
 
@@ -123,26 +122,11 @@ class OptimizationIntegrationTests(unittest.TestCase):
             engine.poll()
         self.assertEqual(counts, [0, 10, 20, 25])
 
-    def test_normal_engine_close_sells_all_unwatched_holdings_over_regular_cap_once(self):
-        from dockdack.market_schedule import session_on
-        session = session_on(Market.DOMESTIC, NOW.date())
-        now = session.closed - timedelta(minutes=5)
-        service = CloseService()
-        service.positions_by_market[Market.DOMESTIC] = (held(Market.DOMESTIC, "000660", quantity=1200),)
-        engine = AutoTrader(service, self.store, clock=lambda: now)
-        engine.enable_holdings_exits = True
-        engine.configure_close_liquidation()
-        engine.maintenance_checkpoint()
-        self.assertFalse(service.submitted)
-        engine.enable_orders("DEMO_AUTOTRADE")
-        engine.maintenance_checkpoint()
-        engine.maintenance_checkpoint()
-        self.assertEqual(len(service.submitted), 1)
-        self.assertEqual(service.submitted[0].quantity, 1200)
-        self.assertEqual(service.submitted[0].symbol, "000660")
-        self.assertTrue(engine.close_liquidator.buy_blocked(Market.DOMESTIC, now))
-        with self.assertRaises(ValueError):
-            engine.configure_close_liquidation(enabled=False)
+    def test_account_wide_close_has_no_engine_entry_point(self):
+        engine = AutoTrader(FakeTradingService(), self.store, clock=lambda: NOW)
+        self.assertFalse(hasattr(engine, "configure_close_liquidation"))
+        self.assertFalse(hasattr(engine, "close_liquidator"))
+        self.assertFalse(hasattr(engine, "maintenance_checkpoint"))
 
     def test_bulk_close_performance_partial_fill_uses_declared_lot_offsets(self):
         sale = order(3, "sell", 5, "120", rule_id="close-test", status="accepted",

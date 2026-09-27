@@ -12,10 +12,11 @@ from examples import run_desktop_gui as launcher
 
 class Mark11DesktopLauncherTests(unittest.TestCase):
     def test_external_cli_never_implicitly_adds_legacy_lstm(self):
-        from dockdack.v00_app import desktop_model_choices
+        from dockdack.v00_app import PROTOTYPE_NOTICES, desktop_model_choices
         self.assertEqual(desktop_model_choices(None, False, ['mark1-prototype']), ('none', ['mark1-prototype']))
         self.assertEqual(desktop_model_choices('lstm30', False, ['mark1-prototype']), ('lstm30', ['mark1-prototype']))
-        self.assertEqual(desktop_model_choices(None, False, []), ('none', ['mark1-prototype', 'mark1-1-prototype']))
+        # All available models default selected, but selection never arms orders.
+        self.assertEqual(desktop_model_choices(None, False, []), ('none', list(PROTOTYPE_NOTICES)))
 
     def test_explicit_mark11_paths_pass_through_unchanged(self):
         args = ['--trigger', 'mark1-2-prototype', '--mark12-bundle=neural-model', '--mark11-bundle=half-model',
@@ -23,9 +24,12 @@ class Mark11DesktopLauncherTests(unittest.TestCase):
         self.assertEqual(launcher.desktop_arguments(args), args)
 
     def test_check_loads_all_models_for_both_markets_without_starting_gui(self):
+        from dockdack.signals.preopen_series import PREOPEN_MODELS
         with patch('dockdack.mark1_prototype_inference.PrototypePredictor') as old, \
                 patch('dockdack.mark1_1_prototype_inference.Mark11PrototypePredictor') as new, \
                 patch('dockdack.signals.mark1_2_trigger.Mark12PrototypePredictor') as neural, \
+                patch('dockdack.mark1_4_inference.Mark14Predictor') as mark14, \
+                patch('dockdack.signals.preopen_series.load_preopen_predictor') as preopen, \
                 patch('dockdack.v00_app.main', side_effect=AssertionError('Do not start the GUI')), \
                 patch('requests.sessions.Session.request', side_effect=AssertionError('No network')), \
                 redirect_stdout(io.StringIO()) as output:
@@ -36,8 +40,12 @@ class Mark11DesktopLauncherTests(unittest.TestCase):
                          [(launcher.ROOT / 'models/mark1_1_prototype', market) for market in ('domestic', 'us')])
         self.assertEqual([call.args for call in neural.call_args_list],
                          [(launcher.ROOT / 'models/mark1_2_prototype', market) for market in ('domestic', 'us')])
-        self.assertIn('mark1.1 prototype', output.getvalue())
-        self.assertIn('mark1.2 prototype', output.getvalue())
+        self.assertEqual([call.args for call in mark14.call_args_list],
+                         [(launcher.ROOT / 'models/mark1_4', market) for market in ('domestic', 'us')])
+        self.assertEqual([call.args for call in preopen.call_args_list],
+                         [(model_id, launcher.ROOT / spec.bundle_directory, market)
+                          for market in ('domestic', 'us') for model_id, spec in PREOPEN_MODELS.items()])
+        self.assertIn('mark1.0-mark1.12', output.getvalue())
         self.assertIn('no monitoring, orders or network', output.getvalue())
 
     def test_help_names_all_choices_and_separate_bundle_arguments(self):

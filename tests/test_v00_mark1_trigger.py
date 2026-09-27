@@ -104,8 +104,9 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.window.builtin_lstm.isVisible())
         self.assertEqual(self.window.external_source.text(), 'external-model')
         self.assertIn('−0.9%', self.window.model_notice.text())
-        self.assertIn('연구 검증 미통과', self.window.model_notice.text())
-        self.assertIn('0건', self.window.model_notice.text())
+        self.assertIn('mark1.0 prototype', self.window.model_notice.text())
+        self.assertIn('CatBoost 3개 시드', self.window.model_notice.text())
+        self.assertNotIn('연구 검증 미통과', self.window.model_notice.text())
         self.assertEqual(self.store.items()[0].days, 31)
         self.assertEqual(limits, (self.window.external_quantity.value(), self.window.external_krw.value(),
                                 self.window.external_usd.value(), self.window.buy_percent.value()))
@@ -210,14 +211,15 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
 
-    def test_normal_confirmation_exposes_mark1_warning_without_enabling_orders(self):
+    def test_normal_confirmation_exposes_mark1_method_without_enabling_orders(self):
         from PySide6.QtWidgets import QMessageBox
         self.select(MARK1_TRIGGER)
         self.assertIn('50% 초과', self.window.builtin_confirmation_notice)
-        self.assertIn('연구 검증 미통과', self.window.builtin_confirmation_notice)
+        self.assertIn('CatBoost 3개 시드', self.window.builtin_confirmation_notice)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as confirm:
             self.assertFalse(self.window.confirm_automation())
-        self.assertIn('연구 검증 미통과', confirm.call_args.args[2])
+        self.assertIn('CatBoost 3개 시드', confirm.call_args.args[2])
+        self.assertNotIn('연구 검증 미통과', confirm.call_args.args[2])
         self.assertIn('−0.9%', confirm.call_args.args[2])
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
@@ -245,10 +247,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertIn('+0.5%', self.window.model_notice.text())
         self.assertIn('−0.4%', self.window.model_notice.text())
         self.assertIn('50% 초과', self.window.model_notice.text())
-        self.assertIn('123건', self.window.model_notice.text())
-        self.assertIn('비용 반영 손실', self.window.model_notice.text())
-        self.assertIn('장중 진입 성과 미검증', self.window.model_notice.text())
-        self.assertNotIn('신호 0건', self.window.model_notice.text())
+        self.assertIn('CatBoost 3개 시드', self.window.model_notice.text())
+        self.assertNotIn('검증 미통과', self.window.model_notice.text())
         self.assertEqual(self.store.items()[0].days, 31)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.monitoring)
@@ -305,7 +305,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertIn('mark1.1 prototype', notice)
         self.assertIn('+0.5%', notice)
         self.assertIn('−0.4%', notice)
-        self.assertIn('연구 검증 미통과', notice)
+        self.assertIn('CatBoost 3개 시드', notice)
+        self.assertNotIn('연구 검증 미통과', notice)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
         self.assertFalse(self.service.submitted)
@@ -376,12 +377,15 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(set(self.window._prototype_feeds), {MARK11_TRIGGER})
         self.assertEqual(set(self.window.engine.source_validators), {'mark1-1-prototype-demo-trigger'})
 
-    def test_third_research_model_is_opt_in_and_all_three_remain_separate_and_off(self):
+    def test_explicit_mark12_selection_and_all_models_remain_separate_and_orders_off(self):
+        # This fixture explicitly starts without external models; ordinary
+        # desktop startup defaults every model selected without arming orders.
         self.assertFalse(self.window.external_model_checks[MARK12_TRIGGER].isChecked())
         self.select(MARK12_TRIGGER)
         self.assertEqual(self.window._chosen_external_models(), (MARK12_TRIGGER,))
-        self.assertIn('연구 검증 미통과', self.window.model_notice.text())
-        self.assertIn('−6.90%', self.window.model_notice.text())
+        self.assertIn('CNN', self.window.model_notice.text())
+        self.assertIn('LSTM', self.window.model_notice.text())
+        self.assertNotIn('연구 검증 미통과', self.window.model_notice.text())
         self.window.configure_external()
         feed = self.window._prototype_feeds[MARK12_TRIGGER]
         self.assertEqual(feed.source_id, 'mark1-2-prototype-demo-trigger')
@@ -392,9 +396,10 @@ class V00Mark1TriggerTests(unittest.TestCase):
             check.setChecked(True)
         self.window.configure_external()
         feeds = list(self.window._prototype_feeds.values())
-        self.assertEqual(len(feeds), 3)
-        self.assertEqual(len({feed.source_id for feed in feeds}), 3)
-        self.assertEqual(len({feed.path for feed in feeds}), 3)
+        count = len(self.window.external_model_checks)
+        self.assertEqual(len(feeds), count)
+        self.assertEqual(len({feed.source_id for feed in feeds}), count)
+        self.assertEqual(len({feed.path for feed in feeds}), count)
         self.assertEqual(set(self.window.engine.source_validators), {feed.source_id for feed in feeds})
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])

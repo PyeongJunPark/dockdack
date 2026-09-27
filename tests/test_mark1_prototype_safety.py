@@ -13,7 +13,6 @@ from unittest.mock import Mock, patch
 from dockdack.autotrade import AutoTrader
 from dockdack.exceptions import OrderNotSent
 from dockdack.gui_service import Instrument
-from dockdack.lstm30_close import CLOSE_CONFIRMATION, CloseLiquidator
 from dockdack.mark1_prototype_adapter import PrototypeAutoTrader, PrototypeReadOnlyService
 from dockdack.models import Market, TradingMode
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
@@ -184,16 +183,6 @@ class PrototypeEngineSafetyTests(unittest.TestCase):
         self.assertEqual(self.store.attempts(), ())
         self.assertEqual(self.store.rules()[0].status, 'ready')
 
-    def test_even_explicit_close_all_cannot_bypass_engine_or_service(self):
-        closing = CloseLiquidator(self.engine.service, self.store, self.engine,
-                                  enabled=True, confirmation=CLOSE_CONFIRMATION, clock=lambda: NOW)
-        self.engine._armed.set()
-        with self.assertRaises(OrderNotSent):
-            closing._send_one({'market': 'domestic', 'symbol': '005930', 'exchange': 'KRX'})
-        self.assertEqual(self.service.submitted, [])
-        self.assertEqual(self.service.quote_calls, 0)
-        self.assertEqual(self.store.attempts(), ())
-
     def test_prototype_disarm_stop_does_not_affect_separate_existing_engine(self):
         other_store = WatchStore(Path(self.temp.name) / 'existing.sqlite3', mode=TradingMode.DEMO)
         other_store.save_item(self.item)
@@ -306,7 +295,7 @@ class PrototypeWorkerDrainSafetyTests(unittest.TestCase):
     def test_all_four_worker_types_retain_lock_until_completion(self):
         from dockdack.lstm30_gui import LSTM30WatchlistDialog
         workers = ('worker', '_inspection_worker', '_activity_worker', '_schedule_probe')
-        timers = ('timer', 'schedule_timer', 'environment_timer', 'order_status_timer', 'health_timer', 'close_timer')
+        timers = ('timer', 'schedule_timer', 'environment_timer', 'order_status_timer', 'health_timer')
         for active in workers:
             state = SimpleNamespace(**{name: None for name in workers},
                 **{name: Mock() for name in timers}, stop_monitoring=Mock(),

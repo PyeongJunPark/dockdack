@@ -100,11 +100,15 @@ class RankingScheduler:
     a new process reclaim a crashed worker without repeating a completed slot.
     """
 
-    def __init__(self, service, store, *, clock, stopped=lambda: False, days=31):
+    def __init__(self, service, store, *, clock, stopped=lambda: False, days=31,
+                 preserve_watch_ids=None):
         if type(days) is not int or days < 1:
             raise ValueError("순위 종목 차트 일수는 양의 정수여야 합니다.")
         self.service, self.store, self.clock, self.stopped = service, store, clock, stopped
         self.days = days
+        # Only a caller with a prepared, DEMO-only pre-open plan supplies this.
+        # Ordinary rank rotation and manually pinned interests are unchanged.
+        self.preserve_watch_ids = preserve_watch_ids
         self.started = None
         self.errors = {}
         with self.store.connection() as db:
@@ -186,7 +190,11 @@ class RankingScheduler:
         rankings = self.service.top_volume(market, 100)
         protected = self.service.protected_symbols(market)
         guard()
-        self.store.replace_ranked(market, rankings, protected, days=self.days, separate_holdings=True)
+        frozen = (self.preserve_watch_ids(market, self.clock())
+                  if self.preserve_watch_ids is not None else ())
+        guard()
+        self.store.replace_ranked(market, rankings, protected, days=self.days,
+                                  separate_holdings=True, preserve_watch_ids=frozen)
 
     def due(self):
         if self.started is None or self.stopped():

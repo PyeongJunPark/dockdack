@@ -53,7 +53,8 @@ class ModelPerformanceGuiTests(unittest.TestCase):
     def test_starts_with_unknown_collection_not_zero_percent(self):
         self.assertIn("DEMO", self.panel.mode_badge.text())
         for market in ("domestic", "us"):
-            self.assertEqual(self.panel.tables[market].rowCount(), 3)
+            self.assertEqual(self.panel.tables[market].rowCount(), 4)
+            self.assertEqual(self.panel.tables[market].item(0, 0).text(), "mark1.0 prototype")
             self.assertEqual(self.panel.tables[market].item(0, 1).text(), "—")
             self.assertEqual(self.panel.tables[market].item(0, 5).text(), "집계 대기")
         self.store.order_history.assert_not_called()
@@ -64,6 +65,7 @@ class ModelPerformanceGuiTests(unittest.TestCase):
         for market, currency in (("domestic", "KRW"), ("us", "USD")):
             view = self.panel.tables[market]
             self.assertEqual(view.rowCount(), 3)
+            self.assertEqual(view.item(0, 0).text(), "mark1.0 prototype")
             self.assertEqual(view.item(0, 1).text(), "+1.00%")
             self.assertIn(currency, view.item(0, 2).text())
             self.assertIn(currency, view.item(0, 3).text())

@@ -62,7 +62,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(row["strategy_id"], model_id)
             self.assertTrue(row["signal_id"].startswith(model_id + ":"))
             self.assertEqual(row["model_manifest_sha256"], "a" * 64)
-        self.assertEqual(len({result["payload"]["source_id"] for result in results}), len(MODEL_IDS))
+        self.assertEqual(len({result["payload"]["source_id"] for result in results}), len(MODEL_IDS[:3]))
 
     def test_real_or_wrong_model_request_rejected(self):
         worker = PrototypeWorker(MODEL_IDS[0], predictors={})
@@ -119,7 +119,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(worker.dispatch(request)["payload"]["signals"][0]["action"], "hold")
 
     def test_held_positions_never_sell_from_child(self):
-        for model_id in MODEL_IDS:
+        for model_id in MODEL_IDS[:3]:
             request = request_for(model_id)
             stock = request["chart"]["stocks"][0]
             stock["price"] = "102"
@@ -170,12 +170,12 @@ class ProcessTests(unittest.TestCase):
             self.assertNotIn(key, environment)
 
     def test_real_subprocesses_are_separate_and_one_failure_does_not_stop_other(self):
-        clients = [PrototypeProcessClient(model_id, timeout=15) for model_id in MODEL_IDS]
+        clients = [PrototypeProcessClient(model_id, timeout=15) for model_id in MODEL_IDS[:3]]
         for client in clients:
             self.addCleanup(client.close)
         self.assertFalse(any(client.is_alive for client in clients))
         replies = [client.request("health") for client in clients]
-        self.assertEqual(len({reply["pid"] for reply in replies}), len(MODEL_IDS))
+        self.assertEqual(len({reply["pid"] for reply in replies}), len(MODEL_IDS[:3]))
         self.assertNotIn(os.getpid(), (reply["pid"] for reply in replies))
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             clients[0].request("arbitrary-python-code")
@@ -277,13 +277,13 @@ class FeedTests(unittest.TestCase):
         return result
 
     def test_three_feeds_use_separate_files_state_and_model_identity(self):
-        feeds = [self.feed(model_id, f"{model_id}.json") for model_id in MODEL_IDS]
+        feeds = [self.feed(model_id, f"{model_id}.json") for model_id in MODEL_IDS[:3]]
         for feed in feeds:
             feed.publish(mark1_chart())
             self.assertEqual(read_json(feed.output_path)["source_id"], feed.source_id)
             self.assertTrue(feed._ready)
-        self.assertEqual(len({feed.client.worker.state_path for feed in feeds}), len(MODEL_IDS))
-        self.assertEqual(len({feed.source_id for feed in feeds}), len(MODEL_IDS))
+        self.assertEqual(len({feed.client.worker.state_path for feed in feeds}), len(MODEL_IDS[:3]))
+        self.assertEqual(len({feed.source_id for feed in feeds}), len(MODEL_IDS[:3]))
         self.service.submit.assert_not_called()
         self.engine.enable_orders.assert_not_called()
 

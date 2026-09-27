@@ -14,7 +14,7 @@ from PySide6.QtCore import QPointF, QRectF, QThreadPool, QTimer, Qt, QUrl, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QFrame, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QBoxLayout, QFrame, QHeaderView, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from dockdack.autotrade import AutoTrader, _transient_poll_failure
@@ -138,7 +138,9 @@ class WatchlistDialog(QDialog):
         self._pending_environment = None
         self._confirming_environment = False
         self.engine = AutoTrader(service, self.store)
-        self.scheduler = RankingScheduler(service, self.store, clock=lambda: self.engine.clock(), stopped=lambda: self.engine._stop.is_set())
+        self.scheduler = RankingScheduler(service, self.store, clock=lambda: self.engine.clock(),
+                                          stopped=lambda: self.engine._stop.is_set(),
+                                          preserve_watch_ids=getattr(self, '_frozen_open_watch_ids', None))
         self.test_producer = None
         self.worker = None
         self.monitoring = False
@@ -356,7 +358,8 @@ class WatchlistDialog(QDialog):
             portfolio = PortfolioCache(service)
             recovery = FillRecovery(service, store, clock=lambda: self.engine.clock())
             scheduler = RankingScheduler(service, store, clock=lambda: self.engine.clock(),
-                                         stopped=lambda: self.engine._stop.is_set())
+                                         stopped=lambda: self.engine._stop.is_set(),
+                                         preserve_watch_ids=getattr(self, '_frozen_open_watch_ids', None))
         except Exception as exc:
             self._cancel_pending_environment()
             self.message.setText(f'환경 전환 준비 실패 · 기존 환경과 자동주문 OFF 유지: {exc}')
@@ -437,11 +440,56 @@ class WatchlistDialog(QDialog):
         self._update_health()
         self.message.setText(f'{environment_name(selected_mode(service))} 선택됨 · 감시/자동주문 OFF · API 설정 확인 후 새로 조회하세요.')
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'watch_splitter'):
+            self._adjust_watch_layout()
+
+    def _adjust_watch_layout(self, *_):
+        """Give the watch rows priority when the window cannot fit two panes."""
+        compact = self.width() < 1200 or self.height() < 700
+        short = self.height() < 640
+        if getattr(self, '_watch_short', None) != short:
+            self._watch_short = short
+            side = 28 if short else 48
+            self.brand_mark.setFixedSize(side, side)
+            self.brand_mark.setPixmap(app_icon().pixmap(side - 2, side - 2))
+            self.title_layout.setSpacing(2 if short else 6)
+            self.control_grid.setContentsMargins(12, 4 if short else 10, 12, 4 if short else 10)
+            self.control_grid.setSpacing(4 if short else 8)
+        if getattr(self, '_watch_compact', None) != compact:
+            self._watch_compact = compact
+            margins = (12, 4, 12, 4) if compact else (20, 14, 20, 12)
+            self.layout().setContentsMargins(*margins)
+            self.layout().setSpacing(4 if compact else 8)
+            self.watch_splitter.setOrientation(Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal)
+            self.watch_splitter.setMinimumHeight(0 if compact else 290)
+            self.watch_market_tabs.setMinimumHeight(225 if compact else 0)
+            self.watch_chart_box.setMinimumHeight(190 if compact else 290)
+            self.watch_chart_box.setMaximumWidth(16777215 if compact else 520)
+            self.chart.setMinimumHeight(150 if compact else 220)
+            self.watch_splitter.setSizes([250, 210] if compact else [760, 520])
+        if hasattr(self, 'data_controls'):
+            stack_controls = compact
+            if getattr(self, '_watch_stack_controls', None) != stack_controls:
+                self._watch_stack_controls = stack_controls
+                self.data_controls.setDirection(QBoxLayout.Direction.TopToBottom if stack_controls
+                                                else QBoxLayout.Direction.LeftToRight)
+        # The other pages keep their former horizontal scrolling; the narrow
+        # watch page itself fits the viewport and scrolls vertically instead.
+        if hasattr(self, 'workspace_tabs'):
+            watch_active = self.workspace_tabs.currentWidget() is self.watch_page
+            self.workspace_tabs.setSizePolicy(
+                QSizePolicy.Policy.Ignored if watch_active else QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Minimum if compact and watch_active else QSizePolicy.Policy.Preferred)
+        if hasattr(self, 'portfolio_panel'):
+            self.portfolio_panel.set_compact(self.height() < 760)
+
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 14, 20, 12)
         layout.setSpacing(8)
-        title = QHBoxLayout()
+        title = self.title_layout = QHBoxLayout()
         self.brand_mark = QLabel()
         self.brand_mark.setPixmap(app_icon().pixmap(46, 46))
         self.brand_mark.setFixedSize(48, 48)
@@ -486,7 +534,7 @@ class WatchlistDialog(QDialog):
 
         control_card = QFrame()
         control_card.setObjectName("controlBar")
-        controls = QGridLayout(control_card)
+        controls = self.control_grid = QGridLayout(control_card)
         controls.setContentsMargins(12, 10, 12, 10)
         controls.setSpacing(8)
         self.interval = QSpinBox()
@@ -524,10 +572,6 @@ class WatchlistDialog(QDialog):
         flow = QHBoxLayout()
         self.connection_summary = label("신호 연결 미설정", "muted", wrap=True)
         flow.addWidget(self.connection_summary, 1)
-        self.connection_shortcut = QPushButton("신호 연결 확인  →")
-        self.connection_shortcut.setObjectName("linkButton")
-        self.connection_shortcut.setAutoDefault(False)
-        flow.addWidget(self.connection_shortcut)
         layout.addLayout(flow)
         self.sweep_progress = ActivityProgressBar()
         self.sweep_progress.setObjectName("sweepProgress")
@@ -566,7 +610,7 @@ class WatchlistDialog(QDialog):
         self.workspace_scroll.setWidget(self.workspace_tabs)
         layout.addWidget(self.workspace_scroll, 1)
 
-        data_controls = QHBoxLayout()
+        data_controls = self.data_controls = QHBoxLayout()
         self.ranking_button = QPushButton("현재 선정 가능한 시장 · 거래량 TOP100")
         self.ranking_button.setToolTip("시장별 일반 기업 보통주만 선정 · ETF/ETN/펀드/우선주/리츠/스팩 및 분류 불명 종목 제외")
         self.export_button = QPushButton("차트 JSON 내보내기")
@@ -578,7 +622,6 @@ class WatchlistDialog(QDialog):
         self.hourly_ranking.setChecked(True)
         self.hourly_ranking.setToolTip("감시 중 개장 10분 전·개장 시각·현지 매 정시에 재선정 · 미국 09:30 개장 포함 · 휴장/조기폐장 반영 · 실시간 순위 추종이나 주문 활성화와는 별도")
         data_controls.addWidget(self.hourly_ranking)
-        watch_layout.addLayout(data_controls)
 
         self.edit_panel = QWidget()
         edit = QHBoxLayout(self.edit_panel)
@@ -600,9 +643,9 @@ class WatchlistDialog(QDialog):
         self.remove_button.clicked.connect(self.remove_item)
         for widget in (self.symbol_input, self.exchange_input, self.days_input, self.add_button, self.days_button, self.remove_button):
             edit.addWidget(widget)
-        watch_layout.addWidget(self.edit_panel)
-
-        split = QSplitter(Qt.Orientation.Horizontal)
+        split = self.watch_splitter = QSplitter(Qt.Orientation.Horizontal)
+        split.setObjectName('watchChartSplitter')
+        split.setChildrenCollapsible(False)
         split.setMinimumHeight(290)
         watch_box = QWidget()
         watch_box_layout = QVBoxLayout(watch_box)
@@ -625,7 +668,7 @@ class WatchlistDialog(QDialog):
         self.watch_market_hint = label("", "muted", wrap=True)
         watch_box_layout.addWidget(self.watch_market_hint)
         split.addWidget(watch_box)
-        chart_box = QWidget()
+        chart_box = self.watch_chart_box = QWidget()
         chart_layout = QVBoxLayout(chart_box)
         chart_layout.setContentsMargins(4, 0, 0, 0)
         self.chart_title = label("관심종목을 선택하세요", "section")
@@ -640,6 +683,11 @@ class WatchlistDialog(QDialog):
         split.addWidget(chart_box)
         split.setSizes([490, 650])
         watch_layout.addWidget(split, 1)
+        # Keep the watch rows at the top of the scrollable page. On a short
+        # desktop, controls above the split used to consume the entire viewport.
+        watch_layout.addLayout(data_controls)
+        watch_layout.addWidget(self.edit_panel)
+        self._adjust_watch_layout()
 
         self.rule_panel = QWidget()
         form = QGridLayout(self.rule_panel)
@@ -718,9 +766,9 @@ class WatchlistDialog(QDialog):
         self.signal_connection_panel.request_inspect.connect(self.inspect_signals)
         self.signal_connection_panel.request_folder.connect(self.open_connection_folder)
         self.signal_connection_panel.request_source.connect(self.select_connection_source)
-        self.connection_shortcut.clicked.connect(lambda: self.workspace_tabs.setCurrentWidget(self.signal_connection_page))
         self.workspace_tabs.addTab(self.signal_connection_page, "신호 연결")
         self.workspace_tabs.addTab(self.tabs, "고급·수동 규칙")
+        self.workspace_tabs.currentChanged.connect(self._adjust_watch_layout)
         self.message = label("감시는 꺼져 있습니다. 조건·수량·금액 상한을 직접 설정한 후 시작하세요.", "muted", wrap=True)
         layout.addWidget(self.message)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
@@ -1002,7 +1050,7 @@ class WatchlistDialog(QDialog):
         grid.addWidget(self.chart_path, 2, 1, 1, 2)
         grid.addWidget(self.read_signals_button, 2, 3, 1, 2)
         grid.addWidget(label("외부 모드: 종목별 즉시 전송 + 순회 후 전체 파일 갱신 · 과거 일봉 DB 재사용 / 당일 봉 증분 조회\n"
-                             "금액 0은 해당 시장 차단 · 파일 읽기는 주문 활성화가 아님 · 입력/상한은 이번 창에서만 유지", "muted", wrap=True), 3, 0, 1, 5)
+                             "금액 0은 해당 시장 차단 · 파일 읽기는 주문 활성화가 아님 · 입력/상한은 현재 계정의 화면 설정으로 저장", "muted", wrap=True), 3, 0, 1, 5)
         grid.setColumnStretch(1, 1)
         self.percent_sizing = QCheckBox('평가자산 비중으로 매수')
         self.percent_sizing.setChecked(True)
@@ -1574,9 +1622,6 @@ class WatchlistDialog(QDialog):
         if len(data) == 2 and data[0] == 'market_status':
             self._apply_market_status(data[1])
             return
-        if len(data) == 2 and data[0] == 'close_liquidation':
-            self._close_liquidation_payload = data[1]
-            return
         if len(data) == 2 and data[0] == 'watch_progress':
             value = data[1]
             name = '한국' if value['market'] is Market.DOMESTIC else '미국'
@@ -1736,9 +1781,6 @@ class WatchlistDialog(QDialog):
         self._update_health()
 
     def refresh_all(self):
-        if self.worker is not None and self._worker_kind == 'close-maintenance':
-            self._poll_after_maintenance = True
-            return
         if not self.worker:
             self.engine.resume_monitoring()
             outbox = Path(self.chart_path.text())
@@ -1772,21 +1814,23 @@ class WatchlistDialog(QDialog):
                 self.store.event("SYSTEM", "감시 순회 시작 · 시세/차트 조회와 신호 전달 (주문 상태는 별도)", category="system")
                 def checkpoint():
                     market_status()
-                    self.engine.maintenance_checkpoint()
-                    if (self.engine.close_liquidator is not None
-                            and monotonic() - getattr(self, '_last_close_status_at', 0) >= 15):
-                        self._last_close_status_at = monotonic()
-                        progress(('close_liquidation', self.engine.close_liquidation_status()))
                     self._refresh_executions_worker(progress)
                     self._refresh_portfolio_worker(progress)
                     self._order_notifications_worker(progress)
                     changed = self.scheduler.tick() if self.monitoring else False
                     if changed:
                         progress(("watchlist", None))
+                    preopen = getattr(self, '_preopen_checkpoint', None)
+                    if self.monitoring and preopen is not None:
+                        # A daily-bar model can freeze its selection before
+                        # regular-session poll skips all quote/chart callbacks.
+                        # This never arms an order or bypasses the engine.
+                        preopen(progress)
                     return changed
                 self._refresh_executions_worker(progress)
                 self._refresh_portfolio_worker(progress)
                 self._order_notifications_worker(progress)
+                self.engine.poll_priority_watch_ids = getattr(self, '_poll_priority_watch_ids', None)
                 results = self.engine.poll(progress=progress, checkpoint=checkpoint, on_snapshot=publish)
                 self._order_notifications_worker(progress)
                 if self.engine.external_only and not self.engine._stop.is_set():
@@ -1896,7 +1940,6 @@ class WatchlistDialog(QDialog):
                 f"미국: {self.random_us.currentText() if self.random_demo.isChecked() else '현재가 지정가만 허용'}\n"
                 + ("내장 모의 신호기: 매수 확률 10% · 평균 매입가 대비 +1% 익절 / -0.8% 손절\n" if self.random_demo.isChecked() else "") +
                 (str(getattr(self, "builtin_confirmation_notice", "")) + "\n" if getattr(self, "builtin_confirmation_notice", "") else "") +
-                (str(getattr(self, "closing_confirmation_notice", "")) + "\n" if getattr(self, "closing_confirmation_notice", "") else "") +
                 "0인 시장은 차단됩니다. 수동 트리거는 실행하지 않습니다.\n"
                 "보유분은 전략별 목표를 별도로 점검하며, 목표 없는 기존 보유분만 기본 평균매입가 +1% / −0.8%를 적용합니다.\n"
                 "미국은 증권사 거절이 확정된 경우만 조건을 재확인해 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
@@ -1915,7 +1958,6 @@ class WatchlistDialog(QDialog):
             f"조건이 맞으면 개별 주문 확인창 없이 {name} 지정가 주문이 전송됩니다.\n"
             "미국 증권사 거절이 확정된 경우 조건 재확인 후 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
             "거래일 캘린더의 정규장만 허용하며 캘린더 오류 시 차단합니다.\n\n" + summary
-            + ('\n' + str(getattr(self, 'closing_confirmation_notice', '')))
             + ("\n실제 자금으로 주문되며 원금 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 

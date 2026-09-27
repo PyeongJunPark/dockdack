@@ -151,17 +151,16 @@ class GuiOptimizationTests(unittest.TestCase):
         self.assertEqual(self.window.tabs.indexOf(self.window.external_panel), -1)
         self.assertGreaterEqual(self.window.signal_connection_page.indexOf(self.window.external_panel), 0)
 
-    def test_close_policy_starts_off_and_confirmation_names_all_holding_exception(self):
-        self.assertTrue(self.window.close_all_at_market_end.isChecked())
-        self.assertTrue(self.window.engine.close_liquidator.enabled)
+    def test_normal_gui_has_no_account_wide_close_policy_or_confirmation(self):
+        self.assertFalse(hasattr(self.window, 'close_all_at_market_end'))
+        self.assertFalse(hasattr(self.window, 'close_maintenance_timer'))
+        self.assertFalse(hasattr(self.window.engine, "close_liquidator"))
         self.assertFalse(self.window.engine.orders_enabled)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as question:
             self.assertFalse(self.window.confirm_automation())
         message = question.call_args.args[2]
-        for text in ('5분', '모든 국내·미국', '수량·금액 한도', '체결', '이전 보유분'):
-            self.assertIn(text, message)
-        self.window.close_all_at_market_end.setChecked(False)
-        self.assertFalse(self.window.engine.close_liquidator.enabled)
+        self.assertNotIn('모든 국내·미국', message)
+        self.assertNotIn('계좌 전체', message)
         self.assertFalse(self.window.engine.orders_enabled)
 
     def test_default_feeds_share_one_account_cache(self):

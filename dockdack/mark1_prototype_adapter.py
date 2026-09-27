@@ -125,7 +125,6 @@ class PrototypeAutoTrader(AutoTrader):
         self.safety_reason = "PROTOTYPE_OBSERVATION_ONLY"
         self.external_stop = Event()
         self.universe = None
-        self.close_liquidator = None
         self.predictors = {}
         self.enable_holdings_exits = False
         self.equity_buy_percent = None

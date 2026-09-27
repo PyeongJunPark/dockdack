@@ -67,6 +67,10 @@ def evaluate_trigger(rule: TriggerRule, snapshot: MarketSnapshot, now: datetime)
         raise ValueError("시세를 조회한 지 15초가 지났습니다. 새 시세가 필요합니다.")
     if rule.kind is TriggerKind.EXTERNAL:
         return Signal(True, price, "외부 신호 · 주문 전 수신 기록/만료/정책 재확인")
+    if rule.kind is TriggerKind.TIME_EXIT:
+        # A trusted strategy-lot allocation and its exchange-session deadline
+        # are checked independently before claim and again just before send.
+        return Signal(True, price, "모델별 보유기간 만료 · 가격 조건 없음")
     if rule.kind in {TriggerKind.PRICE_GE, TriggerKind.PRICE_LE}:
         reference = positive(rule.threshold, "트리거 가격")
     else:
@@ -117,51 +121,10 @@ class AutoTrader:
         self.us_retry_attempts = 3
         self.us_failure_cooldown_seconds = 300
         self.holding_caps = {Market.DOMESTIC: Decimal("10000000"), Market.US: Decimal("10000")}
-        self.close_liquidator = None
-        self._close_checked_at = None
         # Cooperative scheduling: one broker worker, exits before entry scans
         # and between bounded chunks. One in-flight I/O still cannot be preempted.
         self.holdings_recheck_seconds = 30
         self.holdings_recheck_items = 10
-
-    def configure_close_liquidation(self, *, enabled=True, minutes_before_close=5):
-        """Configure the user's explicit all-DEMO-holdings close policy, never arm."""
-        if self.orders_enabled:
-            raise ValueError("마감 청산 설정 변경 전에 자동주문을 OFF 하세요.")
-        if type(enabled) is not bool or type(minutes_before_close) is not int or minutes_before_close != 5:
-            raise ValueError("일반 앱 마감 청산은 정규장 종료 5분 전 설정만 지원합니다.")
-        if self._mode is not TradingMode.DEMO:
-            if enabled:
-                raise ValueError("계좌 전체 마감 청산은 모의투자 전용입니다.")
-            self.close_liquidator = None
-        else:
-            from dockdack.lstm30_close import CloseLiquidator, CLOSE_CONFIRMATION
-            self.close_liquidator = CloseLiquidator(
-                self.service, self.store, self, enabled=enabled, minutes_before_close=5,
-                confirmation=CLOSE_CONFIRMATION if enabled else None, clock=self.clock)
-        self._close_checked_at = None
-
-    def close_liquidation_status(self):
-        if self.close_liquidator is not None:
-            return self.close_liquidator.status()
-        return {"enabled": False, "scope": "all_demo_holdings", "minutes_before_close": 5,
-                "orders_enabled": self.orders_enabled, "unsold": [], "errors": [], "attempts": []}
-
-    def maintenance_checkpoint(self):
-        """Call only on the serialized broker worker, including long GUI sweeps."""
-        close = self.close_liquidator
-        if close is None or not close.enabled or not self.orders_enabled or self._stop.is_set():
-            return
-        now = self.clock()
-        if self._close_checked_at is not None and 0 <= (now - self._close_checked_at).total_seconds() < 5:
-            return
-        self._close_checked_at = now
-        close.tick()
-
-    def _check_close_buy(self, item, rule):
-        if (rule.side is OrderSide.BUY and self.close_liquidator is not None
-                and self.close_liquidator.buy_blocked(item.instrument.market)):
-            raise OrderNotSent("정규장 종료 5분 전부터 신규 매수를 차단하고 모의계좌 전체 보유분을 청산합니다.")
 
     def configure_external_sources(self, sources):
         """Replace extra readers while OFF; the legacy primary reader remains supported."""
@@ -289,6 +252,17 @@ class AutoTrader:
             if (checked is None or not 0 <= (self.clock() - checked[1]).total_seconds() <= 15
                     or reserved > checked[0]):
                 raise ValueError("모델 전체 매도 예약이 확인된 계좌 매도가능수량을 초과하거나 검증이 만료되었습니다.")
+            if rule.kind is TriggerKind.TIME_EXIT:
+                self._validate_timed_lot_due(item, rule, lot)
+
+    def _validate_timed_lot_due(self, item, rule, lot):
+        """Recheck a model's immutable time policy; a UI toggle cannot change it."""
+        if (rule.kind is not TriggerKind.TIME_EXIT or rule.side is not OrderSide.SELL
+                or not self._holding_rule(rule) or lot is None):
+            raise ValueError("기간 만료 매도 출처를 확인할 수 없습니다.")
+        from dockdack.trading.model_exit_schedule import timed_exit_due
+        if not timed_exit_due(lot, item.instrument.market, self.clock()):
+            raise ValueError("모델별 거래일 보유기간 또는 매도 시각이 아직 충족되지 않았습니다.")
 
     def _lot_cash_account(self, account, rule):
         """Conservatively reserve unfilled prototype buys across this market.
@@ -562,7 +536,6 @@ class AutoTrader:
                               f"접수 후 체결 확인 대기 · 주문번호 {attempt['order_number']} · 이번 조회에 주문 행 없음(체결 실패 확정 아님), 중복 재주문하지 않음", category="order")
 
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
-        self._check_close_buy(item, rule)
         self._lot_sellable_checks.pop(rule.id, None)
         self._historical_sell_checks.pop(rule.id, None)
         inst = item.instrument
@@ -630,6 +603,8 @@ class AutoTrader:
             self._validate_snapshot(item, fresh)
         if not evaluate_trigger(rule, fresh, self.clock()).matched:
             raise ValueError("주문 직전 재조회한 가격에서는 트리거 조건이 성립하지 않습니다.")
+        if rule.kind is TriggerKind.TIME_EXIT:
+            self._validate_timed_lot_due(item, rule, lot_inventory)
         if (self.enable_holdings_exits and rule.side is OrderSide.SELL and
                 (rule.kind is TriggerKind.EXTERNAL or self._holding_rule(rule))):
             held = [position for position in positions if position.quantity > 0]
@@ -637,9 +612,11 @@ class AutoTrader:
             average = sum((position.average_price * position.quantity for position in held), Decimal(0)) / total
             targets = lot_inventory if lot_inventory is not None else self.holding_exit_targets(replace(held[0], average_price=average))
             upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
-            if upper is None or lower is None:
+            if rule.kind is TriggerKind.TIME_EXIT:
+                pass  # Verified model-owned holding deadline; price is irrelevant.
+            elif upper is None or lower is None:
                 raise ValueError("매도 직전 보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
-            if not (fresh.quote.price >= upper or fresh.quote.price <= lower):
+            elif not (fresh.quote.price >= upper or fresh.quote.price <= lower):
                 raise ValueError("매도 직전 현재가가 보유종목 상방·하방 목표가격에 도달하지 않았습니다.")
         metadata = validate_external_rule(self.store, rule, self._policy_for(rule), self.clock()) if rule.kind is TriggerKind.EXTERNAL else {}
         kind = metadata.get("order_type", "limit")
@@ -647,10 +624,20 @@ class AutoTrader:
         if rule.side is OrderSide.BUY and self.equity_buy_percent is not None:
             policy = self._policy_for(rule) if rule.kind is TriggerKind.EXTERNAL else None
             cap = min(rule.max_notional, policy.cap(inst.market)) if policy else rule.max_notional
-            quantity = allocation_quantity(account, price or fresh.quote.price, self.equity_buy_percent, cap,
+            buy_percent = self.equity_buy_percent
+            if rule.kind is TriggerKind.EXTERNAL:
+                record = self.store.external_for_rule(rule.id)
+                if record is not None and record["source_id"] == "mark1-8-prototype-demo-trigger":
+                    if metadata.get("strategy_id") != "mark1-8-prototype" or "target_equity_fraction" not in metadata:
+                        raise ValueError("Mark1.8 동결 투자비중 정보가 없습니다.")
+                    fraction = Decimal(str(metadata["target_equity_fraction"]))
+                    if not fraction.is_finite() or not Decimal(0) < fraction <= Decimal("0.1"):
+                        raise ValueError("Mark1.8 투자비중이 0~10% 범위를 벗어났습니다.")
+                    buy_percent = min(buy_percent, fraction * 100)
+            quantity = allocation_quantity(account, price or fresh.quote.price, buy_percent, cap,
                                            policy.max_quantity if policy else 999_999_999)
             rule = self.store.size_ready_rule(rule, quantity)
-            self.store.event(item.id, f"비중 매수 수량 산정 · 예수금+보유평가액의 {self.equity_buy_percent}% · {quantity}주 · 주문상한/가용액 1% 여유 적용", category="order")
+            self.store.event(item.id, f"비중 매수 수량 산정 · 예수금+보유평가액의 {buy_percent}% · {quantity}주 · 주문상한/가용액 1% 여유 적용", category="order")
         if "take_profit_price" in metadata and not Decimal(metadata["stop_loss_price"]) < fresh.quote.price < Decimal(metadata["take_profit_price"]):
             raise ValueError("매수 직전 현재가가 하방·상방 목표가격 사이에 있지 않습니다.")
         notional = fresh.quote.price * rule.quantity
@@ -707,7 +694,6 @@ class AutoTrader:
         return attempted
 
     def _execute_once(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot) -> bool:
-        self._check_close_buy(item, rule)
         self._validate_rule(rule)
         request, fresh, rule = self._preflight(item, rule, snapshot)
         # A newer HOLD/SELL decision may have arrived during account/quote requests.
@@ -799,7 +785,6 @@ class AutoTrader:
     def _before_order_send(self, item, rule, fresh):
         """Final paced-send guard: local file/DB checks only, never broker I/O."""
         try:
-            self._check_close_buy(item, rule)
             if self._stop.is_set() or not self.orders_enabled:
                 raise ValueError("사용자 중지/OFF 요청으로 전송하지 않음")
             self._ensure_environment(item.instrument, orders=True)
@@ -855,6 +840,10 @@ class AutoTrader:
     def _validate_rule(self, rule):
         self._ensure_environment()
         self._reject_demo_rule(rule)
+        if (rule.kind is TriggerKind.TIME_EXIT
+                and (not self._holding_rule(rule)
+                     or self.store.prototype_sell_allocation(rule.id) is None)):
+            raise ValueError("기간 만료 매도는 확인된 모델별 보유분에만 허용합니다.")
         if rule.kind is TriggerKind.EXTERNAL:
             if not self.external_only:
                 raise ValueError("외부 신호 모드가 꺼져 있습니다.")
@@ -899,16 +888,19 @@ class AutoTrader:
         """Sell each confirmed lot against its own basis, not the broker average."""
         if not targets.get("reconciled"):
             raise ValueError("모델별 보유 대조 실패: " + " · ".join(targets.get("issues", ())))
+        from dockdack.trading.model_exit_schedule import timed_exit_due
         for lot in targets["lots"]:
             if self._stop.is_set():
                 return
             upper, lower = lot["take_profit_price"], lot["stop_loss_price"]
-            if upper is None or lower is None:
-                continue
             price = snapshot.quote.price
-            hit = TriggerKind.PRICE_GE if price >= upper else TriggerKind.PRICE_LE if price <= lower else None
+            timed = timed_exit_due(lot, position.market, self.clock())
+            hit = (TriggerKind.TIME_EXIT if timed else
+                   TriggerKind.PRICE_GE if upper is not None and price >= upper else
+                   TriggerKind.PRICE_LE if lower is not None and price <= lower else None)
             self._message("holding-lot:" + lot["lot_id"], item.id,
-                          f"{lot['model_title']} 분리 매도 감시 · 체결평균 {lot['average_price']} · 현재가 {price} · 상방 {upper} / 하방 {lower} · {'매도 조건 충족' if hit else '대기'}",
+                          f"{lot['model_title']} 분리 매도 감시 · 체결평균 {lot['average_price']} · 현재가 {price} · 상방 {upper} / 하방 {lower} · "
+                          f"{'기간 만료 · 가격 무관 매도' if timed else '매도 조건 충족' if hit else '대기'}",
                           category="monitor")
             key = (item.id, "lot", lot["lot_id"])
             if not hit or not self.orders_enabled or item.id in sent or key in sent:
@@ -920,8 +912,9 @@ class AutoTrader:
             quantity = min(int(lot["sellable_quantity"]), int(position.sellable_quantity), int(cap / unit))
             if quantity < 1:
                 continue
-            rule = TriggerRule("holding-exit-" + uuid4().hex, item.id, hit, OrderSide.SELL, quantity, cap,
-                               upper if hit is TriggerKind.PRICE_GE else lower)
+            rule = TriggerRule(("holding-exit-time-" if timed else "holding-exit-") + uuid4().hex,
+                               item.id, hit, OrderSide.SELL, quantity, cap,
+                               None if timed else upper if hit is TriggerKind.PRICE_GE else lower)
             self.store.save_holding_rule(item, rule)
             try:
                 self.store.reserve_prototype_sell(rule.id, lot["lot_id"], quantity)
@@ -959,9 +952,6 @@ class AutoTrader:
             if not regular_session(market, self.clock()):
                 report("market_closed", market)
                 continue
-            if self.close_liquidator is not None and market in self.close_liquidator.closing_markets():
-                report("closing", market)
-                continue  # The account-wide close worker owns this exit window.
             report("account", market)
             account_error = None
             try:
@@ -1051,14 +1041,21 @@ class AutoTrader:
         results = {}
         try:
             def priority_checkpoint():
-                self.maintenance_checkpoint()
                 return checkpoint() if checkpoint is not None else False
 
-            items = {item.id: item for item in self.store.items()
-                     if not self.session_only_poll or regular_session(item.instrument.market, self.clock())}
+            priority_ids = frozenset()
+            def ordered_items():
+                selected = (item for item in self.store.items()
+                            if not self.session_only_poll or regular_session(item.instrument.market, self.clock()))
+                return sorted(selected, key=lambda item: item.id not in priority_ids)
+            # The checkpoint can finish a pre-open plan or rotate TOP100. Read
+            # its opening priority only after that change, not one poll earlier.
+            priority_checkpoint()
+            priority = getattr(self, 'poll_priority_watch_ids', None)
+            priority_ids = frozenset(priority()) if priority is not None else frozenset()
+            items = {item.id: item for item in ordered_items()}
             deferred_sells = []
             remaining, seen_external, sent = list(items), set(), set()
-            priority_checkpoint()
             if self.enable_holdings_exits and not self._stop.is_set():
                 self._holdings_pass(sent, checkpoint=priority_checkpoint, progress=progress)
             last_exit_check, entry_checks = self.clock(), 0
@@ -1066,9 +1063,14 @@ class AutoTrader:
             for _ in range(len(items) + 500):
                 if self._stop.is_set():
                     break
-                if priority_checkpoint():
-                    items = {item.id: item for item in self.store.items()
-                             if not self.session_only_poll or regular_session(item.instrument.market, self.clock())}
+                changed = priority_checkpoint()
+                priority = getattr(self, 'poll_priority_watch_ids', None)
+                updated_priority_ids = frozenset(priority()) if priority is not None else frozenset()
+                if updated_priority_ids != priority_ids:
+                    priority_ids = updated_priority_ids
+                    remaining.sort(key=lambda key: key not in priority_ids)
+                if changed:
+                    items = {item.id: item for item in ordered_items()}
                     results = {key: value for key, value in results.items() if key in items}
                     remaining = [key for key in items if key not in results]
                 if (self.enable_holdings_exits and
@@ -1077,12 +1079,23 @@ class AutoTrader:
                     self._holdings_pass(sent, checkpoint=priority_checkpoint, progress=progress)
                     last_exit_check, entry_checks = self.clock(), 0
                 self._read_external()
-                priority = next((r for r in self.store.rules(statuses=("ready",)) if self.external_only
-                                 and r.kind is TriggerKind.EXTERNAL and r.status == "ready"
-                                 and r.id not in seen_external and r.watch_id in items
-                                 and (not self.enable_holdings_exits or r.watch_id in remaining)), None)
-                if priority:
-                    item = items[priority.watch_id]
+                ready_external = tuple(r for r in self.store.rules(statuses=("ready",)) if self.external_only
+                                       and r.kind is TriggerKind.EXTERNAL and r.status == "ready"
+                                       and r.id not in seen_external and r.watch_id in items
+                                       and (not self.enable_holdings_exits or r.watch_id in remaining))
+                selected_rule = next((rule for rule in ready_external
+                                      if rule.watch_id in priority_ids), None)
+                if selected_rule is not None:
+                    item = items[selected_rule.watch_id]
+                    if item.id in remaining:
+                        remaining.remove(item.id)
+                elif remaining and remaining[0] in priority_ids:
+                    # A newly frozen model has no ready file until its first
+                    # fresh chart export. Do not let unrelated old ready rules
+                    # consume that short opening window first.
+                    item = items[remaining.pop(0)]
+                elif ready_external:
+                    item = items[ready_external[0].watch_id]
                     if item.id in remaining:
                         remaining.remove(item.id)
                 elif remaining:

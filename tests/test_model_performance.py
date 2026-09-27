@@ -53,10 +53,10 @@ def row(report, model=OLD, market="domestic", currency="KRW"):
 
 
 class ModelPerformanceTests(unittest.TestCase):
-    def test_empty_six_rows_are_no_sales_not_zero_return(self):
+    def test_empty_eight_rows_are_no_sales_not_zero_return(self):
         report = result([], TradingMode.DEMO)
         self.assertEqual(report["mode"], "demo")
-        self.assertEqual(len(report["rows"]), 6)
+        self.assertEqual(len(report["rows"]), 8)
         for item in report["rows"]:
             self.assertEqual(item["status"], "no_sales")
             self.assertIsNone(item["return_pct"])
