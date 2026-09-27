@@ -53,9 +53,9 @@ uv lock --check
 uv build --wheel
 ```
 
-`scripts/check.py`는 소스 구문 검사와 전체 unittest를 실행하고, 발견된 테스트가 0개면 실패한다. GUI는 가상 화면에서 검증한다. 실제 API 키나 주문 권한은 필요하지 않다. 연구/CUDA 설치는 [연구 도구](research-tools.md)와 `requirements-ml-cuda.txt`를 따르며, 운영 GUI에 GPU 학습 환경을 강제하지 않는다.
+`scripts/check.py`는 소스 구문 검사와 전체 unittest를 실행하고, 발견된 테스트가 0개면 실패한다. GitHub Windows 단일 작업의 30분 제한에 걸린 뒤 CI는 `--shard 1/4`부터 `4/4`까지 독립 작업으로 실행하도록 바꿨다. 각 분할도 0건이면 실패하며 네 작업이 모두 통과해야 회귀가 완료된다. GUI는 가상 화면에서 검증한다. 실제 API 키나 주문 권한은 필요하지 않다. 연구/CUDA 설치는 [연구 도구](research-tools.md)와 `requirements-ml-cuda.txt`를 따르며, 운영 GUI에 GPU 학습 환경을 강제하지 않는다.
 
-별도 환경에 wheel과 gui/prototype 의존성을 설치한 뒤 **저장소 밖 작업 폴더**에서 해당 Python으로 `scripts/smoke_installed.py --model-root <모델폴더>`를 실행하면 체크아웃 import 여부, 일반 GUI import, 선택 가능한 13개 모델의 독립 worker와 국내/미국 저장 추론을 확인한다. 이 검사는 계좌·주문을 만들지 않는다. 원격 CI 파일은 `.github/workflows/check.yml`이며, CI는 빠른 `scripts/smoke_wheel_imports.py`로 빌드된 wheel의 5개 명령 진입점·GUI 자산·소스 밖 import만 확인한다. 이 빠른 검사는 별도 설치 환경이나 모델 추론의 대체가 아니다. 로컬 통과와 원격 실행 완료는 구분한다.
+별도 환경에 wheel과 gui/prototype 의존성을 설치한 뒤 **저장소 밖 작업 폴더**에서 해당 Python으로 `scripts/smoke_installed.py --model-root <모델폴더>`를 실행하면 체크아웃 import 여부, 일반 GUI import, 선택 가능한 13개 모델의 독립 worker와 국내/미국 저장 추론을 확인한다. 이 검사는 계좌·주문을 만들지 않는다. 원격 CI의 별도 wheel 작업은 빠른 `scripts/smoke_wheel_imports.py`로 빌드 산출물의 5개 명령 진입점·GUI 자산·소스 밖 import만 확인한다. 이 빠른 검사는 별도 설치 환경이나 모델 추론의 대체가 아니다. 로컬 통과와 원격 실행 완료는 구분한다.
 
 ## 구조와 호환
 

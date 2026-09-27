@@ -16,10 +16,11 @@
 | A-10 | 두 FX 화면에서 양수·유한 환율과 올바른 고시일을 검증한 뒤만 새 표시/캐시를 갱신한다. 잘못된 응답은 USD 원본 또는 이전 유효 캐시를 유지한다. | NaN/0/잘못된 날짜에 UI 예외와 `NaN KRW` 없음; 정상 고시일은 표시. |
 | A-11 | 수동 주문을 위한 순위 밖 신규 종목은 주문/체결 이력 행으로 저장하되 TOP100 활성 관심·일반 감시에 자동 편입하지 않는다. 순위가 아직 없는 초기 상태는 기존 수동 주문 가능성을 보존한다. | 완전 순위 100개 뒤 수동 claim에도 활성 100개, 주문 이력/미확정 안전 확인 유지. |
 | A-12 | CI에서 빌드 wheel을 체크아웃 밖으로 복사하고 명령 진입점·GUI 자산·wheel 모듈 import를 계좌/모델 실행 없이 검사한다. | 로컬 격리 경로 smoke 성공, CI 구성 반영. 실제 별도 가상환경 설치·13모델 추론은 여전히 별도 수동 검사다. |
+| A-13 | CI의 회귀를 `scripts/check.py --shard 1/4`~`4/4`의 독립 작업으로 나누고, wheel 빌드·빠른 import 검사도 별도 작업으로 실행한다. 각 분할은 0건 테스트를 거부하며 전부 성공해야 전체 CI가 성공이다. | 이전 단일 작업의 30분 시간 초과가 재발하지 않는지 새 원격 실행에서 확인한다. 원격 성공 전까지 완료로 기록하지 않는다. |
 
 ## 적용 위치
 
-이번 표의 A-01~A-12는 모두 작업본에 반영했다. 핵심 변경과 그 회귀 근거는 다음과 같다.
+이번 표의 A-01~A-13은 작업본에 반영했다. A-13의 새 원격 CI 실행 결과는 아직 확인하지 않았다. 핵심 변경과 그 회귀 근거는 다음과 같다.
 
 - A-01: `.gitattributes`, 두 `models/mark1_{series,horizons}/manifest.json`, `tests/test_sealed_checkout_bytes.py`. 모델 가중치·봉인 문자열은 변경하지 않았다.
 - A-02·A-03·A-06: `dockdack/ui/v00_app.py`, `tests/test_v00_gui.py`, `tests/test_v00_runtime_performance.py`. 상태 숫자는 선택 개수로 표시하고, 숨긴 모델 표의 초당 전체 갱신과 작업 중 재선택을 막았다.
@@ -29,12 +30,13 @@
 - A-08: `tests/test_startup_portfolio.py`에서 생성한 서비스의 창을 정확히 선택한다.
 - A-09: 현재 사용 안내 문서 10곳과 `README.md`, `docs/FEATURES.md`, `docs/gui.md`의 0.2 화면 위치·기본값을 맞췄다. 연구 당시의 결과와 역사적 인벤토리는 수정하지 않았다.
 - A-12: `.github/workflows/check.yml`과 `scripts/smoke_wheel_imports.py`에 계좌·모델·주문을 실행하지 않는 wheel 검사 경로를 추가했다.
+- A-13: 단일 job의 30분 제한에 막힌 원격 실행을 [실패 기록](https://github.com/PyeongJunPark/dockdack/actions/runs/36336777175)으로 보존하고, 회귀 분할과 wheel job을 분리한다.
 
 ## 검증·공개 기록
 
 최종 작업본에서 `scripts/check.py --shard 1/4`부터 `4/4`까지 **559/640/576/467개, 총 2,242개 실행·실패 0·건너뜀 7**이었다. 이 명령은 `dockdack/`, `tests/`, `scripts/`, `examples/`의 Python을 AST 파싱하고 0건 테스트를 거부한다. 분담 검증의 GUI 114개, TOP100 54개, 수동 주문 관련 90개, 봉인 checkout 1개는 전체 회귀와 중복될 수 있으므로 합산하지 않는다. 모델 의존성 `python -m examples.run_desktop_gui --check`는 13개 모델을 오프라인으로 확인했으며 계좌·주문·네트워크를 사용하지 않았다.
 
-`uv lock --check --offline`, `uv build --wheel --offline`, 체크아웃 밖 wheel archive의 5개 명령·2개 GUI 자산 import smoke, `git diff --check`가 통과했다. 두 CRLF manifest의 현재 작업본 SHA-256은 기존 `manifest.sha256`과 일치하고, `git diff --cached --ignore-space-at-eol --exit-code`로 내용 변경 없음도 확인했다. 이 wheel 검사는 실제 별도 가상환경 설치나 외부 모델 추론을 대체하지 않는다. 원격 CI는 아직 실행 결과를 확인하지 않았다.
+`uv lock --check --offline`, `uv build --wheel --offline`, 체크아웃 밖 wheel archive의 5개 명령·2개 GUI 자산 import smoke, `git diff --check`가 통과했다. 두 CRLF manifest의 현재 작업본 SHA-256은 기존 `manifest.sha256`과 일치하고, `git diff --cached --ignore-space-at-eol --exit-code`로 내용 변경 없음도 확인했다. 이 wheel 검사는 실제 별도 가상환경 설치나 외부 모델 추론을 대체하지 않는다. 첫 원격 CI는 회귀 단계의 30분 시간 초과로 실패했으며 테스트 단정 실패나 wheel 검사 결과는 아니다.
 
 남은 표시 한계: 오래 실행한 앱의 보유·일지 환율 캐시는 자동 TTL 재조회하지 않으므로 사용자가 고시일 툴팁을 확인하고 `환율 갱신`을 눌러야 한다. 외부 모델의 작은 점검 배지는 상태 첫 줄의 알려진 실패 문구를 기준으로 하므로 모든 실패 유형을 검출한다고 보장하지 않는다.
 
