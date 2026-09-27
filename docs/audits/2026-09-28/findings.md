@@ -33,7 +33,7 @@
 | A-14 | P2/검증 | Windows 임시 디렉터리가 `RUNNER~1` 짧은 경로를 돌려주지만 제품의 안전한 경로 해석은 `runneradmin` 긴 경로를 돌려줘, 같은 파일을 서로 다른 것으로 단정하는 테스트가 다수 실패했다. 제품 경로 격리 실패로 오인할 위험이 있다. | [원격 실행 #36338869523](https://github.com/PyeongJunPark/dockdack/actions/runs/36338869523)의 네 회귀 분할에서 실제 파일은 같은데 문자열·`Path` 동등성만 다른 실패를 확인했다. |
 | A-15 | P2/검증 | 두 테스트 모듈은 `pytest` 함수로 작성됐으나 공식 검사기는 `unittest` 탐색만 사용했다. 로컬에 우연히 `pytest`가 있으면 테스트가 0건 수집된 채 통과하고, 깨끗한 CI에는 없어 import 오류가 났다. | 같은 원격 실행의 2/4 분할에서 `ModuleNotFoundError: pytest` 2건. 로컬 공식 검사에서 두 모듈의 함수형 테스트가 미수집되는 것도 확인. |
 | A-16 | P2/검증 | Mark1.2 export 회귀 테스트가 무시 대상 `outputs/` 폴더가 체크아웃에 이미 있다고 가정했다. 개발 PC에서는 통과해도 깨끗한 CI에서는 임시 디렉터리 생성이 실패한다. | 같은 원격 실행의 2/4 분할에서 `FileNotFoundError: ...\\outputs\\mark12-export-test-*`. |
-| A-17 | P3/유지보수 | CI의 `actions/checkout@v4`·`astral-sh/setup-uv@v6`가 Node 20 대상이라 현재 GitHub runner에서 강제로 Node 24로 실행되며 폐기 경고가 난다. 동작은 했지만 향후 호환성 경고를 방치할 이유가 없다. | [두 번째 원격 실행](https://github.com/PyeongJunPark/dockdack/actions/runs/36338869523)의 모든 작업 경고. 각 action의 Node 24 대상 버전을 upstream 메타데이터로 확인. |
+| A-17 | P3/유지보수 | CI의 `actions/checkout@v4`·`astral-sh/setup-uv@v6`가 Node 20 대상이라 현재 GitHub runner에서 강제로 Node 24로 실행되며 폐기 경고가 난다. 동작은 했지만 향후 호환성 경고를 방치할 이유가 없다. | [두 번째 원격 실행](https://github.com/PyeongJunPark/dockdack/actions/runs/36338869523)의 모든 작업 경고. [checkout v5](https://github.com/actions/checkout/blob/v5/action.yml)와 [setup-uv v7.5.0](https://github.com/astral-sh/setup-uv/blob/v7.5.0/action.yml)의 Node 24 메타데이터 확인. |
 
 ## 삭제·구조 판단과 미검증 영역
 
