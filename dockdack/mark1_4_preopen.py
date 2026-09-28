@@ -109,6 +109,8 @@ def collect_preopen_candidates(store, engine, market: Market | str, *, clock=Non
     regular open. The ranking and every 30-bar window must belong to that same
     trading session. A slow fetch, cancellation, or single invalid name voids
     the entire batch; the caller must not reuse an earlier result for the day.
+    Composite visible watchlists use their separate volume snapshot, including
+    model candidates outside the active 100-name buy watchlist.
     """
     opened = fetched_at = None
     try:
@@ -134,8 +136,17 @@ def collect_preopen_candidates(store, engine, market: Market | str, *, clock=Non
         slot = opened - timedelta(minutes=10)
         expected = _expected_dates(market, trading_day)
 
-        rows = tuple(row for row in store.rankings()
-                     if isinstance(row, Mapping) and row.get("market") == market.value)
+        visible = tuple(row for row in store.rankings()
+                        if isinstance(row, Mapping) and row.get("market") == market.value)
+        composite = (len(visible) == 100
+                     and {row.get("ranking_scheme") for row in visible} == {"composite"})
+        if composite:
+            rows = tuple({**row, "ranking_basis": "volume"}
+                         for row in store.model_volume_rankings(market))
+            if {row.get("fetched_at") for row in rows} != {row.get("fetched_at") for row in visible}:
+                raise _Unavailable("ranking_timestamp_mismatch: visible and model snapshots differ")
+        else:
+            rows = visible
         now = guard()
         if len(rows) != 100:
             raise _Unavailable(f"ranking_count_invalid: expected 100, got {len(rows)}")
@@ -170,9 +181,22 @@ def collect_preopen_candidates(store, engine, market: Market | str, *, clock=Non
         if (any(not isinstance(key, str) or not key for key in watch_ids)
                 or len(set(watch_ids)) != 100):
             raise _Unavailable("ranking_candidates_invalid: 100 distinct watch IDs required")
-        items = {item.id: item for item in store.items()}
-        if any(key not in items or items[key].instrument.market != market for key in watch_ids):
-            raise _Unavailable("ranking_watchlist_mismatch: ranked names must be active in this market")
+        if composite:
+            from dockdack.gui_service import Instrument
+            from dockdack.watchlist import WatchItem
+            try:
+                items = {row["watch_id"]: WatchItem(
+                    Instrument(market, row["symbol"], row["exchange"]), row["name"], 31)
+                    for row in rows}
+            except (KeyError, ValueError, TypeError) as exc:
+                raise _Unavailable("ranking_candidates_invalid: model share-volume identity") from exc
+            if any(items[key].id != key or items[key].instrument.currency != row["currency"]
+                   for key, row in zip(watch_ids, rows)):
+                raise _Unavailable("ranking_candidates_invalid: model share-volume identity")
+        else:
+            items = {item.id: item for item in store.items()}
+            if any(key not in items or items[key].instrument.market != market for key in watch_ids):
+                raise _Unavailable("ranking_watchlist_mismatch: ranked names must be active in this market")
 
         candidates = []
         for key in watch_ids:

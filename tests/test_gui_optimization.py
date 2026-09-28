@@ -15,7 +15,7 @@ if HAS_QT:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication, QMessageBox
     from dockdack.signal_connection_gui import connection_view
-    from dockdack.v00_app import V00Window, MARK1_TRIGGER, MARK11_TRIGGER, PROTOTYPE_SOURCES
+    from dockdack.v00_app import V00Window, MARK1_TRIGGER, MARK11_TRIGGER, QUOTE_SCORE_MODELS, PROTOTYPE_SOURCES
 from dockdack.watchlist import WatchStore, WatchItem
 from test_autotrade import FakeTradingService
 from test_v00_mark1_trigger import FakeExternalFeed
@@ -172,7 +172,7 @@ class GuiOptimizationTests(unittest.TestCase):
         self.window._external_feed_factory = None
         with patch('dockdack.prototype_external.ExternalPrototypeFeed', side_effect=lambda *a, **kw: FakeExternalFeed(*a, bundle_root=kw['bundle_root'])) as factory:
             self.window.configure_external()
-        self.assertEqual(factory.call_count, 3)
+        self.assertEqual(factory.call_count, len(QUOTE_SCORE_MODELS))
         accounts = [call.kwargs['account_snapshots'] for call in factory.call_args_list]
         self.assertTrue(all(cache is accounts[0] for cache in accounts))
 

@@ -84,6 +84,31 @@ class StrategyLotPortfolioTests(unittest.TestCase):
         self.assertIn('보류', self.panel.table.item(0, 9).text())
         self.assertIn('대조', self.panel.table.item(0, 11).text())
 
+    def test_unreconciled_inventory_keeps_persisted_model_names_without_faking_cost_or_sell(self):
+        lots = tuple({**lot, 'strategy_id': f'mark1-{index}-prototype',
+                      'quantity_remaining': lot['quantity'], 'average_price': None}
+                     for index, lot in enumerate(self.lots, 23))
+        target = {'lots': lots, 'reconciled': False,
+                  'issues': ('model cost unavailable', 'broker quantity unverified')}
+        key = 'domestic:KRX:005930'
+        self.panel.set_exit_targets({key: target})
+        table = self.panel.table
+        self.assertEqual(table.rowCount(), 1)
+        self.assertEqual(table.item(0, 2).text(), '2')  # broker aggregate, not split lots
+        self.assertIn('mark1 prototype', table.item(0, 11).text())
+        self.assertIn('mark1.1 prototype', table.item(0, 11).toolTip())
+        self.assertIn('증권사 보유주식의 모델별 배분 아님', table.item(0, 11).toolTip())
+        self.assertIn('모델 매수분의 원가는 확인되지', table.item(0, 4).toolTip())
+        self.assertIn('보류', table.item(0, 9).text())
+        self.assertIn('보류', table.item(0, 10).text())
+        self.assertEqual(table.item(0, 12).text(), '장부 대조 필요')
+        inst = Instrument(Market.DOMESTIC, '005930', 'KRX')
+        self.panel.apply_holding_quote({'instrument': inst, 'watch_id': key,
+            'quote': Quote(inst.market, inst.symbol, 'test', inst.exchange, D('111'), 'KRW'), 'targets': target})
+        self.assertIn('mark1 prototype', table.item(0, 11).text())
+        self.assertIn('자동매도를 보류', table.item(0, 11).toolTip())
+        self.assertIn('보류', table.item(0, 9).text())
+
     def test_shared_broker_sellable_limit_is_not_displayed_as_independent_quantity(self):
         lots = tuple({**lot, 'broker_sellable_quantity': D(1), 'sellable_is_shared': True} for lot in self.lots)
         self.panel.set_exit_targets({'domestic:KRX:005930': {**self.targets, 'lots': lots}})

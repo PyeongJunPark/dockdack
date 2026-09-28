@@ -29,7 +29,8 @@ def model_bundle(name):
     if name not in {"mark1_prototype", "mark1_1_prototype", "mark1_2_prototype",
                     "mark1_3",
                     "mark1_4", "mark1_series", "mark1_8", "mark1_9", "mark1_10",
-                    "mark1_horizons",
+                    "mark1_horizons", "mark1_intraday", "mark1_intraday_extra",
+                    "mark1_target_horizon_v1",
                     "mark1_0504", "mark1", "lstm30"}:
         raise ValueError("Unknown model bundle")
     return model_root() / name

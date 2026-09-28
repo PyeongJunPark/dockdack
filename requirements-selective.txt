@@ -1,5 +1,5 @@
 # Historical selective/half research environment; not GUI/runtime dependencies.
-# Install alongside requirements-ml.txt in an isolated research environment.
+# Install alongside requirements-ml-cuda.txt in an isolated research environment.
 # Saved CPU-library versions are pinned; choose the supported Torch GPU build
 # separately. Historical GPU training used torch 2.11.0+cu128 on RTX 5080.
 # Version pins/seeds do not promise bit-identical fitting across GPU drivers.

@@ -12,7 +12,7 @@ from dockdack.config import KiwoomConfig
 from dockdack.exceptions import LiveOrderConfirmationRequired, OrderOutcomeUnknown
 from dockdack.http import HttpTransport, KiwoomHTTPClient
 from dockdack.history import DailyHistory, fetch_daily_history
-from dockdack.universe import RankedStock, top_turnover
+from dockdack.universe import RankedStock, top_turnover, top_watchlist
 from dockdack.symbols import normalize_symbol, normalize_us_exchange
 from dockdack.order_prices import current_limit_price, validate_us_order_price
 from dockdack.models import (
@@ -172,6 +172,10 @@ class KiwoomBroker:
         from dockdack.universe import top_volume
         selected = _market(market)
         return top_volume(self._http_for(selected), selected, limit)
+
+    def top_watchlist(self, market: Market | str, limit: int = 100) -> tuple[RankedStock, ...]:
+        selected = _market(market)
+        return top_watchlist(self._http_for(selected), selected, limit)
 
     def common_equities(self, market: Market, candidates):
         from dockdack.equity_policy import common_equities

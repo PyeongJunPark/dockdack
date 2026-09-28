@@ -6,6 +6,7 @@ import importlib.util
 import tempfile
 import time
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,9 @@ if HAS_QT:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
     from dockdack.ui.v00_app import (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER,
-                                    MARK14_TRIGGER, PREOPEN_MODEL_IDS, V00Window)
+                                    MARK14_TRIGGER, ALL_MODEL_IDS, INTRADAY_MODEL_IDS,
+                                    TARGET_HORIZON_MODEL_IDS, PREOPEN_MODEL_IDS,
+                                    PROTOTYPE_SOURCES, WATCH_MODEL_IDS, V00Window)
 
 from dockdack.watchlist import WatchItem, WatchStore
 from test_autotrade import FakeTradingService
@@ -81,6 +84,7 @@ class GuiPreferencesTests(unittest.TestCase):
         first.external_krw.setValue(250_000)
         first.external_usd.setValue(250)
         first.buy_percent.setValue(7.5)
+        first.mark14_panel.model_buy_percents[MARK1_TRIGGER].setValue(4.25)
         first.order_popups.setChecked(False)
         first.additional_sources.add_row(source='second', path=str(self.folder / 'second.json'))
         first.watch_market_tabs.setCurrentIndex(1)
@@ -106,6 +110,9 @@ class GuiPreferencesTests(unittest.TestCase):
         self.assertEqual(second.external_krw.value(), 250_000)
         self.assertEqual(second.external_usd.value(), 250)
         self.assertEqual(second.buy_percent.value(), 7.5)
+        self.assertEqual(second.mark14_panel.model_buy_percents[MARK1_TRIGGER].value(), 4.25)
+        self.assertEqual(second.engine.source_buy_percents['mark1-prototype-demo-trigger'],
+                         Decimal('4.25'))
         self.assertFalse(second.order_popups.isChecked())
         self.assertNotIn('close_all_at_market_end', stored)
         self.assertFalse(hasattr(second.engine, "close_liquidator"))
@@ -129,6 +136,50 @@ class GuiPreferencesTests(unittest.TestCase):
         second = self.make_window()
         second.reload_tables(items=self.store.items())
         self.assertEqual(second.selected_item().days, 64)
+
+    def test_legacy_common_percent_seeds_each_model_once(self):
+        self.store.save_ui_preferences({'version': 3, 'buy_percent': 7.5,
+                                        'external_models': [MARK1_TRIGGER]})
+        window = self.make_window()
+        self.assertEqual(window.buy_percent.value(), 7.5)
+        self.assertTrue(all(field.value() == 7.5
+                            for field in window.mark14_panel.model_buy_percents.values()))
+        self.assertEqual(window.engine.source_buy_percents['mark1-prototype-demo-trigger'],
+                         Decimal('7.5'))
+        self.assertTrue(all(not window.external_model_checks[model].isChecked()
+                            for model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS)))
+        self.assertTrue(all(model in window.mark14_panel.model_buy_percents
+                            for model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS)))
+        for view in window.watch_tables.values():
+            self.assertFalse(view.isColumnHidden(1 + WATCH_MODEL_IDS.index(MARK1_TRIGGER)))
+            self.assertTrue(all(view.isColumnHidden(1 + WATCH_MODEL_IDS.index(model))
+                                for model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS)))
+            self.assertFalse(view.isColumnHidden(view.columnCount() - 2))
+            self.assertFalse(view.isColumnHidden(view.columnCount() - 1))
+        self.assertFalse(window.engine.orders_enabled)
+
+    def test_corrupt_model_percent_falls_back_to_valid_common_value(self):
+        self.store.save_ui_preferences({'version': 4, 'buy_percent': 8,
+                                        'model_buy_percents': {MARK1_TRIGGER: -2,
+                                                               MARK11_TRIGGER: '99',
+                                                               MARK12_TRIGGER: 5.5}})
+        window = self.make_window()
+        self.assertEqual(window.mark14_panel.model_buy_percents[MARK1_TRIGGER].value(), 8)
+        self.assertEqual(window.mark14_panel.model_buy_percents[MARK11_TRIGGER].value(), 8)
+        self.assertEqual(window.mark14_panel.model_buy_percents[MARK12_TRIGGER].value(), 5.5)
+        self.assertFalse(window.engine.orders_enabled)
+
+    def test_every_model_keeps_its_own_percent_after_restart(self):
+        first = self.make_window()
+        for index, model in enumerate(ALL_MODEL_IDS, 1):
+            first.mark14_panel.model_buy_percents[model].setValue(index)
+        first.close()
+        second = self.make_window()
+        self.assertEqual(set(second.mark14_panel.model_buy_percents), set(ALL_MODEL_IDS))
+        for index, model in enumerate(ALL_MODEL_IDS, 1):
+            self.assertEqual(second.mark14_panel.model_buy_percents[model].value(), index)
+            self.assertEqual(second.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], Decimal(index))
+        self.assertFalse(second.engine.orders_enabled)
 
     def test_old_log_tab_selection_opens_logs_inside_advanced_settings(self):
         for selection in ({'workspace_tab_id': 'logs'}, {'workspace_tab': 3}):
@@ -188,7 +239,7 @@ class GuiPreferencesTests(unittest.TestCase):
         first.external_model_checks[disabled_new].setChecked(False)
         first.close()
         stored = self.store.load_ui_preferences()
-        self.assertEqual(stored['version'], 3)
+        self.assertEqual(stored['version'], 4)
         self.assertNotIn(disabled_new, stored['external_models'])
 
         second = self.make_window()

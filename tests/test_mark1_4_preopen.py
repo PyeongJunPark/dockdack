@@ -89,6 +89,24 @@ class PreopenCollectionTests(unittest.TestCase):
         self.assertTrue(all(days == 31 for _, days in self.histories.calls))
         self.assertFalse(hasattr(self.engine, "service"))
 
+    def test_composite_visible_list_uses_independent_volume_100(self):
+        volume = tuple(RankedStock(self.market, f"{index:06d}", "KRX", f"거래량{index}", index,
+                                   Decimal("100"), "KRW", 101 - index, "volume")
+                       for index in range(1, 101))
+        visible = tuple(RankedStock(self.market, f"{index + 1000:06d}", "KRX",
+                                    f"화면{index}", index, Decimal("100"), "KRW",
+                                    ranking_basis=("turnover", "volume", "gainers", "decliners")[(index - 1) // 25])
+                        for index in range(1, 101))
+        with patch("dockdack.persistence.watchlist.utc_now", return_value=self.ranking_at):
+            self.store.replace_ranked(self.market, visible, set(), volume_rankings=volume)
+        self.assertEqual(len(self.store.items()), 100)
+        self.assertNotIn("domestic:KRX:000001", {item.id for item in self.store.items()})
+        self.assertEqual(len(self.store.model_volume_rankings(self.market)), 100)
+        result = self.collect()
+        self.assertTrue(result.ok, result.reason)
+        self.assertEqual(result.candidates[0]["watch_id"], "domestic:KRX:000001")
+        self.assertEqual(self.histories.calls[0], ("domestic:KRX:000001", 31))
+
     def test_stale_or_wrong_basis_ranking_never_fetches_history(self):
         with self.store.connection() as db:
             db.execute("UPDATE turnover_ranks SET fetched_at=?", ((self.opened - timedelta(minutes=11)).isoformat(),))

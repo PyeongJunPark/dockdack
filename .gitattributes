@@ -31,6 +31,15 @@ models/mark1_8/** -text whitespace=cr-at-eol
 models/mark1_9/** -text whitespace=cr-at-eol
 models/mark1_10/** -text whitespace=cr-at-eol
 models/mark1_horizons/** -text whitespace=cr-at-eol
+# MK1.13–MK1.22 seals include raw checkpoint/manifest and feature-source bytes.
+models/mark1_intraday/** -text whitespace=cr-at-eol
+models/mark1_intraday_extra/** -text whitespace=cr-at-eol
+dockdack/mark1_intraday_models.py -text
+dockdack/mark1_intraday_extra_models.py -text
+# MK1.23-MK1.28 bundle seals raw manifest, checkpoint and feature bytes.
+models/mark1_target_horizon_v1/** -text whitespace=cr-at-eol
+dockdack/mark1_target_horizon_models.py -text
+examples/train_mark1_target_horizon_prototypes.py -text
 dockdack/mark1_4_evolution.py -text
 dockdack/mark1_4_followup_models.py -text
 dockdack/mark1_4_sparse.py -text

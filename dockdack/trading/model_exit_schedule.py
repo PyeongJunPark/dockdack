@@ -48,6 +48,16 @@ MODEL_EXIT_SCHEDULES = {
     # session starts, the signal may close the confirmed lot at any price.
     "mark1-11-prototype": ModelExitSchedule(2, "elapsed"),
     "mark1-12-prototype": ModelExitSchedule(4, "elapsed"),
+    # Target/horizon daily-bar experiments: fill session is day one. If the
+    # upper target has not closed the confirmed lot, attempt its exit in the
+    # final five minutes of the Hth exchange session. This is an order window,
+    # not a promise of a close-price fill.
+    "mark1-23-prototype": ModelExitSchedule(9, "preclose"),
+    "mark1-24-prototype": ModelExitSchedule(19, "preclose"),
+    "mark1-25-prototype": ModelExitSchedule(19, "preclose"),
+    "mark1-26-prototype": ModelExitSchedule(19, "preclose"),
+    "mark1-27-prototype": ModelExitSchedule(9, "preclose"),
+    "mark1-28-prototype": ModelExitSchedule(9, "preclose"),
 }
 
 

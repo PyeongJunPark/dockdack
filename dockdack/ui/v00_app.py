@@ -17,7 +17,8 @@ from uuid import NAMESPACE_URL, uuid5
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHeaderView, QHBoxLayout, QMessageBox, QLabel,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QHeaderView,
+    QHBoxLayout, QMessageBox, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -29,6 +30,11 @@ from dockdack.lstm30_adapter import MAX_QUOTE_AGE
 from dockdack.models import Market, TradingMode
 from dockdack.portfolio import PortfolioCache
 from dockdack.signal_bridge import atomic_json, ExternalPolicy, SignalFileReader
+from dockdack.signals.mark1_intraday_trigger import MODEL_IDS as INTRADAY_MODEL_IDS, RISK_NOTICE as INTRADAY_RISK_NOTICE
+from dockdack.signals.mark1_target_horizon_trigger import (
+    MODEL_IDS as TARGET_HORIZON_MODEL_IDS, MODEL_SPECS as TARGET_HORIZON_MODEL_SPECS,
+    RISK_NOTICE as TARGET_HORIZON_RISK_NOTICE, SCORE_SCOPE as TARGET_HORIZON_SCORE_SCOPE,
+)
 from dockdack.signals.preopen_series import PREOPEN_MODELS
 from dockdack.trading.model_exit_schedule import timed_exit_due
 from dockdack.watch_gui import WatchlistDialog
@@ -130,10 +136,15 @@ MARK1_TRIGGER = 'mark1-prototype'
 MARK11_TRIGGER = 'mark1-1-prototype'
 MARK12_TRIGGER = 'mark1-2-prototype'
 MARK14_TRIGGER = 'mark1-4-prototype'
-BARRIER_MODELS = (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER)
+BARRIER_MODELS = (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER, *INTRADAY_MODEL_IDS)
+QUOTE_SCORE_MODELS = (*BARRIER_MODELS, *TARGET_HORIZON_MODEL_IDS)
 PREOPEN_MODEL_IDS = (MARK14_TRIGGER, *PREOPEN_MODELS)
-ALL_MODEL_IDS = tuple(sorted((*BARRIER_MODELS, *PREOPEN_MODEL_IDS),
+ALL_MODEL_IDS = tuple(sorted((*QUOTE_SCORE_MODELS, *PREOPEN_MODEL_IDS),
                              key=lambda model: int(model.split('-')[1]) if model != MARK1_TRIGGER else 0))
+WATCH_MODEL_IDS = (tuple(model for model in ALL_MODEL_IDS if model in QUOTE_SCORE_MODELS)
+                   + tuple(model for model in ALL_MODEL_IDS if model in PREOPEN_MODEL_IDS))
+TARGET_HORIZON_FAMILIES = dict(zip(TARGET_HORIZON_MODEL_IDS,
+                                   ('GRU', 'MLP', 'GRU', '선형망', 'CNN', 'MLP')))
 MARK1_NOTICE = (
     'mark1.0 prototype · 30일봉 특징을 CatBoost 3개 시드로 학습 · 현재가에서 +1%/−0.9% 선후 도달 확률 추정\n'
     '확률 50% 초과 시 모의 매수 후보 · 해당 매수분 +1% 익절/−0.9% 손절 · 기존 보유분 기준 유지'
@@ -156,17 +167,36 @@ PROTOTYPE_NOTICES = {MARK1_TRIGGER: MARK1_NOTICE, MARK11_TRIGGER: MARK11_NOTICE,
                      MARK12_TRIGGER: MARK12_NOTICE, MARK14_TRIGGER: MARK14_NOTICE}
 PROTOTYPE_NOTICES.update({model: spec.strategy_notice + '\n' + spec.risk_notice
                           for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_NOTICES.update({model: '완료 30일봉+현재가의 독립 일봉 대리점수 · 점수 0.5 초과 시에만 모의 매수 후보\n'
+                          + INTRADAY_RISK_NOTICE for model in INTRADAY_MODEL_IDS})
+PROTOTYPE_NOTICES.update({
+    model: (f'완료 {lookback}일봉 + 현재가 · {TARGET_HORIZON_FAMILIES[model]} · '
+            f'목표 +{target:g}% / {horizon}거래 세션 · 손절 없음\n'
+            '다음 세션 관측 시가로 학습한 점수를 장중 현재가로 조회합니다. '
+            f'목표 미도달 시 매수 체결일 포함 {horizon}번째 거래 세션 마감 5분 전부터 매도 시도합니다. '
+            '목표 도달 확률·실제 지정가 체결·수익성은 검증되지 않았습니다.\n'
+            + TARGET_HORIZON_RISK_NOTICE)
+    for model, (lookback, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
 PROTOTYPE_TITLES = {MARK1_TRIGGER: 'mark1.0 prototype', MARK11_TRIGGER: 'mark1.1 prototype',
                     MARK12_TRIGGER: 'mark1.2 prototype', MARK14_TRIGGER: 'mark1.4 prototype'}
 PROTOTYPE_TITLES.update({model: spec.title for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_TITLES.update({model: model.replace('mark1-', 'mark1.').replace('-prototype', ' prototype')
+                         for model in INTRADAY_MODEL_IDS})
+PROTOTYPE_TITLES.update({model: model.replace('mark1-', 'mark1.').replace('-prototype', ' prototype')
+                         for model in TARGET_HORIZON_MODEL_IDS})
 PROTOTYPE_TARGETS = {MARK1_TRIGGER: '+1% / −0.9%', MARK11_TRIGGER: '+0.5% / −0.4%',
                      MARK12_TRIGGER: '+1% / −0.9%', MARK14_TRIGGER: '다음 날 시가→종가 점수'}
 PROTOTYPE_TARGETS.update({model: spec.output for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_TARGETS.update({model: '일봉 전체 +1% / −0.9% 대리점수' for model in INTRADAY_MODEL_IDS})
+PROTOTYPE_TARGETS.update({model: f'목표 +{target:g}% / {horizon}세션 시가 대리점수'
+                          for model, (_, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
 PROTOTYPE_SOURCES = {MARK1_TRIGGER: 'mark1-prototype-demo-trigger',
                      MARK11_TRIGGER: 'mark1-1-prototype-demo-trigger',
                      MARK12_TRIGGER: 'mark1-2-prototype-demo-trigger',
                      MARK14_TRIGGER: 'mark1-4-prototype-demo-trigger'}
 PROTOTYPE_SOURCES.update({model: spec.source_id for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_SOURCES.update({model: model + '-demo-trigger' for model in INTRADAY_MODEL_IDS})
+PROTOTYPE_SOURCES.update({model: model + '-demo-trigger' for model in TARGET_HORIZON_MODEL_IDS})
 PROTOTYPE_METHODS = {
     MARK1_TRIGGER: '30일봉 특징 · CatBoost 3개 시드 앙상블',
     MARK11_TRIGGER: '30일봉 특징 · 별도 CatBoost 3개 시드 앙상블',
@@ -175,6 +205,20 @@ PROTOTYPE_METHODS = {
                      '미국: 같은 날 100종목의 다음 날 상대 수익 순위 신경망'),
 }
 PROTOTYPE_METHODS.update({model: spec.method for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_METHODS.update(dict(zip(INTRADAY_MODEL_IDS, (
+    '완료 30일봉 추세 지속 특징 · 독립 MLP',
+    '완료 30일봉 과매도·반전 특징 · 독립 MLP',
+    '완료 30일봉 고저점 돌파 특징 · 독립 MLP',
+    '완료 30일봉 변동성 국면 특징 · 독립 MLP',
+    '완료 30일봉 거래량 압력 특징 · 독립 MLP',
+    '완료 일봉의 초단기 반전 특징 · 독립 SiLU MLP',
+    '완료 일봉의 캔들 위치·갭 특징 · 독립 Tanh MLP',
+    '완료 일봉의 추세 가속 특징 · 독립 GELU MLP',
+    '완료 일봉의 변동성×거래량 특징 · 독립 게이트망',
+    '완료 일봉의 압축·확장 특징 · 독립 ReLU 심층망',
+))))
+PROTOTYPE_METHODS.update({model: f'완료 {lookback}봉+현재가 6채널 · {TARGET_HORIZON_FAMILIES[model]}'
+                          for model, (lookback, _, _) in TARGET_HORIZON_MODEL_SPECS.items()})
 PROTOTYPE_EXITS = {
     MARK1_TRIGGER: '매수분 +1% / −0.9%',
     MARK11_TRIGGER: '매수분 +0.5% / −0.4%',
@@ -182,6 +226,10 @@ PROTOTYPE_EXITS = {
     MARK14_TRIGGER: '매수 체결 당일 장마감 5분 전',
 }
 PROTOTYPE_EXITS.update({model: spec.horizon for model, spec in PREOPEN_MODELS.items()})
+PROTOTYPE_EXITS.update({model: '해당 모델 매수분 +1% / −0.9%' for model in INTRADAY_MODEL_IDS})
+PROTOTYPE_EXITS.update({
+    model: f'해당 매수분 +{target:g}% 목표 · 손절 없음 · {horizon}번째 거래 세션 마감 5분 전부터 매도 시도'
+    for model, (_, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
 
 
 class Mark14Panel(QWidget):
@@ -194,30 +242,40 @@ class Mark14Panel(QWidget):
         layout = QVBoxLayout(self)
         self.heading = QLabel('모델 선택 · 선택한 모델은 각자 독립 신호를 냅니다')
         self.heading.hide()
-        self.sizing_card = QFrame()
-        self.sizing_card.setObjectName('modelSizingCard')
-        self.sizing_card.setStyleSheet(
-            'QFrame#modelSizingCard { background: #193148; border: 1px solid #31536d; border-radius: 6px; }')
-        self.sizing_row = QHBoxLayout(self.sizing_card)
-        self.sizing_row.setContentsMargins(12, 7, 12, 7)
-        self.sizing_row.setSpacing(12)
-        self.sizing_label = QLabel('1회 매수 비중')
-        self.sizing_label.setStyleSheet('font-size: 14px; font-weight: 600; color: #e9f5ff;')
-        self.sizing_row.addWidget(self.sizing_label)
-        self.sizing_row.addStretch()
-        layout.addWidget(self.sizing_card)
         choices = QWidget()
         choices.setStyleSheet('background: #121b2a; color: #e9f5ff;')
         choice_stack = QVBoxLayout(choices)
         choice_stack.setContentsMargins(7, 7, 7, 7)
         choice_stack.setSpacing(6)
         self.model_checks = {}
+        self.model_buy_percents = {}
         self.model_descriptions = {}
         self.model_detail_fields = {}
+        self.model_sections = {}
         self._model_detail_rows = []
         self._detail_columns = None
+        previous_group = None
         for model in ALL_MODEL_IDS:
-            phase = '장중' if model in BARRIER_MODELS else '장전'
+            group = ('target_horizon' if model in TARGET_HORIZON_MODEL_IDS else
+                     'proxy' if model in INTRADAY_MODEL_IDS else
+                     'probability' if model in BARRIER_MODELS else 'preopen')
+            if group != previous_group:
+                count = sum(1 for item in ALL_MODEL_IDS
+                            if ('target_horizon' if item in TARGET_HORIZON_MODEL_IDS else
+                                'proxy' if item in INTRADAY_MODEL_IDS else
+                                'probability' if item in BARRIER_MODELS else 'preopen') == group)
+                heading_text = {'probability': '장중 · 확률 모델',
+                                'preopen': '장전 · 점수 모델',
+                                'proxy': '장중 · 일봉 대리 모델',
+                                'target_horizon': '장중 · 목표가/보유기간 연구'}[group]
+                section = QLabel(f'{heading_text}  {count}개')
+                section.setObjectName('modelSection-' + group)
+                section.setStyleSheet('font-size: 12px; font-weight: 700; color: #9bdacb; '
+                                      'padding: 7px 5px 2px; border-bottom: 1px solid #355365;')
+                choice_stack.addWidget(section)
+                self.model_sections[group] = section
+                previous_group = group
+            phase = '장중' if model in QUOTE_SCORE_MODELS else '장전'
             card = QFrame()
             card.setObjectName('modelChoiceCard')
             card.setStyleSheet('QFrame#modelChoiceCard { background: #1a293a; border: 1px solid #30465b; '
@@ -240,6 +298,28 @@ class Mark14Panel(QWidget):
             phase_label.setStyleSheet('font-size: 12px; font-weight: 600; color: #aee4d4; '
                                       'background: #254653; border-radius: 4px; padding: 2px;')
             card_header.addWidget(phase_label)
+            size_label = QLabel('1회 매수')
+            size_label.setStyleSheet('font-size: 12px; color: #a9c9d8;')
+            card_header.addWidget(size_label)
+            buy_percent = QDoubleSpinBox(card)
+            buy_percent.setObjectName('buy-percent-' + model)
+            buy_percent.setAccessibleName(f'{PROTOTYPE_TITLES[model]} 1회 매수 비중 퍼센트')
+            buy_percent.setToolTip('해당 모델의 한 번의 매수 예산 상한입니다. 시장별 평가자산 기준이며 주문당 금액·가용액 상한도 적용합니다.')
+            buy_percent.setRange(0.01, 100)
+            buy_percent.setDecimals(2)
+            buy_percent.setSingleStep(0.5)
+            buy_percent.setKeyboardTracking(False)
+            buy_percent.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            buy_percent.setValue(10)
+            buy_percent.setSuffix(' %')
+            buy_percent.setFixedSize(96, 27)
+            buy_percent.setAlignment(Qt.AlignmentFlag.AlignRight)
+            buy_percent.setStyleSheet(
+                'QDoubleSpinBox { background: #10283b; color: #e9f5ff; '
+                'border: 1px solid #42657a; border-radius: 5px; '
+                'font-size: 13px; font-weight: 600; padding-left: 4px; } '
+                'QDoubleSpinBox:disabled { color: #89a5b6; border-color: #30465b; }')
+            card_header.addWidget(buy_percent)
             card_layout.addLayout(card_header)
             description = QLabel(
                 f'학습: {PROTOTYPE_METHODS[model]} · 출력: {PROTOTYPE_TARGETS[model]} · '
@@ -274,6 +354,7 @@ class Mark14Panel(QWidget):
             self._model_detail_rows.append((detail_grid, fields))
             choice_stack.addWidget(card)
             self.model_checks[model] = check
+            self.model_buy_percents[model] = buy_percent
             self.model_descriptions[model] = description
             self.model_detail_fields[model] = fields
         choice_stack.addStretch()
@@ -289,6 +370,7 @@ class Mark14Panel(QWidget):
         choice_list.setWidgetResizable(True)
         choice_list.setWidget(choices)
         choice_list.setMinimumHeight(180)
+        self.choices_scroll = choice_list
         layout.addWidget(choice_list, 1)
         self.notice = QLabel(
             '모의계좌 모델 신호 · 실전 모델 주문 차단 · 자동주문 ON은 별도. '
@@ -384,12 +466,15 @@ class Mark14Panel(QWidget):
     def _show_selected_model(self, *_):
         model = self.model_selector.currentData()
         self.notice.setToolTip(PROTOTYPE_NOTICES.get(model, ''))
-        if model in BARRIER_MODELS:
+        if model in QUOTE_SCORE_MODELS:
+            measure = ('시가 기준 일봉 대리점수 · 장중 검증 전' if model in TARGET_HORIZON_MODEL_IDS else
+                       '일봉 전체 대리점수' if model in INTRADAY_MODEL_IDS
+                       else '추정확률')
             self.market_tabs.hide()
             self.status.setText(
                 f'{PROTOTYPE_TITLES[model]} · 장중 추론\n'
                 f'{PROTOTYPE_METHODS[model]}\n'
-                f'현재가 기준 {PROTOTYPE_TARGETS[model]} 추정확률은 관심종목 표와 상단 최근 조회에서 확인')
+                f'현재가 기준 {PROTOTYPE_TARGETS[model]} {measure}는 관심종목 표와 상단 최근 조회에서 확인')
             return
         self.market_tabs.show()
         statuses = []
@@ -572,8 +657,9 @@ class V00Window(WatchlistDialog):
             view.setColumnCount(3 + len(ALL_MODEL_IDS))
             view.setHorizontalHeaderLabels(('종목',
                                             *(PROTOTYPE_TITLES[model].replace('mark', 'MK').replace(' prototype', '')
-                                              + (' 추정확률' if model in BARRIER_MODELS else ' 점수')
-                                              for model in ALL_MODEL_IDS),
+                                              + (' 대리점수' if model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS) else
+                                                 ' 추정확률' if model in BARRIER_MODELS else ' 점수')
+                                              for model in WATCH_MODEL_IDS),
                                             '현재가', '조회'))
             view.setMinimumWidth(285 if self._watch_compact else 680)
             for column, width in ((0, 110), (view.columnCount() - 2, 95),
@@ -652,7 +738,7 @@ class V00Window(WatchlistDialog):
         self.ai_connection_warning.setStyleSheet('font-size: 11px; font-weight: 600; color: #ffbf80;')
         self.ai_connection_warning.hide()
         ai_row.addWidget(self.ai_connection_warning)
-        self.connection_flow.insertWidget(1, self.ai_connection_card, 1)
+        self.connection_flow.insertWidget(2, self.ai_connection_card, 1)
         # Health text is refreshed every second, but the 200-row x 13-model
         # watch grid is only time-sensitive while visible. Keep that work off
         # the health tick; quote/pre-open events still update their rows at once.
@@ -681,10 +767,13 @@ class V00Window(WatchlistDialog):
         self.percent_sizing.hide()
         self.external_grid.removeWidget(self.buy_percent)
         self.buy_percent.setSuffix(' %')
-        self.buy_percent.setFixedWidth(120)
-        self.buy_percent.setToolTip('평가자산 대비 한 번의 매수 예산 비중입니다. 실제 주문은 주문당 금액 상한과 주문가능금액도 적용합니다.')
-        self.mark14_panel.sizing_row.insertWidget(1, self.buy_percent)
+        self.buy_percent.setFixedWidth(100)
+        self.buy_percent.setToolTip('AI 모델별 비중이 아닌 기타 외부 신호의 기본값입니다. 주문당 금액·가용액 상한도 적용합니다.')
+        self.external_grid.addWidget(QLabel('기타 신호 1회 매수 비중'), 4, 0, 1, 2)
+        self.external_grid.addWidget(self.buy_percent, 4, 2)
         self.external_model_checks = self.mark14_panel.model_checks
+        self._sync_watch_model_columns()
+        self.watch_market_tabs.currentChanged.connect(self._sync_watch_model_columns)
         self.model_trigger = QComboBox()
         self.model_trigger.setObjectName('builtinTradingTrigger')
         self.model_trigger.addItem('내장 트리거 없음 · 외부 신호만 사용', 'none')
@@ -700,7 +789,7 @@ class V00Window(WatchlistDialog):
         self.model_notice = QLabel(MARK1_NOTICE)
         self.model_notice.setWordWrap(True)
         self.model_notice.setStyleSheet('color: #ffda91;')
-        self.external_grid.addWidget(self.model_notice, 4, 0, 1, 5)
+        self.model_notice.setParent(self)
         self.model_notice.hide()  # Full method/output/exit descriptions now live beside every model.
         self.model_trigger.currentIndexChanged.connect(self._model_trigger_changed)
         for checkbox in self.external_model_checks.values():
@@ -710,8 +799,13 @@ class V00Window(WatchlistDialog):
         self.external_krw.setValue(10_000_000)
         self.external_usd.setValue(10_000)
         self.hourly_ranking.setChecked(True)
-        self.hourly_ranking.setText('국내·미국 거래량 TOP100 · 개장 10분 전 / 개장 / 매 정시')
-        self.ranking_button.setText('현재 선정 가능한 시장 · 거래량 TOP100')
+        self.hourly_ranking.setText('국내·미국 종합 TOP100 · 개장 10분 전 / 개장 / 매 정시')
+        self.ranking_button.setText('현재 선정 가능한 시장 · 종합 TOP100')
+        # Desktop lists are selected by the market ranking. Keep the common
+        # history-length control but remove manual symbol add/delete affordances.
+        for widget in (self.symbol_input, self.exchange_input, self.add_button, self.remove_button):
+            widget.hide()
+        self.days_button.setText('선정 종목 기간 적용')
         self.days_input.setValue(31)
         self.environment_caption.hide()
         self.message.setText('')
@@ -731,6 +825,11 @@ class V00Window(WatchlistDialog):
         if hasattr(self, 'percent_sizing'):
             self.percent_sizing.setChecked(True)
         super()._apply_execution_preferences()
+        if hasattr(self, 'mark14_panel'):
+            self.engine.source_buy_percents = {
+                PROTOTYPE_SOURCES[model]: Decimal(str(field.value()))
+                for model, field in self.mark14_panel.model_buy_percents.items()
+            }
 
     def _capture_preferences(self):
         # The random test producer temporarily rewrites these three controls.
@@ -740,7 +839,7 @@ class V00Window(WatchlistDialog):
             connection = self._saved_external_config
         geometry = self.normalGeometry() if self.isMaximized() else self.geometry()
         return {
-            'version': 3,
+            'version': 4,
             'interval': self.interval.value(),
             'hourly_ranking': self.hourly_ranking.isChecked(),
             'exchange': self.exchange_input.currentData(),
@@ -755,6 +854,8 @@ class V00Window(WatchlistDialog):
             'external_usd': self.external_usd.value(),
             'percent_sizing': True,
             'buy_percent': self.buy_percent.value(),
+            'model_buy_percents': {model: field.value()
+                                   for model, field in self.mark14_panel.model_buy_percents.items()},
             'order_popups': self.order_popups.isChecked(),
             'additional_sources': [list(pair) for pair in self.additional_sources.raw_sources()],
             'random_us': self.random_us.currentData(),
@@ -789,10 +890,21 @@ class V00Window(WatchlistDialog):
         if not getattr(self, '_loading_preferences', False):
             self._preferences_timer.start(350)
 
+    def _model_buy_percent_changed(self, *_):
+        # Editing a model's order size changes its execution policy. Never
+        # mutate a live worker's sizing while a send may already be pending.
+        if self.monitoring or self.worker is not None or self.pending_auto_arm:
+            self.stop_monitoring()
+        self.engine.disarm()
+        self._apply_execution_preferences()
+        self._queue_save_preferences()
+
     def _connect_preference_changes(self):
         for widget in (self.interval, self.external_quantity, self.external_krw,
                        self.external_usd, self.buy_percent):
             widget.valueChanged.connect(self._queue_save_preferences)
+        for field in self.mark14_panel.model_buy_percents.values():
+            field.valueChanged.connect(self._model_buy_percent_changed)
         for widget in (self.hourly_ranking, self.external_mode, self.percent_sizing,
                        self.order_popups, self.advanced_settings_button,
                        *self.external_model_checks.values()):
@@ -819,11 +931,13 @@ class V00Window(WatchlistDialog):
             folder = self.store.path.parent / 'exchange'
             defaults = {
                 'interval': 30, 'hourly_ranking': True, 'exchange': '',
-                'external_models': [], 'model_trigger': 'none',
+                'external_models': (list(PROTOTYPE_NOTICES) if selected_mode(self.service) is TradingMode.DEMO
+                                    else []), 'model_trigger': 'none',
                 'external_mode': False, 'external_source': 'external-model',
                 'signal_path': str(folder / 'signals.json'), 'chart_path': str(folder / 'charts.json'),
                 'external_quantity': 999999999, 'external_krw': 0, 'external_usd': 0,
                 'percent_sizing': True, 'buy_percent': 10, 'order_popups': True,
+                'model_buy_percents': {},
                 'additional_sources': [], 'random_us': 'blocked',
             }
         choices = {**defaults, **saved}
@@ -832,7 +946,8 @@ class V00Window(WatchlistDialog):
                     self.model_trigger, self.external_mode, self.external_source, self.signal_path,
                     self.chart_path, self.external_quantity, self.external_krw, self.external_usd,
                     self.percent_sizing, self.buy_percent, self.order_popups, self.random_us,
-                    *self.external_model_checks.values())
+                    *self.external_model_checks.values(),
+                    *self.mark14_panel.model_buy_percents.values())
         previous = [(widget, widget.blockSignals(True)) for widget in controls]
         try:
             def restore_int(key, widget):
@@ -868,6 +983,16 @@ class V00Window(WatchlistDialog):
             for key, widget in (('external_krw', self.external_krw), ('external_usd', self.external_usd),
                                 ('buy_percent', self.buy_percent)):
                 restore_number(key, widget)
+            model_sizing = choices.get('model_buy_percents')
+            if not isinstance(model_sizing, dict):
+                model_sizing = {}
+            for model, field in self.mark14_panel.model_buy_percents.items():
+                value = model_sizing.get(model, self.buy_percent.value())
+                if (type(value) in (int, float) and field.minimum() <= value <= field.maximum()
+                        and isfinite(value)):
+                    field.setValue(value)
+                else:
+                    field.setValue(self.buy_percent.value())
             for key, widget in (('hourly_ranking', self.hourly_ranking), ('external_mode', self.external_mode),
                                 ('order_popups', self.order_popups)):
                 restore_bool(key, widget)
@@ -974,10 +1099,21 @@ class V00Window(WatchlistDialog):
             return None
         reason = row.get('reason')
         if reason not in {'PREDICTED_DAILY_BARRIER_SUCCESS', 'BELOW_OR_EQUAL_BUY_THRESHOLD',
+                          'TARGET_HORIZON_CANDIDATE', 'TARGET_HORIZON_POLICY_NOT_MET',
                           'USER_QUANTITY_OR_NOTIONAL_CAP', 'QUOTE_EXPIRED_DURING_INFERENCE'}:
             return None
         prediction = row.get('prediction')
         if not isinstance(prediction, dict):
+            return None
+        if (model in INTRADAY_MODEL_IDS
+                and prediction.get('score_scope') != 'daily_open_whole_session_proxy_not_intraday'):
+            return None
+        if (model in TARGET_HORIZON_MODEL_IDS
+                and (prediction.get('score_scope') != TARGET_HORIZON_SCORE_SCOPE
+                     or prediction.get('strategy_id') != model
+                     or prediction.get('stop_loss_pct', False) is not None
+                     or prediction.get('research_only') is not True
+                     or prediction.get('deployment_allowed') is not False)):
             return None
         try:
             value = prediction.get('probability_success')
@@ -985,15 +1121,25 @@ class V00Window(WatchlistDialog):
                 return None
             probability = Decimal(str(value))
             reference_price = Decimal(str(row.get('reference_price')))
+            expected_net_return = (Decimal(str(prediction.get('expected_net_return')))
+                                   if model in TARGET_HORIZON_MODEL_IDS else None)
             if (not probability.is_finite() or not 0 <= probability <= 1
                     or reference_price != snapshot.quote.price
-                    or (reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' and probability <= Decimal('0.5'))
-                    or (reason == 'BELOW_OR_EQUAL_BUY_THRESHOLD' and probability > Decimal('0.5'))):
+                    or (expected_net_return is not None and not expected_net_return.is_finite())):
+                return None
+            if model in TARGET_HORIZON_MODEL_IDS:
+                candidate = probability >= Decimal('0.5') and expected_net_return > 0
+                if ((reason == 'TARGET_HORIZON_CANDIDATE' and not candidate)
+                        or (reason == 'TARGET_HORIZON_POLICY_NOT_MET' and candidate)):
+                    return None
+            elif ((reason == 'PREDICTED_DAILY_BARRIER_SUCCESS' and probability <= Decimal('0.5'))
+                  or (reason == 'BELOW_OR_EQUAL_BUY_THRESHOLD' and probability > Decimal('0.5'))):
                 return None
         except (InvalidOperation, TypeError, ValueError):
             return None
         score = {'probability': probability, 'price': reference_price,
-                 'fetched_at': snapshot.fetched_at, 'reason': reason}
+                 'fetched_at': snapshot.fetched_at, 'reason': reason,
+                 'expected_net_return': expected_net_return}
         self._last_model_scores[(model, item.id)] = score
         return score
 
@@ -1001,8 +1147,15 @@ class V00Window(WatchlistDialog):
         """Keep the last valid display score; execution still uses fresh quotes."""
         title = PROTOTYPE_TITLES[model]
         target = PROTOTYPE_TARGETS[model]
-        note = (f'{title} · {target} · 일봉 기반 모델 추정확률 · 실제 적중률·수익률 보장 아님. '
-                '과거 표시값은 매매 판단에 사용하지 않고 주문 직전 새 시세로 재판단합니다.')
+        proxy = model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS)
+        measure = ('다음 날 관측 시가 학습·현재가 질의의 목표 도달 대리점수 · 장중 경로 미검증'
+                   if model in TARGET_HORIZON_MODEL_IDS else
+                   '일봉 전체 대리점수 · 장중 진입 이후 경로 미검증' if proxy else
+                   '일봉 기반 모델 추정확률')
+        note = (f'{title} · {target} · {measure} · 실제 적중률·수익률 보장 아님. '
+                '과거 표시값은 매매 판단에 사용하지 않고 주문 직전 새 시세로 재판단합니다.'
+                + (' 모의 연구 신호이며 목표가 지정가 체결이나 기한 내 매도 체결을 보장하지 않습니다.'
+                   if model in TARGET_HORIZON_MODEL_IDS else ''))
         checks = getattr(self, 'external_model_checks', {})
         if model not in checks or not checks[model].isChecked():
             return '—', note + '\n이 모델은 연결되어 있지 않습니다.', '꺼짐'
@@ -1012,12 +1165,16 @@ class V00Window(WatchlistDialog):
             age = (self.engine.clock() - snapshot.fetched_at).total_seconds()
             if (0 <= age <= MAX_QUOTE_AGE and item.id in self.fresh_ids
                     and current['reason'] != 'QUOTE_EXPIRED_DURING_INFERENCE'):
-                decision = '매수 판정' if current['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '대기'
+                decision = ('연구 후보' if model in TARGET_HORIZON_MODEL_IDS
+                            and current['reason'] == 'TARGET_HORIZON_CANDIDATE' else
+                            '매수 판정' if current['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '대기')
                 pct = f"{current['probability']:.1%}"
                 context = (f"\n판단 기준 현재가 {current['price']} {item.instrument.currency}"
                            f" · 조회 {current['fetched_at'].astimezone():%m/%d %H:%M:%S}")
+                if model in TARGET_HORIZON_MODEL_IDS:
+                    context += f" · 예상 순수익 대리값 {current['expected_net_return']:.2%}"
                 return (f'{decision}\n{pct}',
-                        note + context + f"\n{decision} · 추정 성공확률 {pct} · 사유 {current['reason']}",
+                        note + context + f"\n{decision} · {'대리점수' if proxy else '추정 성공확률'} {pct} · 사유 {current['reason']}",
                         f'{decision} {pct}')
         saved = self._last_model_scores.get((model, item.id))
         if saved is not None:
@@ -1037,7 +1194,7 @@ class V00Window(WatchlistDialog):
                  else '판단 불가' if isinstance(row, dict) and (row.get('error') or row.get('prediction'))
                  else '판단 전')
         value = state if state != '판단 전' else '—'
-        return value, note + f'\n현재가 {snapshot.quote.price} {item.instrument.currency} · 이 시세의 유효한 모델 확률이 없습니다.', value
+        return value, note + f"\n현재가 {snapshot.quote.price} {item.instrument.currency} · 이 시세의 유효한 {'대리점수' if proxy else '모델 확률'}가 없습니다.", value
 
     def _preopen_score_display(self, model, item):
         """Show today's frozen plan or clearly marked last display-only decision."""
@@ -1090,7 +1247,7 @@ class V00Window(WatchlistDialog):
         checks = getattr(self, 'external_model_checks', {})
         if model not in checks or not checks[model].isChecked():
             return '꺼짐'
-        if model in BARRIER_MODELS:
+        if model in QUOTE_SCORE_MODELS:
             display = self._model_score_display(model, item)
             return display[2].replace('대기', '관망') if compact else display[0]
         return self._preopen_score_display(model, item)
@@ -1128,7 +1285,7 @@ class V00Window(WatchlistDialog):
 
     def _watch_values(self, item):
         name, price, checked_at = super()._watch_values(item)
-        return (name, *(self._model_buy_display(model, item) for model in ALL_MODEL_IDS),
+        return (name, *(self._model_buy_display(model, item) for model in WATCH_MODEL_IDS),
                 price, checked_at)
 
     def _update_model_score_row(self, key):
@@ -1137,11 +1294,11 @@ class V00Window(WatchlistDialog):
         if item is None or row is None:
             return
         view = self.watch_tables[item.instrument.market]
-        for column, model in enumerate(ALL_MODEL_IDS, 1):
+        for column, model in enumerate(WATCH_MODEL_IDS, 1):
             cell = view.item(row, column)
             if cell is None:
                 continue
-            if model in BARRIER_MODELS:
+            if model in QUOTE_SCORE_MODELS:
                 _, tip, _ = self._model_score_display(model, item)
             else:
                 tip = (f'{PROTOTYPE_TITLES[model]} · 장전 동결 매수 후보 점수\n'
@@ -1191,8 +1348,10 @@ class V00Window(WatchlistDialog):
             f'매수: {self._model_buy_display(model, item, compact=True)} · '
             f'매도: {self._model_sell_display(model, item)}')
 
-    def _set_latest_model_summary(self, text):
+    def _set_latest_model_summary(self, text, *, full_text=None):
         self.latest_model_summary.setText(text)
+        self.latest_model_summary.setToolTip(full_text or
+            '최근 조회 기준. 장중 확률 평균에는 기존 장벽 모델만 포함하며 다른 모델 점수는 합산하지 않습니다.')
         # The header has a fixed height. Keep every model reachable by its own
         # horizontal scroll instead of making the chart disappear below it.
         self.latest_model_summary.adjustSize()
@@ -1202,7 +1361,10 @@ class V00Window(WatchlistDialog):
         if not hasattr(self, 'latest_model_summary'):
             return
         models = tuple(self._chosen_external_models())
-        barrier_models = tuple(model for model in models if model in BARRIER_MODELS)
+        # Only the original three have the legacy probability average. The
+        # ten daily-proxy scores are separate, optional display diagnostics.
+        barrier_models = tuple(model for model in models
+                               if model in BARRIER_MODELS and model not in INTRADAY_MODEL_IDS)
         completed = self._last_complete_model_summary
         if completed is not None and (completed[0] != models
                                       or completed[1] not in getattr(self, '_items_by_id', {})):
@@ -1225,25 +1387,52 @@ class V00Window(WatchlistDialog):
             if completed is not None:
                 self._set_latest_model_summary(completed[2])
                 return
-            pending = ' · '.join(f'{self._model_name(model)} —' for model in models)
+            pending = (' · '.join(f'{self._model_name(model)} —' for model in models)
+                       if len(models) <= 3 else f'모델 판단 대기 {len(models)}개')
             self._set_latest_model_summary('최근 조회 ' + quote + ' · 모델 추정확률 — · ' + pending)
             return
         probability_by_model = dict(zip(barrier_models, scores))
+        proxy_scores = {model: self._current_model_score(model, item)
+                        for model in models if model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS)}
+        proxy_pending = any(score is None for score in proxy_scores.values())
         details = []
-        for model in models:
+        for index, model in enumerate(models):
             if model in probability_by_model:
                 score = probability_by_model[model]
                 verdict = '매수' if score['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '관망'
                 buy = f"{verdict}({score['probability']:.1%})"
+            elif model in INTRADAY_MODEL_IDS:
+                score = proxy_scores[model]
+                verdict = ('매수' if score is not None
+                           and score['reason'] == 'PREDICTED_DAILY_BARRIER_SUCCESS' else '관망')
+                buy = (f"{verdict}({score['probability']:.1%} 대리점수)"
+                       if score is not None else '대리점수 —')
+            elif model in TARGET_HORIZON_MODEL_IDS:
+                score = proxy_scores[model]
+                verdict = ('연구 후보' if score is not None
+                           and score['reason'] == 'TARGET_HORIZON_CANDIDATE' else '관망')
+                buy = (f"{verdict}({score['probability']:.1%} 시가 대리점수)"
+                       if score is not None else '대리점수 —')
             else:
                 buy = self._preopen_score_display(model, item)
-            details.append(f'{self._model_name(model)} {buy} / {self._model_sell_display(model, item)}')
+            sell = self._model_sell_display(model, item)
+            priority = (0 if '매수' in buy or '매도 조건' in sell else
+                        1 if buy not in {'—', '대리점수 —'} else 2)
+            details.append((priority, index, f'{self._model_name(model)} {buy} / {sell}'))
         average = (' · 장중 확률 평균 '
                    + f"{sum((score['probability'] for score in scores), Decimal(0)) / Decimal(len(scores)):.1%}"
                    if scores else '')
-        text = '최근 완료 조회 ' + quote + average + ' · ' + '  |  '.join(details)
-        self._last_complete_model_summary = (models, item.id, text)
-        self._set_latest_model_summary(text)
+        text = ('최근 조회 ' if proxy_pending else '최근 완료 조회 ') + quote + average
+        if proxy_pending:
+            text += ' · 대리점수 조회 중'
+        top = sorted(details)[:3]
+        text += ' · ' + '  |  '.join(value for _, _, value in top)
+        if len(details) > len(top):
+            text += f' · 외 {len(details) - len(top)}개 모델'
+        full_text = quote + average + '\n' + '\n'.join(value for _, _, value in details)
+        if not proxy_pending:
+            self._last_complete_model_summary = (models, item.id, text)
+        self._set_latest_model_summary(text, full_text=full_text)
 
     def _update_selected_model_scores(self):
         if not hasattr(self, 'model_score_summary'):
@@ -1309,6 +1498,7 @@ class V00Window(WatchlistDialog):
 
     def reload_tables(self, *, items=None, rules=None):
         super().reload_tables(items=items, rules=rules)
+        self._sync_watch_model_columns()
         valid_ids = set(getattr(self, '_items_by_id', {}))
         self._last_model_scores = {key: score for key, score in self._last_model_scores.items()
                                    if key[1] in valid_ids}
@@ -1416,6 +1606,21 @@ class V00Window(WatchlistDialog):
     def _chosen_external_models(self):
         return tuple(model for model, check in getattr(self, 'external_model_checks', {}).items()
                      if check.isChecked())
+
+    def _sync_watch_model_columns(self, *_):
+        """Keep fixed model data indices; collapse only unchecked display columns."""
+        checks = getattr(self, 'external_model_checks', None)
+        if checks is None:
+            return
+        selected = {model for model, check in checks.items() if check.isChecked()}
+        expected = 3 + len(ALL_MODEL_IDS)
+        for view in self.watch_tables.values():
+            if view.columnCount() != expected:
+                continue
+            for column, model in enumerate(WATCH_MODEL_IDS, 1):
+                view.setColumnHidden(column, model not in selected)
+            view.setColumnHidden(expected - 2, False)  # Current price.
+            view.setColumnHidden(expected - 1, False)  # Last lookup.
 
     def _prototype_output_path(self, model):
         return self.store.path.parent / 'exchange' / 'external-models' / model / 'signals.json'
@@ -1530,7 +1735,41 @@ class V00Window(WatchlistDialog):
 
     @property
     def builtin_confirmation_notice(self):
-        return '\n\n'.join(PROTOTYPE_NOTICES[model] for model in self._chosen_external_models())
+        selected = self._chosen_external_models()
+        legacy = sum(model in (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER)
+                     for model in selected)
+        preopen = sum(model in PREOPEN_MODEL_IDS for model in selected)
+        proxy = sum(model in INTRADAY_MODEL_IDS for model in selected)
+        target_horizon = sum(model in TARGET_HORIZON_MODEL_IDS for model in selected)
+        notices = []
+        if legacy:
+            notices.append(f'장중 확률 모델 {legacy}개: 각 모델의 50% 초과 신호만 모의 매수 후보로 사용하고 '
+                           '실제 매수분에 모델별 익절·손절 기준을 적용합니다. 추정확률은 수익 보장이 아닙니다.')
+            notices.extend(PROTOTYPE_NOTICES[model] for model in selected
+                           if model in (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER))
+        if preopen:
+            notices.append(f'장전 점수 모델 {preopen}개: 점수는 확률이 아니며 모델마다 후보·매도 시점이 다릅니다. '
+                           '1회 매수 비중은 모델 선택 화면 설정과 주문 상한을 적용합니다. 모의 전용입니다.')
+        if proxy:
+            notices.append(f'일봉 대리 모델 {proxy}개: 완료 일봉과 현재가로 일봉 전체 대리사건을 판단합니다. '
+                           '장중 진입 후 경로·수익성 미검증이며 모의 전용입니다.')
+        if target_horizon:
+            notices.append(f'목표가·보유기간 연구 모델 {target_horizon}개: 완료 일봉과 현재가로 다음 날 시가 기준 사건을 '
+                           '대리 평가합니다. 손절 없이 목표가 또는 체결일 포함 H번째 거래 세션 마감 5분 전부터 매도를 '
+                           '시도합니다. 장중 경로·목표가 체결·수익성이 미검증인 모의 전용 신호입니다.')
+        return '\n'.join(notices)
+
+    def _model_buy_sizing_confirmation(self):
+        selected = self._chosen_external_models()
+        if not selected:
+            return (f'1회 매수: 시장별 계좌 평가금액의 {self.buy_percent.value():g}% '
+                    '· 정수 주식 수 내림\n')
+        rows = [f'{PROTOTYPE_TITLES[model]} {self.mark14_panel.model_buy_percents[model].value():g}%'
+                for model in selected]
+        return ('모델별 1회 매수 상한 (시장별 계좌 평가금액 기준):\n'
+                + '\n'.join(' · '.join(rows[index:index + 4])
+                            for index in range(0, len(rows), 4))
+                + f'\n기타 신호 기본 {self.buy_percent.value():g}% · 정수 주식 수 내림\n')
 
     def _progress(self, data):
         if len(data) == 2 and data[0] == 'mark14_preopen':
@@ -1561,6 +1800,13 @@ class V00Window(WatchlistDialog):
             self.model_trigger.setCurrentIndex(self.model_trigger.findData(choice))
 
     def _model_trigger_changed(self, *_):
+        # Rebuilding dependent labels can ask Qt to reveal a focused widget at
+        # the end of the long card list. Keep the user's current card in view.
+        choice_scroll = getattr(getattr(self, 'mark14_panel', None), 'choices_scroll', None)
+        if choice_scroll is not None:
+            offset = choice_scroll.verticalScrollBar().value()
+            QTimer.singleShot(0, lambda area=choice_scroll, value=offset:
+                              area.verticalScrollBar().setValue(value))
         choice = self._chosen_trigger()
         enabled_models = self._chosen_external_models()
         if enabled_models and selected_mode(self.service) is not TradingMode.DEMO:
@@ -1568,6 +1814,7 @@ class V00Window(WatchlistDialog):
                 check.blockSignals(True)
                 check.setChecked(False)
                 check.blockSignals(False)
+            self._sync_watch_model_columns()
             self.engine.disarm()
             self.message.setText('prototype 외부 신호기는 모의투자에서만 사용할 수 있습니다. 실전 주문에 연결하지 않았습니다.')
             return
@@ -1575,6 +1822,7 @@ class V00Window(WatchlistDialog):
         if self.monitoring or self.worker is not None or self.pending_auto_arm:
             self.stop_monitoring()
         self.engine.disarm()
+        self._sync_watch_model_columns()
         # A validator belongs to exactly one selected model. Removing the old
         # callback also releases its cached predictor before the next lazy load.
         self.engine.configure_source_validators({})
@@ -1677,6 +1925,9 @@ class V00Window(WatchlistDialog):
             # thread while the worker is still consuming them.
             for check in getattr(self, 'external_model_checks', {}).values():
                 check.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
+            if hasattr(self, 'mark14_panel'):
+                for field in self.mark14_panel.model_buy_percents.values():
+                    field.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
         self._sync_model_mode_controls()
 
     def _update_connection(self):
@@ -1812,10 +2063,11 @@ def default_desktop_store(root):
     return WatchStore(default_desktop_path(root), seed_defaults=True)
 
 
-def desktop_model_choices(trigger, no_model, external_models):
+def desktop_model_choices(trigger, no_model, external_models, *, trading_mode=TradingMode.DEMO):
     models = list(external_models)
-    if trigger is None and not no_model and not models:
-        # Model selection defaults ON; monitoring and auto-orders stay OFF.
+    if trigger is None and not no_model and not models and trading_mode is TradingMode.DEMO:
+        # A fresh DEMO desktop shows every model. Selection never arms orders;
+        # persisted explicit OFF choices are restored by the window afterward.
         return 'none', list(PROTOTYPE_NOTICES)
     if trigger is None and models:
         return 'none', models
@@ -1907,7 +2159,8 @@ def main(argv=None):
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(None, '계정 장부 열기 실패 · 시작 취소', str(exc))
             return 1
-        trigger, models = desktop_model_choices(args.trigger, args.no_model, args.external_model)
+        trigger, models = desktop_model_choices(args.trigger, args.no_model, args.external_model,
+                                                trading_mode=selected_mode(service))
         window = V00Window(service=service, store=store, builtin=not args.no_model,
                            trigger=trigger, mark1_bundle=args.mark1_bundle,
                            mark11_bundle=args.mark11_bundle, mark12_bundle=args.mark12_bundle,

@@ -22,12 +22,17 @@ from uuid import uuid4
 
 import dockdack
 from dockdack.runtime_paths import app_home, checkout_root, model_bundle
+from dockdack.signals.mark1_target_horizon_trigger import MODEL_IDS as TARGET_HORIZON_IDS
 
 MODEL_IDS = ("mark1-prototype", "mark1-1-prototype", "mark1-2-prototype",
              "mark1-3-prototype",
              "mark1-4-prototype", "mark1-5-prototype", "mark1-6-prototype",
              "mark1-7-prototype", "mark1-8-prototype", "mark1-9-prototype",
-             "mark1-10-prototype", "mark1-11-prototype", "mark1-12-prototype")
+             "mark1-10-prototype", "mark1-11-prototype", "mark1-12-prototype",
+             "mark1-13-prototype", "mark1-14-prototype", "mark1-15-prototype",
+             "mark1-16-prototype", "mark1-17-prototype", "mark1-18-prototype",
+             "mark1-19-prototype", "mark1-20-prototype", "mark1-21-prototype",
+             "mark1-22-prototype", *TARGET_HORIZON_IDS)
 MAX_RPC_BYTES = 12_000_000
 # Package import root (checkout or site-packages), independent of this module's
 # internal location. Model/artifact paths come from runtime_paths, never ROOT.
@@ -51,6 +56,13 @@ def model_bridge_type(model_id):
     if model_id == "mark1-4-prototype":
         from dockdack.signals.mark1_4_external import Mark14TriggerBridge
         return Mark14TriggerBridge
+    from dockdack.signals.mark1_intraday_trigger import MODEL_IDS as INTRADAY_IDS, intraday_bridge_type
+    if model_id in INTRADAY_IDS:
+        return intraday_bridge_type(model_id)
+    if model_id in TARGET_HORIZON_IDS:
+        from dockdack.signals.mark1_target_horizon_trigger import target_horizon_bridge_type
+
+        return target_horizon_bridge_type(model_id)
     from dockdack.signals.preopen_series import PREOPEN_MODELS, preopen_bridge_type
     if model_id in PREOPEN_MODELS:
         return preopen_bridge_type(model_id)
@@ -83,6 +95,7 @@ class PrototypeWorker:
     """Child-side model/producer owner; all inputs and outputs are JSON data."""
 
     def __init__(self, model_id, *, bundle_root=None, state_path=None, predictors=None):
+        from dockdack.signals.preopen_series import PREOPEN_MODELS
         self.model_id = model_id
         self.bridge_type = model_bridge_type(model_id)
         self.bundle_root = Path(bundle_root) if bundle_root is not None else model_bundle(Path(self.bridge_type.bundle_directory).name)
@@ -98,7 +111,7 @@ class PrototypeWorker:
         if model_id == "mark1-4-prototype":
             from dockdack.signals.mark1_4_external import Mark14Worker
             self.special = Mark14Worker(bundle_root=self.bundle_root, predictors=self.predictors)
-        elif model_id == "mark1-3-prototype" or model_id in MODEL_IDS[5:]:
+        elif model_id in PREOPEN_MODELS:
             from dockdack.signals.mark1_4_external import Mark14Worker
             from dockdack.signals.preopen_series import load_preopen_predictor
             self.special = Mark14Worker(
@@ -121,6 +134,18 @@ class PrototypeWorker:
             elif self.model_id == "mark1-1-prototype":
                 from dockdack.mark1_1_prototype_inference import Mark11PrototypePredictor
                 self.predictors[market] = Mark11PrototypePredictor(self.bundle_root, market)
+            elif self.model_id in {"mark1-13-prototype", "mark1-14-prototype",
+                                   "mark1-15-prototype", "mark1-16-prototype",
+                                   "mark1-17-prototype", "mark1-18-prototype",
+                                   "mark1-19-prototype", "mark1-20-prototype",
+                                   "mark1-21-prototype", "mark1-22-prototype"}:
+                from dockdack.mark1_intraday_inference import MarkIntradayPredictor
+                variant = self.model_id.replace("mark1-", "mark1.").replace("-prototype", "")
+                self.predictors[market] = MarkIntradayPredictor(self.bundle_root, market, variant)
+            elif self.model_id in TARGET_HORIZON_IDS:
+                from dockdack.mark1_target_horizon_inference import MarkTargetHorizonPredictor
+
+                self.predictors[market] = MarkTargetHorizonPredictor(self.bundle_root, market, self.model_id)
             else:
                 from dockdack.signals.mark1_2_trigger import Mark12PrototypePredictor
                 self.predictors[market] = Mark12PrototypePredictor(self.bundle_root, market)

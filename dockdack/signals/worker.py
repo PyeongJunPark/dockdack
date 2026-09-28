@@ -35,6 +35,14 @@ def main(argv=None):
         parser.error("--stdio cannot be combined with file mode")
     if not args.stdio and not all((args.chart, args.positions, args.output, args.state)):
         parser.error("File mode requires --chart, --positions, --output and --state")
+    from dockdack.signals.mark1_intraday_trigger import MODEL_IDS as daily_proxy_ids
+    from dockdack.signals.mark1_target_horizon_trigger import MODEL_IDS as target_horizon_ids
+    if args.model in daily_proxy_ids or args.model in target_horizon_ids:
+        # These small CPU models each have their own worker. Keep PyTorch
+        # pools bounded in this child only; the desktop process is untouched.
+        import torch
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
     # Defense in depth, not an operating-system sandbox. No broker/config is
     # instantiated; even accidental Python outbound connection attempts fail.
     socket.create_connection = deny_network

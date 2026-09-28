@@ -61,6 +61,9 @@ class SchedulerTests(unittest.TestCase):
                 if self.error:
                     raise self.error
                 return self.data
+            def top_watchlist(inner, market, limit):
+                self.assertEqual(limit, 100)
+                return self.data
             def protected_symbols(inner, market):
                 return self.protected
         self.service = Service()

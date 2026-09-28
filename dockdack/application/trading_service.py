@@ -180,6 +180,9 @@ class TradingService:
     def top_volume(self, market: Market, limit: int = 100):
         return self.broker(market).top_volume(market, limit)
 
+    def top_watchlist(self, market: Market, limit: int = 100):
+        return self.broker(market).top_watchlist(market, limit)
+
     def common_equities(self, market: Market, candidates):
         return self.broker(market).common_equities(market, candidates)
 

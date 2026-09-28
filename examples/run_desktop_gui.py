@@ -49,6 +49,11 @@ def main(argv=None):
         from dockdack.mark1_1_prototype_inference import Mark11PrototypePredictor
         from dockdack.signals.mark1_2_trigger import Mark12PrototypePredictor
         from dockdack.mark1_4_inference import Mark14Predictor
+        from dockdack.mark1_intraday_inference import MarkIntradayPredictor
+        from dockdack.mark1_intraday_models import VARIANTS as INTRADAY_VARIANTS
+        from dockdack.mark1_intraday_extra_models import VARIANTS as EXTRA_VARIANTS
+        from dockdack.mark1_target_horizon_inference import MarkTargetHorizonPredictor
+        from dockdack.signals.mark1_target_horizon_trigger import MODEL_IDS as TARGET_HORIZON_MODEL_IDS
         from dockdack.signals.preopen_series import PREOPEN_MODELS, load_preopen_predictor
         for market in ("domestic", "us"):
             PrototypePredictor(ROOT / "models/mark1_prototype", market)
@@ -57,7 +62,13 @@ def main(argv=None):
             Mark14Predictor(ROOT / "models/mark1_4", market)
             for model_id, spec in PREOPEN_MODELS.items():
                 load_preopen_predictor(model_id, ROOT / spec.bundle_directory, market)
-        print("Unified GUI + saved KR/US mark1.0-mark1.12 model bundles: OK; no monitoring, orders or network")
+            for variant in INTRADAY_VARIANTS:
+                MarkIntradayPredictor(ROOT / "models/mark1_intraday", market, variant)
+            for variant in EXTRA_VARIANTS:
+                MarkIntradayPredictor(ROOT / "models/mark1_intraday_extra", market, variant)
+            for model_id in TARGET_HORIZON_MODEL_IDS:
+                MarkTargetHorizonPredictor(ROOT / "models/mark1_target_horizon_v1", market, model_id)
+        print("Unified GUI + saved KR/US mark1.0-mark1.28 model bundles: OK; no monitoring, orders or network")
         return 0
     return desktop_main(desktop_arguments(args))
 

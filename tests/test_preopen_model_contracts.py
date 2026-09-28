@@ -72,6 +72,13 @@ class Mark18AllocationTests(unittest.TestCase):
         # A 2.5% model output at 100/share is 25 shares, not the GUI's 10%.
         self.assertEqual(self.service.submitted[0].quantity, 25)
 
+    def test_model_specific_percent_and_frozen_fraction_use_lower_cap(self):
+        self.connect("0.025")
+        self.engine.source_buy_percents = {MARK18_SOURCE: Decimal("1")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 10)
+
     def test_missing_learned_fraction_cannot_fall_back_to_global_sizing(self):
         self.connect(None)
         self.arm()

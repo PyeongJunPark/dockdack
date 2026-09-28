@@ -56,3 +56,6 @@ include = ["dockdack*"]
 
 [tool.setuptools.package-data]
 dockdack = ["assets/*.svg", "assets/*.ico"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

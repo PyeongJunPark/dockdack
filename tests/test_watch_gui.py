@@ -209,8 +209,9 @@ class WatchGuiTests(unittest.TestCase):
     def test_top100_button_fetches_only_eligible_market_and_preserves_existing(self):
         calls = []
         start = 100000
-        def ranked(market, limit):
-            calls.append(market)
+        def ranked(market, limit, *, record=True):
+            if record:
+                calls.append(market)
             self.assertEqual(limit, 100)
             if market is Market.DOMESTIC:
                 return tuple(RankedStock(market, str(start+i), "KRX", f"Common {i}", i+1,
@@ -218,6 +219,7 @@ class WatchGuiTests(unittest.TestCase):
             return tuple(RankedStock(market, f"S{i}", "ND", f"Common {i}", i+1,
                                      Decimal(100), "USD", 1000-i, "volume") for i in range(100))
         self.service.top_volume = ranked
+        self.service.top_watchlist = lambda market, limit: ranked(market, limit, record=False)
         def reject_account_lookup(market):
             raise AssertionError("TOP100 selection must not request account protection")
         self.service.protected_symbols = reject_account_lookup
@@ -385,7 +387,7 @@ class WatchGuiTests(unittest.TestCase):
                              Decimal(100), "KRW", 1000, "volume"),)
         ranks += tuple(RankedStock(Market.DOMESTIC, f"{100000 + index}", "KRX", f"종목 {index}", index + 2,
                                    Decimal(100), "KRW", 999 - index, "volume") for index in range(99))
-        self.store.replace_ranked(Market.DOMESTIC, ranks, set())
+        self.store.replace_ranked(Market.DOMESTIC, ranks, set(), volume_rankings=ranks)
         self.window.reload_tables()
         self.assertIn("(100)", self.window.watch_market_tabs.tabText(0))
         self.assertNotIn("기타", self.window.watch_market_tabs.tabText(0))

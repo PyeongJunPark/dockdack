@@ -167,6 +167,39 @@ class V00ExecutionTests(unittest.TestCase):
         self.engine.poll()
         self.assertEqual(self.service.submitted[0].quantity, 100)
 
+    def test_model_source_percent_overrides_default_at_order_sizing(self):
+        self.external(source="model-a")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("3"), "model-b": Decimal("20")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 30)
+        self.assertEqual(self.store.rules()[0].quantity, 30)
+
+    def test_model_source_percent_applies_without_other_source_default(self):
+        self.external(source="model-a")
+        self.engine.source_buy_percents = {"model-a": Decimal("3")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 30)
+
+    def test_other_source_keeps_default_percent(self):
+        self.external(source="other-model")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("3")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 100)
+
+    def test_invalid_model_source_percent_blocks_buy_without_fallback(self):
+        self.external(source="model-a")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("NaN")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted, [])
+        self.assertTrue(self.engine.orders_enabled)
+
     def test_missing_equity_blocks_only_buy(self):
         self.rule()
         self.service.cash = None

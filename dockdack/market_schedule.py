@@ -182,20 +182,26 @@ class RankingScheduler:
             db.execute("DELETE FROM ranking_leases WHERE market=? AND slot=?", (market.value, slot))
 
     def _error(self, market, exc):
-        message = f"{market.value} 거래량 TOP100 재선정 실패 · 기존 목록 유지: {exc}"
+        message = f"{market.value} 복합 순위 TOP100 재선정 실패 · 기존 목록 유지: {exc}"
         if self.errors.get(market) != message:
             self.store.event("SYSTEM", message, category="system")
             self.errors[market] = message
 
     def _refresh_market(self, market, guard):
-        rankings = self.service.top_volume(market, 100)
+        volume_rankings = self.service.top_volume(market, 100)
+        guard()
+        rankings = self.service.top_watchlist(market, 100)
         guard()
         frozen = (self.preserve_watch_ids(market, self.clock())
                   if self.preserve_watch_ids is not None else ())
         guard()
         # Exact TOP100 membership no longer depends on account/open-order data.
         self.store.replace_ranked(market, rankings, set(), days=self.days,
-                                  separate_holdings=True, preserve_watch_ids=frozen)
+                                  separate_holdings=True, preserve_watch_ids=frozen,
+                                  volume_rankings=volume_rankings)
+
+    def _success_detail(self):
+        return "복합 순위 TOP100 재선정 완료"
 
     def due(self):
         if self.started is None or self.stopped():
@@ -235,7 +241,7 @@ class RankingScheduler:
                             raise _SupersededRanking("새 선정 시각으로 넘어가 이전 조회 결과를 적용하지 않음")
                     guard()
                     self._refresh_market(market, guard)
-                    self._finish(market, slot, owner, "done", "거래량 TOP100 재선정 완료")
+                    self._finish(market, slot, owner, "done", self._success_detail())
                     changed = True
                 except _SupersededRanking as exc:
                     self._finish(market, slot, owner, "superseded", str(exc))

@@ -77,6 +77,29 @@ def _planned_exit_label(target: dict, market: Market, upper=None, lower=None) ->
     return f"{planned.day:%Y-%m-%d} {timing}"
 
 
+def _unreconciled_model_history(target: dict) -> tuple[str, str]:
+    """Show persisted BUY provenance without allocating the broker position."""
+    names = []
+    details = []
+    for lot in target.get('lots', ()):
+        if not isinstance(lot, dict) or not all(
+                isinstance(lot.get(field), str) and lot[field].strip()
+                for field in ('lot_id', 'strategy_id', 'model_title')):
+            continue
+        name = lot['model_title'].strip()
+        if name not in names:
+            names.append(name)
+        remaining = lot.get('quantity_remaining', lot.get('quantity'))
+        amount = (f' · 앱 장부 잔여 {_quantity(remaining)}주'
+                  if isinstance(remaining, Decimal) and remaining.is_finite() and remaining > 0 else '')
+        details.append(f'{name}{amount} · 장부 매수분 {lot["lot_id"]}')
+    if not names:
+        return '모델 장부 대조 필요', ''
+    label = (names[0] if len(names) == 1 else f'{names[0]} 외 {len(names) - 1}개 모델') + ' · 대조 필요'
+    return label, ('앱의 저장된 매수 모델 출처 (증권사 보유주식의 모델별 배분 아님):\n'
+                   + '\n'.join(details) + '\n')
+
+
 def _cash_context(account, currency):
     """Compact visible settlement context, with exact meaning in the tooltip."""
     detail = "증권사가 반환한 현재 예수금을 부호 그대로 표시합니다. 주문가능금액·출금가능금액과 다릅니다."
@@ -536,8 +559,9 @@ class PortfolioPanel(QWidget):
                         expanded.append((virtual, lot))
                 else:
                     if 'lots' in group and not group.get('reconciled'):
+                        model_history, _ = _unreconciled_model_history(group)
                         group = {**group, 'error': ' / '.join(map(str, group.get('issues', ()))) or '장부와 증권사 잔고 대조 필요',
-                                 'model_title': '모델 장부 대조 필요'}
+                                 'model_title': model_history}
                     expanded.append((held, group))
             for position, target in expanded:
                 key = f'{position.market.value}:{position.exchange}:{position.symbol}'
@@ -598,7 +622,9 @@ class PortfolioPanel(QWidget):
                 original = (f"\n실제 매도 기준 {sign} {_target_price(value)} USD\n{self._fx_note()}"
                             if value is not None and self._active_fx(inst.market) is not None else "")
                 table.item(row, column).setToolTip(self._target_tooltip(key, lot_id) + original)
-            table.item(row, 11).setText(row_target.get('model_title') or ('모델 장부 대조 필요' if 'lots' in target and not target.get('reconciled') else '미확인 / 수동·외부'))
+            model_history = (_unreconciled_model_history(target)[0]
+                             if 'lots' in target and not target.get('reconciled') else None)
+            table.item(row, 11).setText(model_history or row_target.get('model_title') or '미확인 / 수동·외부')
             table.item(row, 11).setToolTip(self._target_tooltip(key, lot_id))
             table.item(row, 12).setText(_planned_exit_label(row_target, inst.market,
                                                               row_target.get('take_profit_price'),
@@ -611,7 +637,10 @@ class PortfolioPanel(QWidget):
         if lot_id is not None:
             target = next((lot for lot in target.get('lots', ()) if lot.get('lot_id') == lot_id), {})
         elif 'lots' in target and not target.get('reconciled'):
-            return ('모델별 체결 장부와 증권사 잔고가 일치하지 않아 자동매매를 보류합니다.\n'
+            _, model_history = _unreconciled_model_history(target)
+            return (model_history
+                    + '증권사 보유 수량은 종목별 합산입니다. 모델별 원가·목표가·매도가능수량은 검증되지 않았습니다.\n'
+                    '모델별 체결 장부와 증권사 잔고를 대조할 수 없어 이 종목 자동매도를 보류합니다.\n'
                     + '\n'.join(map(str, target.get('issues', ()))))
         if target.get('error'):
             return ('해당 종목 자동매도 보류: ' + str(target['error'])
@@ -681,6 +710,10 @@ class PortfolioPanel(QWidget):
                             item.setForeground(QColor("#ffb586"))
                     if column in {9, 10, 11, 12} or (column == 3 and lot_id):
                         item.setToolTip(self._target_tooltip(f'{position.market.value}:{position.exchange}:{position.symbol}', lot_id))
+                    elif column == 4 and not lot_id:
+                        group = getattr(self, '_exit_targets', {}).get(instrument, {})
+                        if 'lots' in group and not group.get('reconciled'):
+                            item.setToolTip('증권사 종목 합산 평균매입가입니다. 저장된 각 모델 매수분의 원가는 확인되지 않아 자동매도를 보류합니다.')
                     elif column == 5:
                         live = self._live_quotes.get(f'{position.market.value}:{position.exchange}:{position.symbol}')
                         if live and (fetched_at is None or live[1] >= fetched_at):

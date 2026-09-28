@@ -1,4 +1,4 @@
-"""Offline contract tests for exchange-scoped, durable volume TOP100 refreshes."""
+"""Offline contracts for the visible composite list and model volume ranks."""
 
 from datetime import date, timedelta, timezone
 from decimal import Decimal
@@ -32,6 +32,13 @@ def ranks(market):
                             "KRX" if market is Market.DOMESTIC else "ND", "Common", i,
                             Decimal(1000+i), "KRW" if market is Market.DOMESTIC else "USD",
                             10000-i, "volume") for i in range(1, 101))
+
+
+def watchlist_ranks(market):
+    categories = ("turnover", "volume", "gainers", "decliners", "turnover")
+    return tuple(RankedStock(row.market, row.symbol, row.exchange, row.name, row.rank,
+                             row.turnover, row.currency, row.volume,
+                             categories[(row.rank - 1) // 20]) for row in ranks(market))
 
 
 class VolumeContractTests(unittest.TestCase):
@@ -126,6 +133,7 @@ class DurableScheduleTests(unittest.TestCase):
         self.now = self.session.opened-timedelta(minutes=10)
         self.service = Mock(mode=TradingMode.DEMO)
         self.service.top_volume.side_effect = lambda market, limit: ranks(market)
+        self.service.top_watchlist.side_effect = lambda market, limit: watchlist_ranks(market)
         self.service.protected_symbols.return_value = set()
         self.scheduler = RankingScheduler(self.service, self.store, clock=lambda: self.now)
         self.scheduler.start()
@@ -139,6 +147,8 @@ class DurableScheduleTests(unittest.TestCase):
         self.assertTrue(self.scheduler.tick())
         self.assertFalse(self.scheduler.tick())
         self.assertEqual(self.service.top_volume.call_count, 3)
+        self.assertEqual(self.service.top_watchlist.call_count, 3)
+        self.assertEqual(len(self.store.model_volume_rankings(Market.DOMESTIC)), 100)
 
     def test_us_preopen_done_does_not_skip_actual_open_with_dst_or_halfday(self):
         for day in (date(2026, 9, 24), date(2026, 11, 27), date(2026, 11, 30)):
@@ -225,6 +235,17 @@ class DurableScheduleTests(unittest.TestCase):
         self.now += timedelta(hours=2, minutes=31)
         self.assertTrue(restarted.tick())
         self.assertEqual(self.service.top_volume.call_count, 2)
+
+    def test_incomplete_composite_refresh_keeps_previous_100_and_model_snapshot(self):
+        self.assertTrue(self.scheduler.tick())
+        visible_before = tuple(item.id for item in self.store.items())
+        model_before = self.store.model_volume_rankings(Market.DOMESTIC)
+        self.now = self.session.opened
+        self.service.top_watchlist.side_effect = BrokerAPIError("등락률 상위 목록 불완전")
+        self.assertFalse(self.scheduler.tick())
+        self.assertEqual(tuple(item.id for item in self.store.items()), visible_before)
+        self.assertEqual(self.store.model_volume_rankings(Market.DOMESTIC), model_before)
+        self.assertIn(Market.DOMESTIC, self.scheduler.errors)
 
     def test_crashed_running_claim_is_recovered_after_lease_not_before(self):
         self.now = self.session.opened+timedelta(hours=1)

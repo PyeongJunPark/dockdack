@@ -204,3 +204,6 @@ class ScopedRankingScheduler(RankingScheduler):
 
     def _refresh_market(self, market, guard):
         self.universe.refresh(market, guard=guard)
+
+    def _success_detail(self):
+        return "거래량 TOP100 재선정 완료"

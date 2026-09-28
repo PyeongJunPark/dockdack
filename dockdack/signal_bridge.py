@@ -47,6 +47,22 @@ _PROTOTYPE_FAMILIES = (
     PrototypeFamily("mark1-10-prototype", "mark1.10 prototype", None, None),
     PrototypeFamily("mark1-11-prototype", "mark1.11 prototype", None, None),
     PrototypeFamily("mark1-12-prototype", "mark1.12 prototype", None, None),
+    PrototypeFamily("mark1-13-prototype", "mark1.13 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-14-prototype", "mark1.14 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-15-prototype", "mark1.15 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-16-prototype", "mark1.16 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-17-prototype", "mark1.17 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-18-prototype", "mark1.18 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-19-prototype", "mark1.19 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-20-prototype", "mark1.20 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-21-prototype", "mark1.21 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-22-prototype", "mark1.22 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-23-prototype", "mark1.23 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-24-prototype", "mark1.24 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-25-prototype", "mark1.25 prototype", Decimal(".04"), None),
+    PrototypeFamily("mark1-26-prototype", "mark1.26 prototype", Decimal(".02"), None),
+    PrototypeFamily("mark1-27-prototype", "mark1.27 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-28-prototype", "mark1.28 prototype", Decimal(".04"), None),
 )
 
 

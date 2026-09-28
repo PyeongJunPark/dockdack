@@ -71,7 +71,7 @@ class DailyChart(QWidget):
         painter.fillRect(self.rect(), QColor("#101724"))
         painter.setPen(QColor("#95a4bb"))
         if not self.bars:
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "종목을 추가하고 조회하면 일봉 차트가 표시됩니다.")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "순위 종목을 선정하고 조회하면 일봉 차트가 표시됩니다.")
             return
         area = QRectF(14, 22, max(1, self.width() - 100), max(1, self.height() - 82))
         prices = [float(value) for b in self.bars for value in (b.open, b.high, b.low, b.close)]
@@ -624,14 +624,16 @@ class WatchlistDialog(QDialog):
         layout.addWidget(self.workspace_scroll, 1)
 
         data_controls = self.data_controls = QHBoxLayout()
-        self.ranking_button = QPushButton("현재 선정 가능한 시장 · 거래량 TOP100")
-        self.ranking_button.setToolTip("시장별 일반 기업 보통주만 선정 · ETF/ETN/펀드/우선주/리츠/스팩 및 분류 불명 종목 제외")
+        self.ranking_button = QPushButton("현재 선정 가능한 시장 · 종합 TOP100")
+        self.ranking_button.setToolTip("거래대금·거래량·상승률·하락률·시가총액 각 20개를 중복 없이 선정합니다. "
+                                       "시가총액 미지원 시장과 중복 부족분은 거래대금 순위로 채웁니다. "
+                                       "일반 기업 보통주만 포함하며 ETF/ETN/펀드/우선주/리츠/스팩·분류 불명은 제외합니다.")
         self.export_button = QPushButton("차트 JSON 내보내기")
         self.ranking_button.clicked.connect(self.add_top100)
         self.export_button.clicked.connect(self.export_json)
         data_controls.addWidget(self.ranking_button)
         data_controls.addWidget(self.export_button)
-        self.hourly_ranking = QCheckBox("거래량 TOP100 · 개장 10분 전 / 개장 / 매 정시")
+        self.hourly_ranking = QCheckBox("종합 TOP100 · 개장 10분 전 / 개장 / 매 정시")
         self.hourly_ranking.setChecked(True)
         self.hourly_ranking.setToolTip("감시 중 개장 10분 전·개장 시각·현지 매 정시에 재선정 · 미국 09:30 개장 포함 · 휴장/조기폐장 반영 · 실시간 순위 추종이나 주문 활성화와는 별도")
         data_controls.addWidget(self.hourly_ranking)
@@ -1185,13 +1187,17 @@ class WatchlistDialog(QDialog):
             from dockdack.market_schedule import ranking_allowed
             for market in Market:
                 if ranking_allowed(market, self.engine.clock()):
-                    ranks = self.service.top_volume(market, 100)
+                    volume_ranks = self.service.top_volume(market, 100)
                     if not ranking_allowed(market, self.engine.clock()):
                         raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
-                    # Exact TOP100 ranking needs no account/open-order lookup.
-                    self.store.replace_ranked(market, ranks, set(), days=days, separate_holdings=True)
+                    ranks = self.service.top_watchlist(market, 100)
+                    if not ranking_allowed(market, self.engine.clock()):
+                        raise InterruptedError("장이 종료되어 조회한 순위를 적용하지 않습니다.")
+                    # Ranked watchlist selection needs no account/open-order lookup.
+                    self.store.replace_ranked(market, ranks, set(), days=days, separate_holdings=True,
+                                              volume_rankings=volume_ranks)
             return {}
-        self._run(collect, done="선정 가능한 시장만 거래량 TOP100 갱신 · 장외/휴장 시장은 조회하지 않았습니다.")
+        self._run(collect, done="선정 가능한 시장만 종합 TOP100 갱신 · 장외/휴장 시장은 조회하지 않았습니다.")
 
     def export_json(self):
         if self.worker or self.monitoring:
@@ -1338,7 +1344,7 @@ class WatchlistDialog(QDialog):
         elif result[0] is self.store:
             self._workspace_error = ''
             _, items, rules, cached, rankings = result
-            self._ranked_ids = self._volume_rank_ids(rankings)
+            self._ranked_ids = self._composite_rank_ids(rankings)
             self._apply_cached_snapshots(cached)
             self.reload_tables(items=items, rules=rules)
         pending, self._workspace_pending = self._workspace_pending, False
@@ -1351,14 +1357,17 @@ class WatchlistDialog(QDialog):
         self.update_controls()
 
     @staticmethod
-    def _volume_rank_ids(rankings):
+    def _composite_rank_ids(rankings):
         result = {}
         for market in (Market.DOMESTIC, Market.US):
             rows = [rank for rank in rankings if rank["market"] == market.value]
             ids = {rank["watch_id"] for rank in rows}
             valid = (len(rows) == len(ids) == 100
                      and {rank["rank"] for rank in rows} == set(range(1, 101))
-                     and all(rank["ranking_basis"] == "volume" for rank in rows))
+                     and all(rank.get("ranking_scheme") == "composite" for rank in rows)
+                     and all(rank["ranking_basis"] in
+                             {"turnover", "volume", "gainers", "decliners", "market_cap"}
+                             for rank in rows))
             result[market] = ids if valid else set()
         return result
 
@@ -1369,7 +1378,7 @@ class WatchlistDialog(QDialog):
         if items is None:
             items = self.store.items()
             rankings = self.store.rankings()
-            self._ranked_ids = self._volume_rank_ids(rankings)
+            self._ranked_ids = self._composite_rank_ids(rankings)
         ranked_ids = getattr(self, "_ranked_ids", {})
         self._items_by_id = {item.id: item for item in items}
         self._watch_rows = {}
@@ -1397,8 +1406,8 @@ class WatchlistDialog(QDialog):
             name = '한국 · KRW' if market is Market.DOMESTIC else '미국 · USD'
             self.watch_market_tabs.setTabText(index, f"{name} ({len(market_items)})")
             self.watch_market_tabs.setTabToolTip(
-                index, f"거래량 선정 {ranked}개 · 장전 모델 후보는 선정 순위만 사용합니다."
-                if rank_set else f"활성 관심종목 {len(market_items)}개 · 거래량 TOP100 미확정")
+                index, f"종합 순위 선정 {ranked}개 · 장전 모델 후보는 선정 순위만 사용합니다."
+                if rank_set else f"활성 관심종목 {len(market_items)}개 · 종합 TOP100 미확정")
         rules = self.store.rules(limit=500) if rules is None else rules
         self.rules_table.setToolTip('최근 규칙 최대 500개 표시 · 전체 주문 기록은 주문·체결 및 매매일지에서 확인하세요.')
         item_map = {i.id: i for i in items}
@@ -2010,19 +2019,25 @@ class WatchlistDialog(QDialog):
             policy = ExternalPolicy(self.external_source.text().strip(), self.external_quantity.value(),
                                     Decimal(str(self.external_krw.value())), Decimal(str(self.external_usd.value())),
                                     allow_market=self.random_demo.isChecked())
+            model_sizing = getattr(self, '_model_buy_sizing_confirmation', None)
+            sizing_note = (model_sizing() if callable(model_sizing) else
+                           f"1회 매수: 시장별 계좌 평가금액(예수금 + 보유 평가액)의 {self.buy_percent.value():g}% · 정수 주식 수 내림\n")
+            notice_provider = getattr(self, 'builtin_confirmation_notice', '')
+            builtin_notice = (notice_provider() if callable(notice_provider)
+                              else str(notice_provider))
             return QMessageBox.question(self, f"외부 신호 {name} 자동주문 확인",
                 "확인하면 전체 조회 완료 후 자동주문이 ON 됩니다. 다시 켜기를 누를 필요가 없습니다.\n"
                 "조회 실패 시 OFF를 유지하며, 기다리는 동안 OFF로 예약을 취소할 수 있습니다.\n\n"
                 f"{policy.source_id}의 새 buy/sell 신호를 개별 확인 없이 {name} 주문할까요?\n"
                 f"추가 연결 신호기: {len(self.additional_sources.sources())}개\n"
                 f"입력: {self.signal_path.text()}\n"
-                + (f"1회 매수: 시장별 계좌 평가금액(예수금 + 보유 평가액)의 {self.buy_percent.value():g}% · 정수 주식 수 내림\n국내 음수 예수금은 검증된 D+2 추정예수금을 사용하며 해당 현금·주문가능금액 이내로 제한합니다.\n" if self.percent_sizing.isChecked()
+                + (sizing_note + "국내 음수 예수금은 검증된 D+2 추정예수금을 사용하며 해당 현금·주문가능금액 이내로 제한합니다.\n" if self.percent_sizing.isChecked()
                    else f"주문당 최대 {policy.max_quantity}주\n") +
                 f"주문당 금액 상한: {policy.max_krw:,} KRW / {policy.max_usd:,} USD\n"
                 f"국내 시장가 허용: {'예 (금액 상한은 현재가 추정치)' if policy.allow_market else '아니오'}\n"
                 f"미국: {self.random_us.currentText() if self.random_demo.isChecked() else '현재가 지정가만 허용'}\n"
                 + ("내장 모의 신호기: 매수 확률 10% · 평균 매입가 대비 +1% 익절 / -0.8% 손절\n" if self.random_demo.isChecked() else "") +
-                (str(getattr(self, "builtin_confirmation_notice", "")) + "\n" if getattr(self, "builtin_confirmation_notice", "") else "") +
+                (builtin_notice + "\n" if builtin_notice else "") +
                 "0인 시장은 차단됩니다. 수동 트리거는 실행하지 않습니다.\n"
                 "보유분은 전략별 목표를 별도로 점검하며, 목표 없는 기존 보유분만 기본 평균매입가 +1% / −0.8%를 적용합니다.\n"
                 "미국은 증권사 거절이 확정된 경우만 조건을 재확인해 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
@@ -2058,7 +2073,7 @@ class WatchlistDialog(QDialog):
                 or self._confirming_environment or self._workspace_worker is not None or self._workspace_error):
             return
         if not self.store.items() and not self.hourly_ranking.isChecked() and not self.engine.enable_holdings_exits:
-            self.message.setText("관심종목을 먼저 추가하세요. 자동주문은 OFF입니다.")
+            self.message.setText("종합 TOP100을 먼저 선정하세요. 자동주문은 OFF입니다.")
             return
         revision = self._order_request_revision
         self._confirming_orders = True

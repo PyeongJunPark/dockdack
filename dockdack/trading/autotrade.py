@@ -117,6 +117,9 @@ class AutoTrader:
         self.session_only_poll = True
         self.enable_holdings_exits = False
         self.equity_buy_percent = None
+        # Trusted local GUI policy, keyed by validated external source ID.
+        # Signal JSON cannot set or override these percentages.
+        self.source_buy_percents = {}
         self.isolated_symbol_errors = False
         self.us_retry_attempts = 3
         self.us_failure_cooldown_seconds = 300
@@ -642,19 +645,21 @@ class AutoTrader:
             upper, lower = targets["take_profit_price"], targets["stop_loss_price"]
             if rule.kind is TriggerKind.TIME_EXIT:
                 pass  # Verified model-owned holding deadline; price is irrelevant.
-            elif upper is None or lower is None:
+            elif upper is None and lower is None:
                 raise ValueError("매도 직전 보유종목 목표가격/평균매입가를 확인할 수 없습니다.")
-            elif not (fresh.quote.price >= upper or fresh.quote.price <= lower):
+            elif not ((upper is not None and fresh.quote.price >= upper)
+                      or (lower is not None and fresh.quote.price <= lower)):
                 raise ValueError("매도 직전 현재가가 보유종목 상방·하방 목표가격에 도달하지 않았습니다.")
         metadata = validate_external_rule(self.store, rule, self._policy_for(rule), self.clock()) if rule.kind is TriggerKind.EXTERNAL else {}
         kind = metadata.get("order_type", "limit")
         price = None if kind == "market" else current_common_equity_limit_price(inst.market, rule.side, fresh.quote.price)
-        if rule.side is OrderSide.BUY and self.equity_buy_percent is not None:
+        record = self.store.external_for_rule(rule.id) if rule.side is OrderSide.BUY and rule.kind is TriggerKind.EXTERNAL else None
+        buy_percent = (self.source_buy_percents.get(record["source_id"], self.equity_buy_percent)
+                       if record is not None else self.equity_buy_percent)
+        if rule.side is OrderSide.BUY and buy_percent is not None:
             policy = self._policy_for(rule) if rule.kind is TriggerKind.EXTERNAL else None
             cap = min(rule.max_notional, policy.cap(inst.market)) if policy else rule.max_notional
-            buy_percent = self.equity_buy_percent
             if rule.kind is TriggerKind.EXTERNAL:
-                record = self.store.external_for_rule(rule.id)
                 if record is not None and record["source_id"] == "mark1-8-prototype-demo-trigger":
                     if metadata.get("strategy_id") != "mark1-8-prototype" or "target_equity_fraction" not in metadata:
                         raise ValueError("Mark1.8 동결 투자비중 정보가 없습니다.")

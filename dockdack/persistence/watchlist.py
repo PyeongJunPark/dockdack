@@ -243,6 +243,11 @@ class WatchStore:
                     turnover TEXT NOT NULL, currency TEXT NOT NULL, fetched_at TEXT NOT NULL,
                     PRIMARY KEY(market, rank));
                 CREATE INDEX IF NOT EXISTS turnover_ranks_by_watch ON turnover_ranks(watch_id);
+                CREATE TABLE IF NOT EXISTS model_volume_ranks (
+                    market TEXT NOT NULL, rank INTEGER NOT NULL, watch_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL, exchange TEXT NOT NULL, name TEXT NOT NULL,
+                    turnover TEXT NOT NULL, currency TEXT NOT NULL, volume TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL, PRIMARY KEY(market, rank));
                 CREATE TABLE IF NOT EXISTS chart_exports (
                     id TEXT PRIMARY KEY, created_at TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS chart_export_members (
@@ -284,6 +289,8 @@ class WatchStore:
                 db.execute("ALTER TABLE turnover_ranks ADD COLUMN volume TEXT")
             if "ranking_basis" not in rank_columns:
                 db.execute("ALTER TABLE turnover_ranks ADD COLUMN ranking_basis TEXT NOT NULL DEFAULT 'turnover'")
+            if "ranking_scheme" not in rank_columns:
+                db.execute("ALTER TABLE turnover_ranks ADD COLUMN ranking_scheme TEXT NOT NULL DEFAULT 'legacy'")
             recovery_columns = {row[1] for row in db.execute("PRAGMA table_info(order_fill_recovery)")}
             for column in ("price_basis_quantity", "price_basis_price"):
                 if column not in recovery_columns:
@@ -355,12 +362,12 @@ class WatchStore:
         except (TypeError, ValueError):
             return {}
         return value if (isinstance(value, dict) and type(value.get("version")) is int
-                         and value["version"] in (1, 2, 3)) else {}
+                         and value["version"] in (1, 2, 3, 4)) else {}
 
     def save_ui_preferences(self, preferences: dict) -> None:
         """Replace only the UI settings row in this store's transaction."""
         if (not isinstance(preferences, dict) or type(preferences.get("version")) is not int
-                or preferences["version"] not in (1, 2, 3)):
+                or preferences["version"] not in (1, 2, 3, 4)):
             raise ValueError("지원하지 않는 화면 설정 형식입니다.")
         data = json.dumps(preferences, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         if len(data) > 65536:
@@ -403,7 +410,7 @@ class WatchStore:
     def _complete_ranked_rows(db, market: Market):
         """Return only a consistent, active 100-stock ranking for one market."""
         rows = db.execute(
-            """SELECT t.rank,t.watch_id,t.ranking_basis,t.fetched_at,
+            """SELECT t.rank,t.watch_id,t.ranking_basis,t.ranking_scheme,t.fetched_at,
                       w.active,w.market AS watch_market
                FROM turnover_ranks t LEFT JOIN watchlist w ON w.id=t.watch_id
                WHERE t.market=? ORDER BY t.rank""",
@@ -412,7 +419,12 @@ class WatchStore:
         if (len(rows) != 100 or {row["rank"] for row in rows} != set(range(1, 101))
                 or len({row["watch_id"] for row in rows}) != 100
                 or len({row["fetched_at"] for row in rows}) != 1
-                or {row["ranking_basis"] for row in rows} not in ({"volume"}, {"turnover"})
+                or not (len({row["ranking_scheme"] for row in rows}) == 1 and (
+                    (rows[0]["ranking_scheme"] == "legacy"
+                     and {row["ranking_basis"] for row in rows} in ({"volume"}, {"turnover"}))
+                    or (rows[0]["ranking_scheme"] == "composite"
+                        and {row["ranking_basis"] for row in rows}
+                        <= {"turnover", "volume", "gainers", "decliners", "market_cap"})))
                 or any(row["active"] != 1 or row["watch_market"] != market.value for row in rows)):
             return ()
         try:
@@ -496,12 +508,31 @@ class WatchStore:
                                category="system", at=datetime.fromisoformat(now))
 
     def replace_ranked(self, market: Market, rankings, protected_symbols: set[str], days: int = 30, *,
-                       separate_holdings=False, preserve_watch_ids=()):
+                       separate_holdings=False, preserve_watch_ids=(), volume_rankings=None):
         pairs = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r) for r in rankings]
         if (len(pairs) != 100 or len({i.id for i, _ in pairs}) != 100
                 or {r.rank for _, r in pairs} != set(range(1, 101))
                 or any(r.market is not market for _, r in pairs)):
             raise ValueError("해당 시장의 서로 다른 100종목이 필요합니다.")
+        # A composite watchlist carries an independent 100-name share-volume
+        # snapshot for Mark1.4; these names need not be active buy interests.
+        model_rows = None
+        if volume_rankings is not None:
+            model_rows = [(WatchItem(Instrument(r.market, r.symbol, r.exchange), r.name, days), r)
+                          for r in volume_rankings]
+            if (len(model_rows) != 100 or len({item.id for item, _ in model_rows}) != 100
+                    or {rank.rank for _, rank in model_rows} != set(range(1, 101))
+                    or any(rank.market is not market or rank.ranking_basis != "volume"
+                           or type(rank.volume) is not int or rank.volume < 0
+                           or rank.currency != item.instrument.currency
+                           or not isinstance(rank.turnover, Decimal) or not rank.turnover.is_finite()
+                           or rank.turnover < 0 for item, rank in model_rows)
+                    or any(left.volume < right.volume for (_, left), (_, right)
+                           in zip(model_rows, model_rows[1:]))):
+                raise ValueError("Mark1.4용 거래량 순위는 서로 다른 보통주 100개와 정확한 거래량이 필요합니다.")
+            if any(rank.ranking_basis not in {"turnover", "volume", "gainers", "decliners", "market_cap"}
+                   for _, rank in pairs):
+                raise ValueError("복합 관심종목 순위 출처를 확인할 수 없습니다.")
         frozen = frozenset(preserve_watch_ids)
         if any(not isinstance(key, str) or not key.startswith(market.value + ":") for key in frozen):
             raise ValueError("보존할 장전 종목 ID의 시장/형식이 올바르지 않습니다.")
@@ -520,6 +551,16 @@ class WatchStore:
                 raise ValueError("관심목록이 500개를 넘습니다. 기존 목록을 유지합니다.")
             self._deactivate_watch_ids(db, removable)
             db.execute("DELETE FROM turnover_ranks WHERE market=?", (market.value,))
+            if model_rows is not None:
+                db.execute("DELETE FROM model_volume_ranks WHERE market=?", (market.value,))
+                db.executemany(
+                    """INSERT INTO model_volume_ranks
+                       (market,rank,watch_id,symbol,exchange,name,turnover,currency,volume,fetched_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    ((market.value, rank.rank, item.id, rank.symbol, rank.exchange, rank.name,
+                      str(rank.turnover), rank.currency, str(rank.volume), now)
+                     for item, rank in model_rows),
+                )
             for item, rank in pairs:
                 new = not db.execute("SELECT 1 FROM watchlist WHERE id=?", (item.id,)).fetchone()
                 db.execute("""INSERT INTO watchlist VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -527,9 +568,11 @@ class WatchStore:
                            (item.id, market.value, item.instrument.symbol, item.instrument.exchange, item.name, item.days))
                 if new:
                     db.execute("INSERT INTO managed_watchlist VALUES (?)", (item.id,))
-                db.execute("INSERT INTO turnover_ranks(market,rank,watch_id,turnover,currency,fetched_at,volume,ranking_basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                db.execute("INSERT INTO turnover_ranks(market,rank,watch_id,turnover,currency,fetched_at,volume,ranking_basis,ranking_scheme) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (market.value, rank.rank, item.id, str(rank.turnover), rank.currency, now,
-                            str(rank.volume) if getattr(rank, "volume", None) is not None else None, getattr(rank, "ranking_basis", "turnover")))
+                            str(rank.volume) if getattr(rank, "volume", None) is not None else None,
+                            getattr(rank, "ranking_basis", "turnover"),
+                            "composite" if model_rows is not None else "legacy"))
             self._insert_event(db, "SYSTEM",
                                f"{market.value} 정시 TOP100 재선정 · 순위이탈 {len(removable)}개 관심목록 비활성"
                                + (f" · 장전 동결 후보 {len(frozen - incoming)}개 새 순위 밖으로 매수 제외" if frozen - incoming else "")
@@ -570,8 +613,10 @@ class WatchStore:
             ) if row["id"] not in ranked_ids]
             if extras:
                 self._deactivate_watch_ids(db, extras)
+                label = ("복합" if ranks[0]["ranking_scheme"] == "composite" else
+                         "거래량" if ranks[0]["ranking_basis"] == "volume" else "거래대금")
                 self._insert_event(db, "SYSTEM",
-                                   f"{market.value} 기존 {'거래량' if ranks[0]['ranking_basis'] == 'volume' else '거래대금'} 순위 100개 적용 · "
+                                   f"{market.value} 기존 {label} 순위 100개 적용 · "
                                    f"순위 밖 {len(extras)}개 관심목록 비활성 · 주문/보유 이력 유지",
                                    category="system")
             return len(extras)
@@ -664,6 +709,13 @@ class WatchStore:
     def rankings(self):
         with self.connection() as db:
             return tuple(dict(r) for r in db.execute("SELECT * FROM turnover_ranks ORDER BY market, rank"))
+
+    def model_volume_rankings(self, market: Market):
+        if not isinstance(market, Market):
+            raise ValueError("거래량 순위 시장을 확인하세요.")
+        with self.connection() as db:
+            return tuple(dict(r) for r in db.execute(
+                "SELECT * FROM model_volume_ranks WHERE market=? ORDER BY rank", (market.value,)))
 
     def external_for_rule(self, rule_id: str):
         with self.connection() as db:
