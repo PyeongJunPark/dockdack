@@ -24,6 +24,7 @@ if HAS_QT:
     from dockdack.v00_app import (DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER,
                                  MARK11_TRIGGER, MARK12_TRIGGER, MARK14_TRIGGER,
                                  INTRADAY_MODEL_IDS, TARGET_HORIZON_MODEL_IDS, PREOPEN_MODEL_IDS,
+                                 MINUTE_TRANSFER_IDS, MINUTE_HEDGE_IDS,
                                  PROTOTYPE_NOTICES, WATCH_MODEL_IDS, V00Window,
                                  desktop_model_choices)
     from dockdack.v00_widgets import OrderToast, SourceList
@@ -150,13 +151,14 @@ class V00GuiTests(unittest.TestCase):
                           for index in range(self.window.workspace_tabs.count())][:6],
                          ['관심종목', '보유종목', '매매일지', '주문·체결',
                           'AI 추론 모델', '고급설정'])
-        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].columnCount(), 3 + len(PROTOTYPE_NOTICES))
+        self.assertEqual(self.window.watch_tables[Market.DOMESTIC].columnCount(), 3 + len(WATCH_MODEL_IDS))
         self.assertTrue(self.window.percent_sizing.isChecked())
         self.assertTrue(self.window.percent_sizing.isHidden())
         self.assertTrue(self.window.external_panel.isAncestorOf(self.window.buy_percent))
         self.assertGreaterEqual(self.window.external_grid.indexOf(self.window.buy_percent), 0)
         self.assertEqual(set(self.window.mark14_panel.model_buy_percents), set(PROTOTYPE_NOTICES))
-        self.assertTrue(all(field.value() == 10 for field in self.window.mark14_panel.model_buy_percents.values()))
+        self.assertTrue(all(field.value() == (1 if model in MINUTE_TRANSFER_IDS else 10)
+                            for model, field in self.window.mark14_panel.model_buy_percents.items()))
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 
@@ -190,6 +192,15 @@ class V00GuiTests(unittest.TestCase):
             self.assertIn('마감 5분 전', detail)
             self.assertIn('관측 시가', PROTOTYPE_NOTICES[model])
             self.assertEqual(panel.model_buy_percents[model].value(), 10)
+        for model in MINUTE_TRANSFER_IDS:
+            self.assertIn('완료 일봉만 학습', panel.model_descriptions[model].text())
+            self.assertIn('5분봉 시한', panel.model_descriptions[model].text())
+            self.assertEqual(panel.model_buy_percents[model].value(), 1)
+            self.assertIn('총 노출이 합산', panel.model_buy_percents[model].toolTip())
+        for model in MINUTE_HEDGE_IDS:
+            self.assertTrue(panel.model_buy_percents[model].isHidden())
+        self.assertIn('minute_transfer', panel.model_sections)
+        self.assertIn('minute_hedge', panel.model_sections)
         self.assertTrue(self.window.environment_caption.isHidden())
         self.assertEqual(self.window._model_sell_display(MARK14_TRIGGER, self.item), '—')
         self.assertIn('매도: —', panel.selected_result.text())
@@ -418,7 +429,7 @@ class V00GuiTests(unittest.TestCase):
         self.window.workspace_tabs.setCurrentWidget(self.window.watch_page)
         self.window.show()
         view = self.window.watch_tables[Market.DOMESTIC]
-        self.assertEqual(view.columnCount(), 3 + len(PROTOTYPE_NOTICES))
+        self.assertEqual(view.columnCount(), 3 + len(WATCH_MODEL_IDS))
         self.assertEqual(view.horizontalHeaderItem(view.columnCount() - 2).text(), '현재가')
         self.assertEqual(view.horizontalHeaderItem(view.columnCount() - 1).text(), '조회')
         for width, height, min_chart_height in ((800, 520, 120), (980, 620, 180), (1280, 720, 200)):
@@ -498,7 +509,7 @@ class V00GuiTests(unittest.TestCase):
                             'score_unit': 'percent', 'selected': True}],
         }))
         view = self.window.watch_tables[Market.DOMESTIC]
-        self.assertEqual(view.columnCount(), 3 + len(ALL_MODEL_IDS))
+        self.assertEqual(view.columnCount(), 3 + len(WATCH_MODEL_IDS))
         self.assertEqual(view.item(0, 1 + WATCH_MODEL_IDS.index(MARK14_TRIGGER)).text(),
                          '매수 후보(0.820%)')
         summary = self.window.latest_model_summary.text()
@@ -567,6 +578,138 @@ class V00GuiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertLessEqual(abs(scroll.verticalScrollBar().value() - before), 2)
         self.assertFalse(self.window.engine.orders_enabled)
+
+    def test_bulk_model_selection_changes_once_without_scrolling_or_orders(self):
+        panel = self.window.mark14_panel
+        self.window.resize(800, 520)
+        self.window.show()
+        self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
+        self.drain_activity()
+        self.app.processEvents()
+        scroll = panel.choices_scroll
+        scroll.ensureWidgetVisible(self.window.external_model_checks[TARGET_HORIZON_MODEL_IDS[-1]])
+        self.app.processEvents()
+        before = scroll.verticalScrollBar().value()
+        self.assertGreater(before, 0)
+        self.assertTrue(panel.select_all_button.isEnabled())
+        self.window.external_mode.setChecked(False)
+        panel.select_all_button.click()
+        self.assertTrue(self.window.external_mode.isChecked())
+        self.app.processEvents()
+        self.assertTrue(all(check.isChecked() for check in self.window.external_model_checks.values()))
+        self.assertEqual(panel.selection_count.text(),
+                         f'{len(self.window.external_model_checks)} / {len(self.window.external_model_checks)}개 선택')
+        self.assertIn(f'분봉 매매 후보 {len(MINUTE_TRANSFER_IDS)}개',
+                      self.window.ai_connection_card.toolTip())
+        self.assertIn(f'인버스 연구 전용 {len(MINUTE_HEDGE_IDS)}개(주문 불가)',
+                      self.window.ai_connection_card.toolTip())
+        self.assertIn('개 선택', self.window.ai_connection_card.accessibleName())
+        self.assertLessEqual(abs(scroll.verticalScrollBar().value() - before), 2)
+        self.drain_activity()
+        self.window.update_controls()
+        self.assertTrue(panel.clear_all_button.isEnabled())
+        panel.clear_all_button.click()
+        self.assertTrue(all(not check.isChecked() for check in self.window.external_model_checks.values()))
+        self.assertEqual(panel.selection_count.text(), f'0 / {len(self.window.external_model_checks)}개 선택')
+        self.assertFalse(self.window.monitoring)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_bulk_buy_percent_updates_all_order_models_once_without_changing_selection(self):
+        from dockdack.v00_app import PROTOTYPE_SOURCES
+        panel = self.window.mark14_panel
+        self.window.external_model_checks[MARK14_TRIGGER].setChecked(True)
+        self.drain_activity()
+        self.window.resize(800, 520)
+        self.window.show()
+        self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
+        self.app.processEvents()
+        focused_field = panel.model_buy_percents[MINUTE_TRANSFER_IDS[-1]]
+        panel.choices_scroll.ensureWidgetVisible(focused_field)
+        focused_field.setFocus()
+        self.app.processEvents()
+        selection = self.window._chosen_external_models()
+        before_offset = panel.choices_scroll.verticalScrollBar().value()
+        before_values = {model: field.value() for model, field in panel.model_buy_percents.items()}
+        self.assertGreater(before_offset, 0)
+        self.assertEqual(panel.bulk_buy_percent.value(), 1)
+        self.assertEqual(panel.bulk_buy_percent.minimum(), 0.01)
+        self.assertEqual(panel.bulk_buy_percent.maximum(), 100)
+        self.assertEqual(panel.bulk_buy_percent.decimals(), 2)
+        panel.bulk_buy_percent.setValue(17.25)
+        # Entering a target does not change individual values until Apply.
+        self.assertEqual({model: field.value() for model, field in panel.model_buy_percents.items()},
+                         before_values)
+        with patch.object(self.window, '_apply_execution_preferences',
+                          wraps=self.window._apply_execution_preferences) as sizing, \
+                patch.object(self.window, '_queue_save_preferences',
+                             wraps=self.window._queue_save_preferences) as save, \
+                patch.object(self.window, '_model_trigger_changed') as rebuild:
+            panel.apply_bulk_buy_percent_button.click()
+            self.app.processEvents()
+            sizing.assert_called_once_with()
+            save.assert_called_once_with()
+            rebuild.assert_not_called()
+            # Applying the already-current value is a no-op.
+            panel.apply_bulk_buy_percent_button.click()
+            self.assertEqual(sizing.call_count, 1)
+            self.assertEqual(save.call_count, 1)
+        for model, field in panel.model_buy_percents.items():
+            if model in MINUTE_HEDGE_IDS:
+                self.assertEqual(field.value(), before_values[model])
+                self.assertNotIn(PROTOTYPE_SOURCES[model], self.window.engine.source_buy_percents)
+            else:
+                self.assertEqual(field.value(), 17.25, model)
+                self.assertEqual(self.window.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], D('17.25'))
+        self.assertIn(MARK14_TRIGGER, selection)  # Selected models are updated.
+        self.assertNotIn(MINUTE_TRANSFER_IDS[-1], selection)  # Unselected models are updated too.
+        self.assertEqual(self.window._chosen_external_models(), selection)
+        self.assertLessEqual(abs(panel.choices_scroll.verticalScrollBar().value() - before_offset), 2)
+        self.assertIs(self.app.focusWidget(), focused_field)
+        saved = self.window._capture_preferences()['model_buy_percents']
+        self.assertTrue(all(saved[model] == 17.25 for model in saved if model not in MINUTE_HEDGE_IDS))
+        self.assertFalse(self.window.monitoring)
+        self.assertFalse(self.window.pending_auto_arm)
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_bulk_buy_percent_is_locked_and_programmatic_apply_cannot_change_busy_or_real_config(self):
+        panel = self.window.mark14_panel
+        before_values = {model: field.value() for model, field in panel.model_buy_percents.items()}
+        panel.bulk_buy_percent.setValue(8.5)
+        for name, value in (('monitoring', True), ('worker', object()),
+                            ('_workspace_worker', object()), ('pending_auto_arm', True),
+                            ('_confirming_orders', True), ('_pending_environment', object()),
+                            ('_confirming_environment', True)):
+            before = getattr(self.window, name)
+            try:
+                setattr(self.window, name, value)
+                self.window.update_controls()
+                self.assertFalse(panel.bulk_buy_percent.isEnabled(), name)
+                self.assertFalse(panel.apply_bulk_buy_percent_button.isEnabled(), name)
+                panel.apply_bulk_buy_percent_button.click()
+                self.window._apply_bulk_model_buy_percent()
+                self.assertEqual({model: field.value() for model, field in panel.model_buy_percents.items()},
+                                 before_values, name)
+                self.assertIs(getattr(self.window, name), value)
+            finally:
+                setattr(self.window, name, before)
+                self.window.update_controls()
+        try:
+            self.service.mode = TradingMode.REAL
+            self.window.update_controls()
+            self.assertFalse(panel.bulk_buy_percent.isEnabled())
+            self.assertFalse(panel.apply_bulk_buy_percent_button.isEnabled())
+            self.window._apply_bulk_model_buy_percent()
+            self.assertEqual({model: field.value() for model, field in panel.model_buy_percents.items()},
+                             before_values)
+        finally:
+            self.service.mode = TradingMode.DEMO
+            self.window.update_controls()
+        self.assertTrue(panel.bulk_buy_percent.isEnabled())
+        self.assertTrue(panel.apply_bulk_buy_percent_button.isEnabled())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
 
     def test_optional_builtin_and_multiple_named_json_sources_can_coexist(self):
         self.window.builtin_lstm.setChecked(True)
@@ -665,7 +808,8 @@ class V00GuiTests(unittest.TestCase):
         from dockdack.v00_app import ALL_MODEL_IDS, PROTOTYPE_SOURCES
         self.assertEqual(len(self.window.mark14_panel.model_buy_percents), len(ALL_MODEL_IDS))
         self.assertEqual(tuple(self.window.mark14_panel.model_sections),
-                         ('probability', 'preopen', 'proxy', 'target_horizon'))
+                         ('probability', 'preopen', 'proxy', 'target_horizon',
+                          'minute_transfer', 'minute_hedge'))
         self.assertIn('일봉 대리', self.window.mark14_panel.model_sections['proxy'].text())
         self.window.show()
         self.window.workspace_tabs.setCurrentWidget(self.window.signal_connection_page)
@@ -673,21 +817,26 @@ class V00GuiTests(unittest.TestCase):
             self.window.resize(width, height)
             self.app.processEvents()
             for model, field in self.window.mark14_panel.model_buy_percents.items():
+                if model in MINUTE_HEDGE_IDS:
+                    self.assertTrue(field.isHidden())
+                    continue
                 card = field.parentWidget()
                 check = self.window.external_model_checks[model]
                 self.assertGreaterEqual(field.geometry().left(), check.geometry().right(), model)
                 self.assertLessEqual(field.geometry().right(), card.contentsRect().right(), model)
         for index, model in enumerate(ALL_MODEL_IDS, 1):
             self.window.mark14_panel.model_buy_percents[model].setValue(index)
-            self.assertEqual(self.window.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], D(index))
+            if model in MINUTE_HEDGE_IDS:
+                self.assertNotIn(PROTOTYPE_SOURCES[model], self.window.engine.source_buy_percents)
+            else:
+                self.assertEqual(self.window.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], D(index))
         self.assertFalse(self.window.engine.orders_enabled)
 
     def test_unchecked_model_columns_collapse_without_moving_price_or_lookup(self):
-        from dockdack.v00_app import ALL_MODEL_IDS
-        last_two = (1 + len(ALL_MODEL_IDS), 2 + len(ALL_MODEL_IDS))
+        last_two = (1 + len(WATCH_MODEL_IDS), 2 + len(WATCH_MODEL_IDS))
         for view in self.window.watch_tables.values():
             self.assertTrue(all(view.isColumnHidden(column)
-                                for column in range(1, 1 + len(ALL_MODEL_IDS))))
+                                for column in range(1, 1 + len(WATCH_MODEL_IDS))))
             self.assertTrue(all(not view.isColumnHidden(column) for column in last_two))
         for model in (WATCH_MODEL_IDS[0], WATCH_MODEL_IDS[-1]):
             self.window.external_model_checks[model].setChecked(True)
@@ -696,16 +845,16 @@ class V00GuiTests(unittest.TestCase):
             self.window.watch_market_tabs.setCurrentIndex(tab)
             view = self.window.watch_tables[(Market.DOMESTIC, Market.US)[tab]]
             self.assertFalse(view.isColumnHidden(1))
-            self.assertFalse(view.isColumnHidden(len(ALL_MODEL_IDS)))
+            self.assertFalse(view.isColumnHidden(len(WATCH_MODEL_IDS)))
             self.assertTrue(view.isColumnHidden(2))
             self.assertTrue(all(not view.isColumnHidden(column) for column in last_two))
             self.assertEqual(view.horizontalHeaderItem(last_two[0]).text(), '현재가')
             self.assertEqual(view.horizontalHeaderItem(last_two[1]).text(), '조회')
-            self.assertTrue(view.horizontalHeaderItem(len(ALL_MODEL_IDS)).text().endswith('점수'))
+            self.assertTrue(view.horizontalHeaderItem(len(WATCH_MODEL_IDS)).text().endswith('점수'))
         self.window.external_model_checks[WATCH_MODEL_IDS[-1]].setChecked(False)
         self.drain_activity()
         for view in self.window.watch_tables.values():
-            self.assertTrue(view.isColumnHidden(len(ALL_MODEL_IDS)))
+            self.assertTrue(view.isColumnHidden(len(WATCH_MODEL_IDS)))
             self.assertFalse(view.isColumnHidden(1))
             self.assertTrue(all(not view.isColumnHidden(column) for column in last_two))
         self.assertFalse(self.window.engine.orders_enabled)
@@ -722,6 +871,8 @@ class V00GuiTests(unittest.TestCase):
                 setattr(self.window, name, value)
                 self.window.update_controls()
                 self.assertFalse(check.isEnabled(), name)
+                self.assertFalse(self.window.mark14_panel.select_all_button.isEnabled(), name)
+                self.assertFalse(self.window.mark14_panel.clear_all_button.isEnabled(), name)
                 self.assertFalse(self.window.buy_percent.isEnabled(), name)
                 self.assertFalse(self.window.mark14_panel.model_buy_percents[MARK14_TRIGGER].isEnabled(), name)
                 check.click()

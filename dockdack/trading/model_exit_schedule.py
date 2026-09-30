@@ -18,12 +18,20 @@ class ModelExitSchedule:
     # Number of *later exchange sessions* after the first observed fill session.
     sessions_after_fill: int
     # preclose: final five minutes; elapsed: any regular-session time on/after due date.
+    # minute_elapsed: observed-fill-based intraday timeout, with same-session
+    # preclose escape so a short-horizon prototype never intentionally carries
+    # overnight because its horizon ran past the closing bell.
     timing: str
+    minutes_after_fill: int | None = None
 
     def __post_init__(self):
         if (type(self.sessions_after_fill) is not int
                 or not 0 <= self.sessions_after_fill <= 30
-                or self.timing not in {"preclose", "elapsed"}):
+                or self.timing not in {"preclose", "elapsed", "minute_elapsed"}
+                or (self.timing == "minute_elapsed") != (self.minutes_after_fill is not None)
+                or (self.minutes_after_fill is not None
+                    and (type(self.minutes_after_fill) is not int
+                         or not 1 <= self.minutes_after_fill <= 390))):
             raise ValueError("Invalid model exit schedule")
 
 
@@ -33,6 +41,7 @@ class PlannedModelExit:
 
     day: date
     timing: str
+    at: datetime | None = None
 
 
 MODEL_EXIT_SCHEDULES = {
@@ -58,6 +67,10 @@ MODEL_EXIT_SCHEDULES = {
     "mark1-26-prototype": ModelExitSchedule(19, "preclose"),
     "mark1-27-prototype": ModelExitSchedule(9, "preclose"),
     "mark1-28-prototype": ModelExitSchedule(9, "preclose"),
+    **{f"mark1-{number}-prototype": ModelExitSchedule(0, "minute_elapsed", horizon * 5)
+       for number, horizon in ((29, 3), (30, 3), (31, 3),
+                               (32, 6), (33, 6), (34, 6),
+                               (35, 12), (36, 12), (37, 12))},
 }
 
 
@@ -102,6 +115,22 @@ def _observed_fill(lot: dict) -> tuple[ModelExitSchedule, datetime] | None:
 
 
 def _planned_exit(spec: ModelExitSchedule, fill_time: datetime, market: Market) -> PlannedModelExit:
+    if spec.timing == "minute_elapsed":
+        due_at = fill_time + timedelta(minutes=spec.minutes_after_fill)
+        local_day = market_time(market, fill_time).date()
+        first_session = session_on(market, local_day)
+        if first_session is not None and first_session.opened <= fill_time < first_session.closed:
+            earliest = max(fill_time, min(due_at, first_session.closed - timedelta(minutes=5)))
+            return PlannedModelExit(local_day, spec.timing, earliest)
+        # An out-of-session observation must never display an earlier exit.
+        for offset in range(370):
+            session = session_on(market, local_day + timedelta(days=offset))
+            if session is None:
+                continue
+            earliest = max(due_at, session.opened)
+            if earliest < session.closed:
+                return PlannedModelExit(market_time(market, earliest).date(), spec.timing, earliest)
+        raise ValueError("No regular-session minute exit after observed fill")
     first = _filled_session_day(market, fill_time)
     target = first if spec.sessions_after_fill == 0 else _target_day(market, first, spec.sessions_after_fill)
     return PlannedModelExit(target, spec.timing)
@@ -128,6 +157,21 @@ def timed_exit_due(lot: dict, market: Market | str, now: datetime) -> bool:
     if (now.tzinfo is None or now.utcoffset() is None
             or now.astimezone(timezone.utc) < fill_time.astimezone(timezone.utc)):
         return False
+    if spec.timing == "minute_elapsed":
+        if market is not Market.DOMESTIC or spec.minutes_after_fill is None:
+            return False
+        fill_session = session_on(market, market_time(market, fill_time).date())
+        today = market_time(market, now).date()
+        session = session_on(market, today)
+        if session is None or not session.opened <= now < session.closed:
+            return False
+        due_at = fill_time + timedelta(minutes=spec.minutes_after_fill)
+        if fill_session is None or not fill_session.opened <= fill_time < fill_session.closed:
+            # Observation time is not broker fill time. A confirmed fill first
+            # seen before open, after close, or on a holiday still gets a
+            # future regular-session exit after its full observed-time horizon.
+            return now >= due_at
+        return now >= due_at or now >= session.closed - timedelta(minutes=5)
     planned = _planned_exit(spec, fill_time, market)
     target = planned.day
     today = market_time(market, now).date()

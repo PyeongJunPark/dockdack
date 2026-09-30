@@ -131,6 +131,28 @@ class PortfolioFxGuiTests(unittest.TestCase):
         self.assertIn("실제 매도 기준 ≥ 101 USD", table.item(0, 9).toolTip())
         self.assertEqual(self.payload[Market.US].positions[0].current_price, D(200))
 
+    def test_estimated_model_target_is_marked_but_broker_aggregate_profit_is_not(self):
+        from types import SimpleNamespace
+        key = 'us:ND:AAPL'
+        lot = {'lot_id': 'demo-buy', 'model_title': 'mark1.5 prototype',
+               'quantity': D(2), 'sellable_quantity': D(2), 'average_price': D(90),
+               'average_price_basis': 'demo_order_reference',
+               'take_profit_price': D(91), 'stop_loss_price': D(89)}
+        target = {'lots': (lot,), 'reconciled': True}
+        self.panel.set_exit_targets({key: target})
+        token = self._request_without_network()
+        self.panel._fx_finished(token, self.reference, None)
+        table = self.panel.tables[Market.US]
+        self.assertEqual(table.item(0, 4).text(), '120,000')  # broker average 100 USD
+        self.assertEqual(table.item(0, 7).text(), '+240,000')  # broker P/L 200 USD
+        self.assertEqual(table.item(0, 9).text(), '추정 ≥ 109,200')
+        self.assertEqual(table.item(0, 11).text(), 'mark1.5 prototype · 원가 추정')
+        self.assertIn('모의 매도 기준 · 원가 추정 ≥ 91.0000 USD', table.item(0, 9).toolTip())
+        self.panel.apply_holding_quote({'watch_id': key,
+            'instrument': SimpleNamespace(market=Market.US, currency='USD'),
+            'quote': SimpleNamespace(price=D(210)), 'targets': target})
+        self.assertEqual(table.item(0, 9).text(), '추정 ≥ 109,200')
+
 
 if __name__ == "__main__":
     unittest.main()

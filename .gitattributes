@@ -40,6 +40,8 @@ dockdack/mark1_intraday_extra_models.py -text
 models/mark1_target_horizon_v1/** -text whitespace=cr-at-eol
 dockdack/mark1_target_horizon_models.py -text
 examples/train_mark1_target_horizon_prototypes.py -text
+# Daily-trained minute prototype manifests/checkpoints also preserve raw seals.
+models/mark1_minute/** -text whitespace=cr-at-eol
 dockdack/mark1_4_evolution.py -text
 dockdack/mark1_4_followup_models.py -text
 dockdack/mark1_4_sparse.py -text

@@ -32,7 +32,8 @@ def plan_close_allocations(store, db, watch_id, quantity, broker_quantity):
         used = min(left, lot["quantity_remaining"])
         if used > 0:
             result.append((lot["lot_id"], str(used), str(offset), str(lot["filled_quantity"]),
-                           str(lot["average_price"]) if lot["average_price"] is not None else None))
+                           (str(lot["average_price"]) if lot["average_price"] is not None
+                            and lot.get("average_price_basis") != "demo_order_reference" else None)))
             offset += used
             left -= used
     return tuple(result)

@@ -826,7 +826,9 @@ class WatchStore:
                 raise ValueError("원매수 모델의 확인된 가용 보유량을 초과하거나 체결 기록 확인이 필요합니다.")
             db.execute("INSERT INTO prototype_sell_allocations VALUES(?,?,?,?,?,?)",
                        (rule_id, lot_id, str(quantity), (now or utc_now()).isoformat(),
-                        str(lot["filled_quantity"]), str(lot["average_price"])))
+                        str(lot["filled_quantity"]),
+                        (str(lot["average_price"]) if lot.get("average_price_basis") != "demo_order_reference"
+                         else None)))
 
     def exit_targets(self, watch_id: str):
         with self.connection() as db:
@@ -874,6 +876,40 @@ class WatchStore:
         if changed != 1:
             raise ValueError("수량 산정 중 신호 상태가 변경되었습니다.")
         return sized
+
+    def raise_confirmed_demo_sell_limit(self, rule: TriggerRule, required: Decimal):
+        """Allow one confirmed model share to close above its order cap.
+
+        This updates only an unclaimed DEMO holding exit with a durable one-lot
+        allocation. BUY, manual holdings, multi-share intents and REAL remain
+        subject to their original limits.
+        """
+        from dataclasses import replace
+        positive(required, "확인된 1주 매도금액")
+        if (self.mode is not TradingMode.DEMO or rule.side is not OrderSide.SELL
+                or rule.quantity != 1 or not rule.id.startswith("holding-exit-")):
+            raise ValueError("상한 예외는 모의 모델의 확인된 보유분 1주 매도에만 허용합니다.")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM rules WHERE id=?", (rule.id,)).fetchone()
+            allocation = next((value for value in self._prototype_allocations(db, rule_id=rule.id)
+                               if not value.get("bulk")), None)
+            inventory = self._prototype_inventory(db, rule.watch_id)
+            lot = next((value for value in inventory["lots"]
+                        if allocation and value["lot_id"] == allocation["lot_id"]), None)
+            if (not row or row["status"] != "ready" or row["side"] != "sell"
+                    or row["quantity"] != 1 or row["watch_id"] != rule.watch_id
+                    or Decimal(row["max_notional"]) != rule.max_notional
+                    or allocation is None or Decimal(allocation["quantity"]) != 1
+                    or inventory["issues"] or lot is None
+                    or lot["average_price"] is None or lot["quantity_remaining"] < 1):
+                raise ValueError("상한 예외를 위한 확정 모델 보유분·매도 예약을 확인할 수 없습니다.")
+            raised = max(rule.max_notional, required)
+            db.execute("UPDATE rules SET max_notional=? WHERE id=?", (str(raised), rule.id))
+            self._insert_event(db, rule.watch_id,
+                               f"모의 모델 확정 보유분 1주 청산 · 시세 상승에 따른 매도 상한 {raised}",
+                               category="order")
+        return replace(rule, max_notional=raised)
 
     def retry_rule(self, rule: TriggerRule, *, maximum=3):
         """A new auditable intent only after an explicitly broker-rejected predecessor.

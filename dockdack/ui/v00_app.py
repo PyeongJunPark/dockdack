@@ -27,6 +27,8 @@ from dockdack.version import APP_RELEASE
 from dockdack.environment_store import selected_mode, scoped_store_path, store_for_service
 from dockdack.gui_service import Instrument, TradingService
 from dockdack.lstm30_adapter import MAX_QUOTE_AGE
+from dockdack.minute_model_catalog import (MINUTE_HEDGE_IDS, MINUTE_RESEARCH_BY_ID,
+                                           MINUTE_RESEARCH_IDS, MINUTE_TRANSFER_IDS)
 from dockdack.models import Market, TradingMode
 from dockdack.portfolio import PortfolioCache
 from dockdack.signal_bridge import atomic_json, ExternalPolicy, SignalFileReader
@@ -139,7 +141,7 @@ MARK14_TRIGGER = 'mark1-4-prototype'
 BARRIER_MODELS = (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER, *INTRADAY_MODEL_IDS)
 QUOTE_SCORE_MODELS = (*BARRIER_MODELS, *TARGET_HORIZON_MODEL_IDS)
 PREOPEN_MODEL_IDS = (MARK14_TRIGGER, *PREOPEN_MODELS)
-ALL_MODEL_IDS = tuple(sorted((*QUOTE_SCORE_MODELS, *PREOPEN_MODEL_IDS),
+ALL_MODEL_IDS = tuple(sorted((*QUOTE_SCORE_MODELS, *PREOPEN_MODEL_IDS, *MINUTE_RESEARCH_IDS),
                              key=lambda model: int(model.split('-')[1]) if model != MARK1_TRIGGER else 0))
 WATCH_MODEL_IDS = (tuple(model for model in ALL_MODEL_IDS if model in QUOTE_SCORE_MODELS)
                    + tuple(model for model in ALL_MODEL_IDS if model in PREOPEN_MODEL_IDS))
@@ -177,6 +179,16 @@ PROTOTYPE_NOTICES.update({
             '목표 도달 확률·실제 지정가 체결·수익성은 검증되지 않았습니다.\n'
             + TARGET_HORIZON_RISK_NOTICE)
     for model, (lookback, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
+PROTOTYPE_NOTICES.update({
+    model: (f'{spec.title} · {spec.method} · {spec.output}. '
+            '모의 매수·매도 후보는 완료된 분봉, 적격 모델 묶음과 주문 안전조건을 통과할 때만 발생합니다. '
+            '실전 주문은 차단되며 분봉 수익성은 검증되지 않았습니다.')
+    for model, spec in MINUTE_RESEARCH_BY_ID.items() if model in MINUTE_TRANSFER_IDS})
+PROTOTYPE_NOTICES.update({
+    model: (f'{spec.title} · {spec.method} · {spec.output}. '
+            '연구 연결·주문 보류: 두 다리 실행 정책이 검증될 때까지 '
+            '실전·모의 주문 모두 전송하지 않습니다.')
+    for model, spec in MINUTE_RESEARCH_BY_ID.items() if model in MINUTE_HEDGE_IDS})
 PROTOTYPE_TITLES = {MARK1_TRIGGER: 'mark1.0 prototype', MARK11_TRIGGER: 'mark1.1 prototype',
                     MARK12_TRIGGER: 'mark1.2 prototype', MARK14_TRIGGER: 'mark1.4 prototype'}
 PROTOTYPE_TITLES.update({model: spec.title for model, spec in PREOPEN_MODELS.items()})
@@ -184,12 +196,14 @@ PROTOTYPE_TITLES.update({model: model.replace('mark1-', 'mark1.').replace('-prot
                          for model in INTRADAY_MODEL_IDS})
 PROTOTYPE_TITLES.update({model: model.replace('mark1-', 'mark1.').replace('-prototype', ' prototype')
                          for model in TARGET_HORIZON_MODEL_IDS})
+PROTOTYPE_TITLES.update({model: spec.title for model, spec in MINUTE_RESEARCH_BY_ID.items()})
 PROTOTYPE_TARGETS = {MARK1_TRIGGER: '+1% / −0.9%', MARK11_TRIGGER: '+0.5% / −0.4%',
                      MARK12_TRIGGER: '+1% / −0.9%', MARK14_TRIGGER: '다음 날 시가→종가 점수'}
 PROTOTYPE_TARGETS.update({model: spec.output for model, spec in PREOPEN_MODELS.items()})
 PROTOTYPE_TARGETS.update({model: '일봉 전체 +1% / −0.9% 대리점수' for model in INTRADAY_MODEL_IDS})
 PROTOTYPE_TARGETS.update({model: f'목표 +{target:g}% / {horizon}세션 시가 대리점수'
                           for model, (_, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
+PROTOTYPE_TARGETS.update({model: spec.output for model, spec in MINUTE_RESEARCH_BY_ID.items()})
 PROTOTYPE_SOURCES = {MARK1_TRIGGER: 'mark1-prototype-demo-trigger',
                      MARK11_TRIGGER: 'mark1-1-prototype-demo-trigger',
                      MARK12_TRIGGER: 'mark1-2-prototype-demo-trigger',
@@ -197,6 +211,7 @@ PROTOTYPE_SOURCES = {MARK1_TRIGGER: 'mark1-prototype-demo-trigger',
 PROTOTYPE_SOURCES.update({model: spec.source_id for model, spec in PREOPEN_MODELS.items()})
 PROTOTYPE_SOURCES.update({model: model + '-demo-trigger' for model in INTRADAY_MODEL_IDS})
 PROTOTYPE_SOURCES.update({model: model + '-demo-trigger' for model in TARGET_HORIZON_MODEL_IDS})
+PROTOTYPE_SOURCES.update({model: spec.source_id for model, spec in MINUTE_RESEARCH_BY_ID.items()})
 PROTOTYPE_METHODS = {
     MARK1_TRIGGER: '30일봉 특징 · CatBoost 3개 시드 앙상블',
     MARK11_TRIGGER: '30일봉 특징 · 별도 CatBoost 3개 시드 앙상블',
@@ -219,6 +234,7 @@ PROTOTYPE_METHODS.update(dict(zip(INTRADAY_MODEL_IDS, (
 ))))
 PROTOTYPE_METHODS.update({model: f'완료 {lookback}봉+현재가 6채널 · {TARGET_HORIZON_FAMILIES[model]}'
                           for model, (lookback, _, _) in TARGET_HORIZON_MODEL_SPECS.items()})
+PROTOTYPE_METHODS.update({model: spec.method for model, spec in MINUTE_RESEARCH_BY_ID.items()})
 PROTOTYPE_EXITS = {
     MARK1_TRIGGER: '매수분 +1% / −0.9%',
     MARK11_TRIGGER: '매수분 +0.5% / −0.4%',
@@ -230,6 +246,24 @@ PROTOTYPE_EXITS.update({model: '해당 모델 매수분 +1% / −0.9%' for model
 PROTOTYPE_EXITS.update({
     model: f'해당 매수분 +{target:g}% 목표 · 손절 없음 · {horizon}번째 거래 세션 마감 5분 전부터 매도 시도'
     for model, (_, horizon, target) in TARGET_HORIZON_MODEL_SPECS.items()})
+PROTOTYPE_EXITS.update({
+    model: f'체결 후 {MINUTE_RESEARCH_BY_ID[model].horizon_bars}개 5분봉 시한 · +3% / −2% · 장마감 전 청산'
+    for model in MINUTE_TRANSFER_IDS})
+PROTOTYPE_EXITS.update({model: '연구 연결·주문 보류' for model in MINUTE_HEDGE_IDS})
+
+
+def _model_group(model):
+    if model in MINUTE_TRANSFER_IDS:
+        return 'minute_transfer'
+    if model in MINUTE_HEDGE_IDS:
+        return 'minute_hedge'
+    if model in TARGET_HORIZON_MODEL_IDS:
+        return 'target_horizon'
+    if model in INTRADAY_MODEL_IDS:
+        return 'proxy'
+    if model in BARRIER_MODELS:
+        return 'probability'
+    return 'preopen'
 
 
 class Mark14Panel(QWidget):
@@ -242,6 +276,67 @@ class Mark14Panel(QWidget):
         layout = QVBoxLayout(self)
         self.heading = QLabel('모델 선택 · 선택한 모델은 각자 독립 신호를 냅니다')
         self.heading.hide()
+        selection_toolbar = QHBoxLayout()
+        selection_toolbar.setContentsMargins(2, 0, 2, 3)
+        selection_toolbar.setSpacing(8)
+        selection_title = QLabel('모델 선택')
+        selection_title.setStyleSheet('font-size: 16px; font-weight: 700; color: #e9f5ff;')
+        selection_toolbar.addWidget(selection_title)
+        self.selection_count = QLabel()
+        self.selection_count.setObjectName('modelSelectionCount')
+        self.selection_count.setStyleSheet('font-size: 12px; font-weight: 600; color: #9bdacb;')
+        selection_toolbar.addWidget(self.selection_count)
+        selection_toolbar.addStretch()
+        self.select_all_button = QPushButton('전체 선택')
+        self.select_all_button.setObjectName('selectAllModels')
+        self.select_all_button.setAccessibleName('모든 AI 모델 선택')
+        self.clear_all_button = QPushButton('선택 해제')
+        self.clear_all_button.setObjectName('clearAllModels')
+        self.clear_all_button.setAccessibleName('모든 AI 모델 선택 해제')
+        for button in (self.select_all_button, self.clear_all_button):
+            button.setMinimumHeight(30)
+            button.setStyleSheet(
+                'QPushButton { background: #1c3547; color: #dcf4f6; border: 1px solid #3a6271; '
+                'border-radius: 5px; font-size: 12px; font-weight: 600; padding: 3px 11px; } '
+                'QPushButton:hover { background: #285467; border-color: #65cbb5; } '
+                'QPushButton:disabled { background: #1a2939; color: #748e9c; border-color: #2c4050; }')
+            selection_toolbar.addWidget(button)
+        layout.addLayout(selection_toolbar)
+        sizing_toolbar = QHBoxLayout()
+        sizing_toolbar.setContentsMargins(2, 0, 2, 3)
+        sizing_toolbar.setSpacing(8)
+        sizing_title = QLabel('1회 매수 일괄')
+        sizing_title.setStyleSheet('font-size: 12px; font-weight: 600; color: #a9c9d8;')
+        sizing_toolbar.addWidget(sizing_title)
+        self.bulk_buy_percent = QDoubleSpinBox()
+        self.bulk_buy_percent.setObjectName('bulkModelBuyPercent')
+        self.bulk_buy_percent.setAccessibleName('모든 주문 모델의 1회 매수 비중 퍼센트')
+        self.bulk_buy_percent.setRange(0.01, 100)
+        self.bulk_buy_percent.setDecimals(2)
+        self.bulk_buy_percent.setSingleStep(0.5)
+        self.bulk_buy_percent.setKeyboardTracking(False)
+        self.bulk_buy_percent.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.bulk_buy_percent.setValue(1)
+        self.bulk_buy_percent.setSuffix(' %')
+        self.bulk_buy_percent.setFixedSize(96, 30)
+        self.bulk_buy_percent.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.bulk_buy_percent.setStyleSheet(
+            'QDoubleSpinBox { background: #10283b; color: #e9f5ff; border: 1px solid #42657a; '
+            'border-radius: 5px; font-size: 13px; font-weight: 600; padding-left: 4px; } '
+            'QDoubleSpinBox:disabled { color: #748e9c; border-color: #2c4050; }')
+        sizing_toolbar.addWidget(self.bulk_buy_percent)
+        self.apply_bulk_buy_percent_button = QPushButton('일괄 적용')
+        self.apply_bulk_buy_percent_button.setObjectName('applyBulkModelBuyPercent')
+        self.apply_bulk_buy_percent_button.setAccessibleName('모든 주문 모델의 1회 매수 비중 일괄 적용')
+        self.apply_bulk_buy_percent_button.setMinimumHeight(30)
+        self.apply_bulk_buy_percent_button.setStyleSheet(self.select_all_button.styleSheet())
+        bulk_notice = ('선택 여부와 관계없이 모든 주문 모델의 1회 매수 비중에 적용합니다. '
+                       '주문 불가인 인버스 헤지 연구 모델은 제외합니다. 모델 선택을 바꾸거나 자동주문을 시작하지 않습니다.')
+        self.bulk_buy_percent.setToolTip(bulk_notice)
+        self.apply_bulk_buy_percent_button.setToolTip(bulk_notice)
+        sizing_toolbar.addWidget(self.apply_bulk_buy_percent_button)
+        sizing_toolbar.addStretch()
+        layout.addLayout(sizing_toolbar)
         choices = QWidget()
         choices.setStyleSheet('background: #121b2a; color: #e9f5ff;')
         choice_stack = QVBoxLayout(choices)
@@ -256,18 +351,15 @@ class Mark14Panel(QWidget):
         self._detail_columns = None
         previous_group = None
         for model in ALL_MODEL_IDS:
-            group = ('target_horizon' if model in TARGET_HORIZON_MODEL_IDS else
-                     'proxy' if model in INTRADAY_MODEL_IDS else
-                     'probability' if model in BARRIER_MODELS else 'preopen')
+            group = _model_group(model)
             if group != previous_group:
-                count = sum(1 for item in ALL_MODEL_IDS
-                            if ('target_horizon' if item in TARGET_HORIZON_MODEL_IDS else
-                                'proxy' if item in INTRADAY_MODEL_IDS else
-                                'probability' if item in BARRIER_MODELS else 'preopen') == group)
+                count = sum(_model_group(item) == group for item in ALL_MODEL_IDS)
                 heading_text = {'probability': '장중 · 확률 모델',
                                 'preopen': '장전 · 점수 모델',
                                 'proxy': '장중 · 일봉 대리 모델',
-                                'target_horizon': '장중 · 목표가/보유기간 연구'}[group]
+                                'target_horizon': '장중 · 목표가/보유기간 연구',
+                                'minute_transfer': '장중 · 일봉 학습 → 5분봉 추론',
+                                'minute_hedge': '장중 · 지수 인버스 헤지 연구'}[group]
                 section = QLabel(f'{heading_text}  {count}개')
                 section.setObjectName('modelSection-' + group)
                 section.setStyleSheet('font-size: 12px; font-weight: 700; color: #9bdacb; '
@@ -275,7 +367,8 @@ class Mark14Panel(QWidget):
                 choice_stack.addWidget(section)
                 self.model_sections[group] = section
                 previous_group = group
-            phase = '장중' if model in QUOTE_SCORE_MODELS else '장전'
+            phase = ('5분' if model in MINUTE_RESEARCH_IDS else
+                     '장중' if model in QUOTE_SCORE_MODELS else '장전')
             card = QFrame()
             card.setObjectName('modelChoiceCard')
             card.setStyleSheet('QFrame#modelChoiceCard { background: #1a293a; border: 1px solid #30465b; '
@@ -304,13 +397,15 @@ class Mark14Panel(QWidget):
             buy_percent = QDoubleSpinBox(card)
             buy_percent.setObjectName('buy-percent-' + model)
             buy_percent.setAccessibleName(f'{PROTOTYPE_TITLES[model]} 1회 매수 비중 퍼센트')
-            buy_percent.setToolTip('해당 모델의 한 번의 매수 예산 상한입니다. 시장별 평가자산 기준이며 주문당 금액·가용액 상한도 적용합니다.')
+            buy_percent.setToolTip(
+                '해당 모델의 한 번의 매수 예산 상한입니다. 시장별 평가자산 기준이며 주문당 금액·가용액 상한도 적용합니다. '
+                '모델별 비중은 독립적이므로 여러 모델이 같은 종목을 선택하면 총 노출이 합산될 수 있습니다.')
             buy_percent.setRange(0.01, 100)
             buy_percent.setDecimals(2)
             buy_percent.setSingleStep(0.5)
             buy_percent.setKeyboardTracking(False)
             buy_percent.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
-            buy_percent.setValue(10)
+            buy_percent.setValue(1 if model in MINUTE_TRANSFER_IDS else 10)
             buy_percent.setSuffix(' %')
             buy_percent.setFixedSize(96, 27)
             buy_percent.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -320,6 +415,12 @@ class Mark14Panel(QWidget):
                 'font-size: 13px; font-weight: 600; padding-left: 4px; } '
                 'QDoubleSpinBox:disabled { color: #89a5b6; border-color: #30465b; }')
             card_header.addWidget(buy_percent)
+            if model in MINUTE_HEDGE_IDS:
+                # A two-leg hedge is research-only until both legs have a
+                # verified execution policy. Do not suggest it has a usable
+                # single-model buy allocation in this screen.
+                size_label.hide()
+                buy_percent.hide()
             card_layout.addLayout(card_header)
             description = QLabel(
                 f'학습: {PROTOTYPE_METHODS[model]} · 출력: {PROTOTYPE_TARGETS[model]} · '
@@ -358,6 +459,9 @@ class Mark14Panel(QWidget):
             self.model_descriptions[model] = description
             self.model_detail_fields[model] = fields
         choice_stack.addStretch()
+        for check in self.model_checks.values():
+            check.toggled.connect(self._update_selection_count)
+        self._update_selection_count()
         self._reflow_model_details()
         self.enable_check = self.model_checks[MARK14_TRIGGER]
         self.barrier_checks = {model: self.model_checks[model] for model in BARRIER_MODELS}
@@ -416,6 +520,10 @@ class Mark14Panel(QWidget):
         self.session_display_timer.setInterval(60_000)
         self.session_display_timer.timeout.connect(self._show_selected_model)
         self.session_display_timer.start()
+
+    def _update_selection_count(self, *_):
+        count = sum(check.isChecked() for check in self.model_checks.values())
+        self.selection_count.setText(f'{count} / {len(self.model_checks)}개 선택')
 
     def _reflow_model_details(self):
         columns = 3 if self.width() >= 1050 else 2 if self.width() >= 690 else 1
@@ -654,7 +762,7 @@ class V00Window(WatchlistDialog):
                 self.workspace_tabs.tabBar().moveTab(source, destination)
         self.workspace_tabs.setCurrentWidget(self.watch_page)
         for view in self.watch_tables.values():
-            view.setColumnCount(3 + len(ALL_MODEL_IDS))
+            view.setColumnCount(3 + len(WATCH_MODEL_IDS))
             view.setHorizontalHeaderLabels(('종목',
                                             *(PROTOTYPE_TITLES[model].replace('mark', 'MK').replace(' prototype', '')
                                               + (' 대리점수' if model in (*INTRADAY_MODEL_IDS, *TARGET_HORIZON_MODEL_IDS) else
@@ -772,6 +880,9 @@ class V00Window(WatchlistDialog):
         self.external_grid.addWidget(QLabel('기타 신호 1회 매수 비중'), 4, 0, 1, 2)
         self.external_grid.addWidget(self.buy_percent, 4, 2)
         self.external_model_checks = self.mark14_panel.model_checks
+        self.mark14_panel.select_all_button.clicked.connect(lambda: self._set_all_models_selected(True))
+        self.mark14_panel.clear_all_button.clicked.connect(lambda: self._set_all_models_selected(False))
+        self.mark14_panel.apply_bulk_buy_percent_button.clicked.connect(self._apply_bulk_model_buy_percent)
         self._sync_watch_model_columns()
         self.watch_market_tabs.currentChanged.connect(self._sync_watch_model_columns)
         self.model_trigger = QComboBox()
@@ -829,6 +940,7 @@ class V00Window(WatchlistDialog):
             self.engine.source_buy_percents = {
                 PROTOTYPE_SOURCES[model]: Decimal(str(field.value()))
                 for model, field in self.mark14_panel.model_buy_percents.items()
+                if model not in MINUTE_HEDGE_IDS
             }
 
     def _capture_preferences(self):
@@ -898,6 +1010,35 @@ class V00Window(WatchlistDialog):
         self.engine.disarm()
         self._apply_execution_preferences()
         self._queue_save_preferences()
+
+    def _apply_bulk_model_buy_percent(self):
+        # A batch changes sizing once, including models currently unselected.
+        # Check live state as well as widget locks for programmatic invocation.
+        if (selected_mode(self.service) is not TradingMode.DEMO
+                or not self.external_panel.isEnabled()
+                or self.monitoring or self.worker is not None
+                or self._workspace_worker is not None or self.pending_auto_arm
+                or self._confirming_orders or self._pending_environment
+                or self._confirming_environment):
+            return
+        panel = self.mark14_panel
+        value = panel.bulk_buy_percent.value()
+        fields = [field for model, field in panel.model_buy_percents.items()
+                  if model not in MINUTE_HEDGE_IDS]
+        if all(field.value() == value for field in fields):
+            return
+        offset = panel.choices_scroll.verticalScrollBar().value()
+        for field in fields:
+            blocked = field.blockSignals(True)
+            try:
+                field.setValue(value)
+            finally:
+                field.blockSignals(blocked)
+        self.engine.disarm()
+        self._apply_execution_preferences()
+        self._queue_save_preferences()
+        QTimer.singleShot(0, lambda area=panel.choices_scroll, saved=offset:
+                          area.verticalScrollBar().setValue(saved))
 
     def _connect_preference_changes(self):
         for widget in (self.interval, self.external_quantity, self.external_krw,
@@ -987,12 +1128,13 @@ class V00Window(WatchlistDialog):
             if not isinstance(model_sizing, dict):
                 model_sizing = {}
             for model, field in self.mark14_panel.model_buy_percents.items():
-                value = model_sizing.get(model, self.buy_percent.value())
+                default_percent = 1 if model in MINUTE_TRANSFER_IDS else self.buy_percent.value()
+                value = model_sizing.get(model, default_percent)
                 if (type(value) in (int, float) and field.minimum() <= value <= field.maximum()
                         and isfinite(value)):
                     field.setValue(value)
                 else:
-                    field.setValue(self.buy_percent.value())
+                    field.setValue(default_percent)
             for key, widget in (('hourly_ranking', self.hourly_ranking), ('external_mode', self.external_mode),
                                 ('order_popups', self.order_popups)):
                 restore_bool(key, widget)
@@ -1069,6 +1211,7 @@ class V00Window(WatchlistDialog):
             for widget, blocked in previous:
                 widget.blockSignals(blocked)
             self._loading_preferences = False
+        self.mark14_panel._update_selection_count()
         self._model_trigger_changed()
         self._apply_execution_preferences()
         self._update_connection()
@@ -1242,11 +1385,47 @@ class V00Window(WatchlistDialog):
     def _model_name(self, model):
         return PROTOTYPE_TITLES[model].replace('mark', 'MK').replace(' prototype', '')
 
+    def _minute_model_diagnostic(self, model, item):
+        """Display only the minute verdict paired with this exact fresh quote."""
+        feed = self._prototype_feeds.get(model)
+        snapshot = self.snapshots.get(item.id)
+        if (feed is None or not getattr(feed, '_ready', False) or snapshot is None
+                or item.id not in self.fresh_ids or item.id in self.errors
+                or not 0 <= (self.engine.clock() - snapshot.fetched_at).total_seconds() <= MAX_QUOTE_AGE):
+            return None
+        row = feed.diagnostics.get(item.id)
+        if (not isinstance(row, dict)
+                or row.get('_display_quote_fetched_at') != snapshot.fetched_at.isoformat()
+                or row.get('_display_price') != str(snapshot.quote.price)):
+            return None
+        return row
+
+    def _minute_buy_display(self, model, item):
+        if model in MINUTE_HEDGE_IDS:
+            return '연구 전용 · 주문 보류'
+        row = self._minute_model_diagnostic(model, item)
+        if row is None:
+            return '5분봉 판단 대기'
+        score = row.get('score')
+        score_text = (f' · 점수 {score:.3f}'
+                      if isinstance(score, (int, float)) and isfinite(score) else '')
+        if row.get('reason') == 'MINUTE_BUY_CANDIDATE':
+            return '매수 후보' + score_text
+        if row.get('reason') == 'MINUTE_THRESHOLD_NOT_MET':
+            return '관망' + score_text
+        if row.get('reason') == 'SYMBOL_OUTSIDE_DAILY_TRAINING':
+            return '학습 종목 외 · 주문 보류'
+        if row.get('reason') == 'MINUTE_EXIT_TIME_UNAVAILABLE':
+            return '장마감 청산 시간 부족 · 주문 보류'
+        return '5분봉 입력 확인 필요 · 주문 보류'
+
     def _model_buy_display(self, model, item, *, compact=False):
         """Display each model's own unit without treating a score as a probability."""
         checks = getattr(self, 'external_model_checks', {})
         if model not in checks or not checks[model].isChecked():
             return '꺼짐'
+        if model in MINUTE_RESEARCH_IDS:
+            return self._minute_buy_display(model, item)
         if model in QUOTE_SCORE_MODELS:
             display = self._model_score_display(model, item)
             return display[2].replace('대기', '관망') if compact else display[0]
@@ -1347,6 +1526,17 @@ class V00Window(WatchlistDialog):
             f'{self._model_name(model)} · {item.name or item.instrument.symbol} · '
             f'매수: {self._model_buy_display(model, item, compact=True)} · '
             f'매도: {self._model_sell_display(model, item)}')
+        if model in MINUTE_TRANSFER_IDS:
+            row = self._minute_model_diagnostic(model, item)
+            panel.selected_result.setToolTip(
+                '완료 일봉만 학습·실제 완료 5분봉 추론. 점수는 분봉 적중확률이나 수익률이 아닙니다.\n'
+                + (f"최근 5분봉 {row.get('minute_bar_label', '—')} · 신호봉 {row.get('signal_bar_label', '—')}"
+                   + (f"\n보류 이유: {row['error']}" if row.get('error') else '')
+                   if row is not None else '해당 종목의 현재 분봉 판단은 아직 없습니다.'))
+        elif model in MINUTE_HEDGE_IDS:
+            panel.selected_result.setToolTip('인버스 ETF 두 다리의 동시 체결·비율 검증 전까지 주문 신호를 내지 않습니다.')
+        else:
+            panel.selected_result.setToolTip(PROTOTYPE_NOTICES.get(model, ''))
 
     def _set_latest_model_summary(self, text, *, full_text=None):
         self.latest_model_summary.setText(text)
@@ -1382,14 +1572,26 @@ class V00Window(WatchlistDialog):
             self._last_complete_model_summary = None
             self._set_latest_model_summary('최근 조회 ' + quote + ' · AI 모델 연결 없음')
             return
+        minute_models = tuple(model for model in models if model in MINUTE_TRANSFER_IDS)
+        minute_rows = {model: self._minute_model_diagnostic(model, item) for model in minute_models}
+        minute_ready = sum(row is not None and row.get('reason') == 'MINUTE_BUY_CANDIDATE'
+                           for row in minute_rows.values())
+        minute_observed = sum(row is not None for row in minute_rows.values())
+        minute_brief = (f' · 5분봉 매수 후보 {minute_ready}/{len(minute_models)}'
+                        if minute_models and minute_observed == len(minute_models) else
+                        f' · 5분봉 판단 대기 {len(minute_models) - minute_observed}개'
+                        if minute_models else '')
+        hedge_brief = (' · 인버스 연구 주문 보류'
+                       if any(model in MINUTE_HEDGE_IDS for model in models) else '')
         scores = [self._current_model_score(model, item) for model in barrier_models]
         if any(score is None for score in scores):
-            if completed is not None:
+            if completed is not None and not minute_models:
                 self._set_latest_model_summary(completed[2])
                 return
             pending = (' · '.join(f'{self._model_name(model)} —' for model in models)
                        if len(models) <= 3 else f'모델 판단 대기 {len(models)}개')
-            self._set_latest_model_summary('최근 조회 ' + quote + ' · 모델 추정확률 — · ' + pending)
+            self._set_latest_model_summary('최근 조회 ' + quote + ' · 모델 추정확률 —'
+                                           + minute_brief + hedge_brief + ' · ' + pending)
             return
         probability_by_model = dict(zip(barrier_models, scores))
         proxy_scores = {model: self._current_model_score(model, item)
@@ -1413,6 +1615,8 @@ class V00Window(WatchlistDialog):
                            and score['reason'] == 'TARGET_HORIZON_CANDIDATE' else '관망')
                 buy = (f"{verdict}({score['probability']:.1%} 시가 대리점수)"
                        if score is not None else '대리점수 —')
+            elif model in MINUTE_RESEARCH_IDS:
+                buy = self._minute_buy_display(model, item)
             else:
                 buy = self._preopen_score_display(model, item)
             sell = self._model_sell_display(model, item)
@@ -1423,6 +1627,7 @@ class V00Window(WatchlistDialog):
                    + f"{sum((score['probability'] for score in scores), Decimal(0)) / Decimal(len(scores)):.1%}"
                    if scores else '')
         text = ('최근 조회 ' if proxy_pending else '최근 완료 조회 ') + quote + average
+        text += minute_brief + hedge_brief
         if proxy_pending:
             text += ' · 대리점수 조회 중'
         top = sorted(details)[:3]
@@ -1430,7 +1635,7 @@ class V00Window(WatchlistDialog):
         if len(details) > len(top):
             text += f' · 외 {len(details) - len(top)}개 모델'
         full_text = quote + average + '\n' + '\n'.join(value for _, _, value in details)
-        if not proxy_pending:
+        if not proxy_pending and minute_observed == len(minute_models):
             self._last_complete_model_summary = (models, item.id, text)
         self._set_latest_model_summary(text, full_text=full_text)
 
@@ -1607,13 +1812,33 @@ class V00Window(WatchlistDialog):
         return tuple(model for model, check in getattr(self, 'external_model_checks', {}).items()
                      if check.isChecked())
 
+    def _set_all_models_selected(self, selected):
+        # A bulk selection is one configuration change, not one worker/feed
+        # rebuild per model. It never starts monitoring or arms orders.
+        if (selected_mode(self.service) is not TradingMode.DEMO
+                or not self.external_panel.isEnabled()
+                or self.monitoring or self.worker is not None or self.pending_auto_arm):
+            return
+        checks = self.external_model_checks
+        if all(check.isChecked() == selected for check in checks.values()):
+            return
+        for check in checks.values():
+            blocked = check.blockSignals(True)
+            try:
+                check.setChecked(selected)
+            finally:
+                check.blockSignals(blocked)
+        self.mark14_panel._update_selection_count()
+        self._model_trigger_changed()
+        self._queue_save_preferences()
+
     def _sync_watch_model_columns(self, *_):
         """Keep fixed model data indices; collapse only unchecked display columns."""
         checks = getattr(self, 'external_model_checks', None)
         if checks is None:
             return
         selected = {model for model, check in checks.items() if check.isChecked()}
-        expected = 3 + len(ALL_MODEL_IDS)
+        expected = 3 + len(WATCH_MODEL_IDS)
         for view in self.watch_tables.values():
             if view.columnCount() != expected:
                 continue
@@ -1765,11 +1990,17 @@ class V00Window(WatchlistDialog):
             return (f'1회 매수: 시장별 계좌 평가금액의 {self.buy_percent.value():g}% '
                     '· 정수 주식 수 내림\n')
         rows = [f'{PROTOTYPE_TITLES[model]} {self.mark14_panel.model_buy_percents[model].value():g}%'
-                for model in selected]
+                for model in selected if model not in MINUTE_HEDGE_IDS]
+        research_count = sum(model in MINUTE_HEDGE_IDS for model in selected)
+        research_note = (f'인버스 연구 {research_count}종은 주문 불가·매수 비중 없음.\n'
+                         if research_count else '')
+        if not rows:
+            return research_note + f'기타 신호 기본 {self.buy_percent.value():g}% · 정수 주식 수 내림\n'
         return ('모델별 1회 매수 상한 (시장별 계좌 평가금액 기준):\n'
                 + '\n'.join(' · '.join(rows[index:index + 4])
                             for index in range(0, len(rows), 4))
-                + f'\n기타 신호 기본 {self.buy_percent.value():g}% · 정수 주식 수 내림\n')
+                + '\n' + research_note
+                + f'기타 신호 기본 {self.buy_percent.value():g}% · 정수 주식 수 내림\n')
 
     def _progress(self, data):
         if len(data) == 2 and data[0] == 'mark14_preopen':
@@ -1926,6 +2157,11 @@ class V00Window(WatchlistDialog):
             for check in getattr(self, 'external_model_checks', {}).values():
                 check.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
             if hasattr(self, 'mark14_panel'):
+                can_select = editing and selected_mode(self.service) is TradingMode.DEMO
+                self.mark14_panel.select_all_button.setEnabled(can_select)
+                self.mark14_panel.clear_all_button.setEnabled(can_select)
+                self.mark14_panel.bulk_buy_percent.setEnabled(can_select)
+                self.mark14_panel.apply_bulk_buy_percent_button.setEnabled(can_select)
                 for field in self.mark14_panel.model_buy_percents.values():
                     field.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
         self._sync_model_mode_controls()
@@ -1939,10 +2175,14 @@ class V00Window(WatchlistDialog):
                 self.ai_connection_card.setAccessibleName(f'AI 모델 {count}개 선택')
             producer = self.test_producer
             choice = self._chosen_trigger()
+            selected_models = self._chosen_external_models()
+            def selected_status(model):
+                fallback = ('인버스 헤지 연구 선택됨 · 주문 연결 없음' if model in MINUTE_HEDGE_IDS
+                            else '외부 연결 선택됨 · 첫 조회 시 별도 프로세스 시작')
+                return getattr(self._prototype_feeds.get(model), 'status',
+                               f'{PROTOTYPE_TITLES[model]} · {fallback}')
             text = '\n'.join(
-                getattr(self._prototype_feeds.get(model), 'status',
-                        f'{PROTOTYPE_TITLES[model]} · 외부 연결 선택됨 · 첫 조회 시 별도 프로세스 시작')
-                for model in self._chosen_external_models())
+                selected_status(model) for model in selected_models)
             if not text:
                 text = ((producer.status if isinstance(producer, DesktopModelBridge) else '내장 LSTM · 첫 장중 조회 시 모델 확인')
                         if choice == 'lstm30' else '외부 AI 연결 꺼짐 · 직접 연결한 외부 JSON은 별도 사용')
@@ -1955,11 +2195,14 @@ class V00Window(WatchlistDialog):
                 + (f' · {len(failed)}개 신호 점검' if failed else ''))
             self.model_status.setToolTip(text)
             if hasattr(self, 'ai_connection_card'):
-                self.ai_connection_card.setToolTip('선택한 모델 수입니다. 실제 신호 연결은 조회 중 확인합니다.\n' + text)
+                research_count = sum(model in MINUTE_HEDGE_IDS for model in selected_models)
+                minute_count = sum(model in MINUTE_TRANSFER_IDS for model in selected_models)
+                scope = (f' · 분봉 매매 후보 {minute_count}개' if minute_count else '')
+                scope += (f' · 인버스 연구 전용 {research_count}개(주문 불가)' if research_count else '')
+                self.ai_connection_card.setToolTip(
+                    f'선택한 모델 {len(selected_models)}개{scope}. 선택 수는 감시·주문 상태가 아닙니다.\n' + text)
             if self._chosen_external_models():
-                text = '\n'.join(getattr(self._prototype_feeds.get(model), 'status',
-                    f'{PROTOTYPE_TITLES[model]} · 외부 연결 선택됨 · 첫 조회 시 별도 프로세스 시작').splitlines()[0]
-                    for model in self._chosen_external_models())
+                text = '\n'.join(selected_status(model).splitlines()[0] for model in selected_models)
                 self.connection_summary.setText(f'AI 모델 {len(self._chosen_external_models())}개 선택')
             elif self.external_mode.isChecked():
                 self.connection_summary.setText('AI 모델 연결 없음')
@@ -2002,6 +2245,7 @@ class V00Window(WatchlistDialog):
             from dockdack.mark1_trigger import SharedPrototypeAccounts
             factory = self._external_feed_factory or ExternalPrototypeFeed
             shared = SharedPrototypeAccounts(self)
+            minute_feed = None
             policy = result[2]
             try:
                 for model in self._chosen_external_models():
@@ -2016,12 +2260,23 @@ class V00Window(WatchlistDialog):
                     kwargs = {'bundle_root': bundle}
                     if self._external_feed_factory is None:
                         kwargs['account_snapshots'] = shared
-                    if self._external_feed_factory is None and model in PREOPEN_MODEL_IDS:
+                    if self._external_feed_factory is None and model in MINUTE_TRANSFER_IDS:
+                        from dockdack.signals.daily_proxy_minute import DailyProxyMinuteFeed, SharedDomesticMinuteFeed
+                        if minute_feed is None:
+                            minute_feed = SharedDomesticMinuteFeed(self)
+                        feed = DailyProxyMinuteFeed(
+                            self, model, extra, path, minute_feed=minute_feed,
+                            account_snapshots=shared)
+                    elif self._external_feed_factory is None and model in MINUTE_HEDGE_IDS:
+                        from dockdack.signals.daily_proxy_minute import MinuteResearchHoldFeed
+                        feed = MinuteResearchHoldFeed(self, model, extra, path)
+                    elif self._external_feed_factory is None and model in PREOPEN_MODEL_IDS:
                         from dockdack.signals.preopen_series import PreopenExperimentalFeed
                         feed_type = Mark14ExternalFeed if model == MARK14_TRIGGER else PreopenExperimentalFeed
+                        feed = feed_type(self, model, extra, path, **kwargs)
                     else:
                         feed_type = factory
-                    feed = feed_type(self, model, extra, path, **kwargs)
+                        feed = feed_type(self, model, extra, path, **kwargs)
                     self._prototype_feeds[model] = feed
                     sources.append((extra, SignalFileReader(self.store, path, extra, self.engine.clock)))
                     seen_sources.add(source)

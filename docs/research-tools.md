@@ -75,3 +75,7 @@ python -m dockdack.research_tools --workspace . --mmap-root outputs/mark1/cache 
 `mark1_deep_models.py`는 바뀐 CRLF를 기록 당시 LF로만 복원했다. SHA-256은 `50ae22f70278a9cd4ca0fb276d20260a2421c9874ac8f35846a10529d15d16d7`이며 `.gitattributes`가 추가 줄바꿈 변환을 막는다. 모델 수식은 그대로다.
 
 새 JSON/해시/내용 확인/이식·저장 기능은 `research_artifacts`, `research_arrays`, `research_compat`, `research_tools`에 공용화했다. 과거 backtest 두 버전은 목표와 원래 봉인을 재현하는 자료이므로 보존한다. 이를 억지로 하나의 새 손익 엔진으로 합치거나 저장 모델의 추론 코드를 리팩터링하지 않는다. 향후 연구는 새 공용 I/O를 재사용하고 숫자 계산 변경은 별도 버전·golden parity 검증 후에만 채택한다.
+
+## 2026-09-29 분봉·인버스 연구 도구
+
+위의 2026-09-24 이식 gateway와 별도로 `examples.export_daily_research_bars`, `examples.collect_minute_research`, `examples.train_daily_to_minute`, `examples.paper_minute_signal`, `examples.run_minute_hedge_research` 명령을 추가했다. `uv run --no-sync python -m examples.<이름> --help`로 각각 인자를 확인한다. 국내 모의 주식·업종지수 분봉은 읽기 전용 수집하고 미국 분봉은 체결시간의 24시 이상 표기·시간대가 확인되지 않아 현재 차단한다. 학습 번들·평가 보고서는 `outputs/minute-research/`의 새 이름에만 생성하며 GUI·계좌·주문과 연결되지 않는다. 데이터 해시, 실수집 결과, 모형별 보류 사유와 재현 명령은 [분봉·인버스 헤지 연구](minute-research.md)에 정리했다.

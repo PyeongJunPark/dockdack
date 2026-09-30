@@ -61,7 +61,7 @@ def _time(value: datetime | None) -> str:
 def _planned_exit_label(target: dict, market: Market, upper=None, lower=None) -> str:
     """Describe the model's earliest time exit without implying an order filled."""
     if "lots" in target and not target.get("reconciled"):
-        return "장부 대조 필요"
+        return "—"
     if target.get("error"):
         return "매도 확인 필요"
     strategy_id = target.get("strategy_id") or target.get("model_id")
@@ -73,8 +73,25 @@ def _planned_exit_label(target: dict, market: Market, upper=None, lower=None) ->
         return "일정 확인 필요"
     if planned is None:
         return "체결일 미확인"
+    if planned.at is not None:
+        from dockdack.history import market_time
+        return market_time(market, planned.at).strftime("%Y-%m-%d %H:%M")
     timing = "마감 5분 전" if planned.timing == "preclose" else "장중"
     return f"{planned.day:%Y-%m-%d} {timing}"
+
+
+_DEMO_ESTIMATE_NOTE = ("모의투자 주문 당시 참고 시세로 계산한 추정 원가/매도 기준이며 "
+                       "실제 체결가·확정 성과 아님.\n"
+                       "앱 장부 수량과 현재 잔고 수량 일치 기준이며, "
+                       "다른 앱의 과거 매매가 없었다는 증명은 아닙니다.")
+
+
+def _estimated_lot(lot: dict) -> bool:
+    return lot.get('average_price_basis') == 'demo_order_reference'
+
+
+def _model_label(lot: dict) -> str:
+    return (lot.get('model_title') or '미확인 / 수동·외부') + (' · 원가 추정' if _estimated_lot(lot) else '')
 
 
 def _unreconciled_model_history(target: dict) -> tuple[str, str]:
@@ -92,10 +109,12 @@ def _unreconciled_model_history(target: dict) -> tuple[str, str]:
         remaining = lot.get('quantity_remaining', lot.get('quantity'))
         amount = (f' · 앱 장부 잔여 {_quantity(remaining)}주'
                   if isinstance(remaining, Decimal) and remaining.is_finite() and remaining > 0 else '')
-        details.append(f'{name}{amount} · 장부 매수분 {lot["lot_id"]}')
+        details.append(f'{_model_label(lot)}{amount} · 장부 매수분 {lot["lot_id"]}')
     if not names:
-        return '모델 장부 대조 필요', ''
-    label = (names[0] if len(names) == 1 else f'{names[0]} 외 {len(names) - 1}개 모델') + ' · 대조 필요'
+        return '매수 모델 미확인', ''
+    label = names[0] if len(names) == 1 else f'{names[0]} 외 {len(names) - 1}개 모델'
+    if any(_estimated_lot(lot) for lot in target.get('lots', ()) if isinstance(lot, dict)):
+        label += ' · 원가 추정'
     return label, ('앱의 저장된 매수 모델 출처 (증권사 보유주식의 모델별 배분 아님):\n'
                    + '\n'.join(details) + '\n')
 
@@ -180,6 +199,7 @@ class PortfolioPanel(QWidget):
         self.market_cards: dict[Market, QFrame] = {}
         self.detail_buttons: dict[Market, QPushButton] = {}
         self.summaries: dict[Market, QLabel] = {}
+        self.reconciliation_labels: dict[Market, QLabel] = {}
         self.market_labels: dict[Market, dict[str, QLabel]] = {}
         self._compact = False
         for market, title in ((Market.DOMESTIC, "한국 · KRW"), (Market.US, "미국 · USD")):
@@ -256,6 +276,11 @@ class PortfolioPanel(QWidget):
                 self.fx_status = _label("USD", "muted")
                 fx_controls.addWidget(self.fx_status, 1)
                 page_layout.addLayout(fx_controls)
+            reconciliation = _label('', 'portfolioReconciliation')
+            reconciliation.setStyleSheet('color: #ffb586;')
+            reconciliation.hide()
+            self.reconciliation_labels[market] = reconciliation
+            page_layout.addWidget(reconciliation)
             self.tables[market] = self._make_table()
             page_layout.addWidget(self.tables[market], 1)
             self.market_tabs.addTab(page, title)
@@ -326,13 +351,15 @@ class PortfolioPanel(QWidget):
         return (_table_money(value, currency, price=price, signed=signed) if table
                 else _money(value, currency, price=price, signed=signed))
 
-    def _display_target(self, value: Decimal, market: Market, sign: str) -> str:
+    def _display_target(self, value: Decimal, market: Market, sign: str, *, estimated: bool = False) -> str:
         reference = self._active_fx(market)
         if reference is None:
-            return f"{sign} {_target_price(value)}"
+            displayed = f"{sign} {_target_price(value)}"
+            return f"추정 {displayed}" if estimated else displayed
         # FX is illustrative, never an executable tick-size threshold. Limit
         # display precision to whole KRW even when the cross-rate repeats.
-        return f"{sign} {_table_money(value * reference.krw_per_usd, 'KRW')}"
+        displayed = f"{sign} {_table_money(value * reference.krw_per_usd, 'KRW')}"
+        return f"추정 {displayed}" if estimated else displayed
 
     def _fx_toggled(self, checked: bool) -> None:
         if not checked:
@@ -543,22 +570,38 @@ class PortfolioPanel(QWidget):
             self.summaries[market].setText(summary_text + ("\n" + cash_context if cash_context else ""))
             self.summaries[market].setToolTip(cash_detail)
             expanded = []
+            unreconciled_positions = []
             for held in sorted(state.positions, key=lambda item: (-item.evaluation_amount, item.symbol)):
                 key = f'{held.market.value}:{held.exchange}:{held.symbol}'
                 group = getattr(self, '_exit_targets', {}).get(key, {})
                 if group.get('lots') and group.get('reconciled'):
+                    active_lots = tuple(lot for lot in group['lots'] if lot['quantity'] > 0)
                     for lot in group['lots']:
                         qty, average = lot['quantity'], lot['average_price']
                         if qty <= 0:
                             continue
-                        cost, evaluation = qty * average, qty * held.current_price
-                        virtual = replace(held, quantity=qty, sellable_quantity=lot['sellable_quantity'],
-                                          average_price=average, evaluation_amount=evaluation,
-                                          profit_loss=evaluation-cost, profit_rate=(evaluation-cost)/cost*100,
-                                          raw={**held.raw, 'prototype_lot_id': lot['lot_id']})
+                        raw = {**held.raw, 'prototype_lot_id': lot['lot_id'],
+                               'prototype_price_basis': lot.get('average_price_basis')}
+                        if (_estimated_lot(lot) and len(active_lots) == 1
+                                and qty == held.quantity):
+                            # A single inferred model lot has no independently
+                            # verified cost. Retain the broker's real aggregate
+                            # average and P/L; only its model exits use the
+                            # clearly labelled DEMO reference basis.
+                            raw['prototype_value_basis'] = 'broker_aggregate'
+                            virtual = replace(held, sellable_quantity=lot['sellable_quantity'], raw=raw)
+                        else:
+                            cost, evaluation = qty * average, qty * held.current_price
+                            if _estimated_lot(lot):
+                                raw['prototype_value_basis'] = 'estimated_lot'
+                            virtual = replace(held, quantity=qty, sellable_quantity=lot['sellable_quantity'],
+                                              average_price=average, evaluation_amount=evaluation,
+                                              profit_loss=evaluation-cost, profit_rate=(evaluation-cost)/cost*100,
+                                              raw=raw)
                         expanded.append((virtual, lot))
                 else:
                     if 'lots' in group and not group.get('reconciled'):
+                        unreconciled_positions.append((held, group))
                         model_history, _ = _unreconciled_model_history(group)
                         group = {**group, 'error': ' / '.join(map(str, group.get('issues', ()))) or '장부와 증권사 잔고 대조 필요',
                                  'model_title': model_history}
@@ -569,21 +612,33 @@ class PortfolioPanel(QWidget):
                 live_price = live[0] if live and (state.fetched_at is None or live[1] >= state.fetched_at) else position.current_price
                 upper = target.get('take_profit_price')
                 lower = target.get('stop_loss_price')
+                unresolved_lots = 'lots' in target and not target.get('reconciled')
+                estimated_split = position.raw.get('prototype_value_basis') == 'estimated_lot'
                 if not target and position.average_price > 0:
                     upper, lower = position.average_price * Decimal('1.01'), position.average_price * Decimal('0.992')
+                def split_value(value: str) -> str:
+                    return f'추정 {value}' if estimated_split else value
                 values = (
                     f"{title} · {'KRW' if fx is not None else currency}", f"{position.name or position.symbol} · {position.symbol}", _quantity(position.quantity),
                     (f"공유 {_quantity(target['broker_sellable_quantity'])}" if target.get('sellable_is_shared')
-                     else _quantity(position.sellable_quantity)), self._display_money(position.average_price, market, price=True, table=True),
+                     else _quantity(position.sellable_quantity)), split_value(self._display_money(position.average_price, market, price=True, table=True)),
                     self._display_money(live_price, market, price=True, table=True), self._display_money(position.evaluation_amount, market, table=True),
-                    self._display_money(position.profit_loss, market, signed=True, table=True),
-                    f"{'+' if position.profit_rate > 0 else ''}{position.profit_rate:,.2f}%",
-                    '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else self._display_target(upper, market, '≥'),
-                    '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else self._display_target(lower, market, '≤'),
-                    target.get('model_title') or '미확인 / 수동·외부',
+                    split_value(self._display_money(position.profit_loss, market, signed=True, table=True)),
+                    split_value(f"{'+' if position.profit_rate > 0 else ''}{position.profit_rate:,.2f}%"),
+                    '—' if unresolved_lots else '확인 필요 · 보류' if target.get('error') else '미확인' if upper is None else self._display_target(upper, market, '≥', estimated=_estimated_lot(target)),
+                    '—' if unresolved_lots else '확인 필요 · 보류' if target.get('error') else '미확인' if lower is None else self._display_target(lower, market, '≤', estimated=_estimated_lot(target)),
+                    _model_label(target),
                     _planned_exit_label(target, position.market, upper, lower),
                 )
                 rows.append((values, position, status, state.fetched_at))
+            reconciliation = self.reconciliation_labels[market]
+            reconciliation.setVisible(bool(unreconciled_positions))
+            if unreconciled_positions:
+                reconciliation.setText(f'자동매도 보류 {len(unreconciled_positions)}종목 · 모델별 체결 근거 확인 필요')
+                reconciliation.setToolTip('\n'.join(
+                    f'{position.name or position.symbol} · {position.symbol}: '
+                    + (' / '.join(map(str, group.get('issues', ()))) or '모델별 체결·보유 대조 필요')
+                    for position, group in unreconciled_positions))
             self._apply_rows(market, rows)
 
     def apply_holding_quote(self, update):
@@ -598,8 +653,9 @@ class PortfolioPanel(QWidget):
         targets[key] = target
         self._exit_targets = targets
         def structure(value):
-            return (value.get('reconciled'), tuple(
+            return (value.get('reconciled'), tuple(value.get('issues', ())), tuple(
                 (lot.get('lot_id'), lot.get('quantity'), lot.get('average_price'),
+                 lot.get('average_price_basis'),
                  lot.get('sellable_quantity'), lot.get('broker_sellable_quantity'), lot.get('sellable_is_shared'),
                  lot.get('strategy_id'), lot.get('buy_fill_observed_at'))
                 for lot in value.get('lots', ())))
@@ -617,14 +673,17 @@ class PortfolioPanel(QWidget):
                              + (f"\n원본 {_money(quote.price, 'USD', price=True)}\n{self._fx_note()}" if self._active_fx(inst.market) is not None else ""))
             for column, field, sign in ((9, 'take_profit_price', '≥'), (10, 'stop_loss_price', '≤')):
                 value = row_target.get(field)
-                blocked = row_target.get('error') or ('lots' in target and not target.get('reconciled'))
-                table.item(row, column).setText('확인 필요 · 보류' if blocked else '미확인' if value is None else self._display_target(value, inst.market, sign))
-                original = (f"\n실제 매도 기준 {sign} {_target_price(value)} USD\n{self._fx_note()}"
-                            if value is not None and self._active_fx(inst.market) is not None else "")
+                unresolved_lots = 'lots' in target and not target.get('reconciled')
+                blocked = row_target.get('error')
+                table.item(row, column).setText('—' if unresolved_lots else '확인 필요 · 보류' if blocked else '미확인' if value is None else self._display_target(value, inst.market, sign, estimated=_estimated_lot(row_target)))
+                basis_label = '모의 매도 기준 · 원가 추정' if _estimated_lot(row_target) else '실제 매도 기준'
+                original = (f"\n{basis_label} {sign} {_target_price(value)} USD\n{self._fx_note()}"
+                            if value is not None and not unresolved_lots and not blocked
+                            and self._active_fx(inst.market) is not None else "")
                 table.item(row, column).setToolTip(self._target_tooltip(key, lot_id) + original)
             model_history = (_unreconciled_model_history(target)[0]
                              if 'lots' in target and not target.get('reconciled') else None)
-            table.item(row, 11).setText(model_history or row_target.get('model_title') or '미확인 / 수동·외부')
+            table.item(row, 11).setText(model_history or _model_label(row_target))
             table.item(row, 11).setToolTip(self._target_tooltip(key, lot_id))
             table.item(row, 12).setText(_planned_exit_label(row_target, inst.market,
                                                               row_target.get('take_profit_price'),
@@ -639,6 +698,7 @@ class PortfolioPanel(QWidget):
         elif 'lots' in target and not target.get('reconciled'):
             _, model_history = _unreconciled_model_history(target)
             return (model_history
+                    + (_DEMO_ESTIMATE_NOTE + '\n' if any(_estimated_lot(lot) for lot in target.get('lots', ()) if isinstance(lot, dict)) else '')
                     + '증권사 보유 수량은 종목별 합산입니다. 모델별 원가·목표가·매도가능수량은 검증되지 않았습니다.\n'
                     '모델별 체결 장부와 증권사 잔고를 대조할 수 없어 이 종목 자동매도를 보류합니다.\n'
                     + '\n'.join(map(str, target.get('issues', ()))))
@@ -652,8 +712,13 @@ class PortfolioPanel(QWidget):
         attribution = (f"매수 모델: {target.get('model_title') or '미확인 / 수동·외부'}\n"
                        f"저장된 매수 신호: {target.get('buy_signal_id') or '미확인'}\n"
                        "현재 선택한 모델로 과거 매수 출처를 추정하지 않습니다.\n")
+        if _estimated_lot(target):
+            attribution += _DEMO_ESTIMATE_NOTE + '\n'
         if lot_id:
-            attribution += f'분리 매수분: {lot_id}\n확인된 체결 수량·체결가 기준 가상 구분이며 증권사 잔고는 종목별 합산입니다.\n'
+            attribution += f'분리 매수분: {lot_id}\n'
+            attribution += ('매수 체결 수량과 모의투자 주문 당시 참고 시세로 나눈 추정 구분이며 '
+                            '증권사 잔고는 종목별 합산입니다.\n' if _estimated_lot(target) else
+                            '확인된 체결 수량·체결가 기준 가상 구분이며 증권사 잔고는 종목별 합산입니다.\n')
         if target.get('sellable_is_shared'):
             attribution += f"매도가능수량은 계좌 전체 공유 상한 {target['broker_sellable_quantity']}주입니다. 모델별 행의 수량을 더해 팔 수 있다는 뜻이 아닙니다.\n"
         strategy_id = target.get('strategy_id') or target.get('model_id')
@@ -733,9 +798,21 @@ class PortfolioPanel(QWidget):
                             original = target.get(field)
                             if not group and not lot_id and position.average_price > 0:
                                 original = position.average_price * (Decimal('1.01') if column == 9 else Decimal('0.992'))
-                        if original is not None and (column not in {9, 10} or item.text().startswith(('≥', '≤'))):
-                            prefix = ('실제 매도 기준 ' + ('≥ ' if column == 9 else '≤ ') if column in {9, 10} else '원본 ')
+                        if original is not None and (column not in {9, 10} or item.text().startswith(('≥', '≤', '추정 ≥', '추정 ≤'))):
+                            estimated_target = column in {9, 10} and _estimated_lot(target)
+                            prefix = (('모의 매도 기준 · 원가 추정 ' if estimated_target else '실제 매도 기준 ')
+                                      + ('≥ ' if column == 9 else '≤ ') if column in {9, 10} else
+                                      '추정 USD 기준 ' if position.raw.get('prototype_value_basis') == 'estimated_lot' and column in {4, 7}
+                                      else '원본 ')
                             item.setToolTip(item.toolTip() + f'\n{prefix}{_money(original, "USD", price=column in {4, 5, 9, 10})}\n{self._fx_note()}')
+                    if column in {4, 6, 7, 8} and position.raw.get('prototype_price_basis') == 'demo_order_reference':
+                        if position.raw.get('prototype_value_basis') == 'broker_aggregate':
+                            note = ('증권사 종목 합산 잔고의 평균매입가·평가금액·손익입니다. '
+                                    '모델의 추정 매도 기준과 별개이며 모델별 확정 성과가 아닙니다.')
+                        else:
+                            note = ('모델별 가상 분리 표시: ' + _DEMO_ESTIMATE_NOTE
+                                    + '\n평가금액·평가손익·수익률도 이 추정 원가를 사용한 값입니다.')
+                        item.setToolTip(item.toolTip() + '\n' + note)
                     table.setItem(row, column, item)
                 if key in selection:
                     table.selectionModel().select(table.model().index(row, 1),

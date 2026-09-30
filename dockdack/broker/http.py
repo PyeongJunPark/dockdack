@@ -23,6 +23,8 @@ _READ_ONLY_APIS = frozenset({
     ("ka10001", "/api/dostk/stkinfo"),
     ("ka10099", "/api/dostk/stkinfo"),
     ("ka10081", "/api/dostk/chart"),
+    ("ka10080", "/api/dostk/chart"),
+    ("ka20005", "/api/dostk/chart"),
     ("ka10032", "/api/dostk/rkinfo"),
     ("ka10030", "/api/dostk/rkinfo"),
     ("kt00018", "/api/dostk/acnt"),

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from dockdack.conditions import ConnectFactory, KiwoomConditionClient
 from dockdack.config import KiwoomConfig
-from dockdack.exceptions import LiveOrderConfirmationRequired, OrderOutcomeUnknown
+from dockdack.exceptions import BrokerAPIError, LiveOrderConfirmationRequired, OrderOutcomeUnknown
 from dockdack.http import HttpTransport, KiwoomHTTPClient
 from dockdack.history import DailyHistory, fetch_daily_history
 from dockdack.universe import RankedStock, top_turnover, top_watchlist
@@ -23,6 +24,7 @@ from dockdack.models import (
     DomesticExchange,
     ExecutionHistoryRecord,
     Market,
+    MinuteBar,
     OpenOrder,
     OrderRequest,
     OrderExecution,
@@ -363,6 +365,164 @@ class KiwoomBroker:
                 max_pages=max_pages,
             )
             for bar in page
+        )
+
+    def iter_minute_bars_domestic(
+        self,
+        symbol: str,
+        *,
+        exchange: DomesticExchange | str = DomesticExchange.KRX,
+        interval_minutes: int = 1,
+        base_date: date | str | None = None,
+        adjusted: bool = True,
+        as_of: datetime | None = None,
+        max_pages: int = 20,
+    ) -> Iterator[tuple[MinuteBar, ...]]:
+        """Read completed domestic minute OHLCV pages, newest first.
+
+        ``cntr_tm`` does not certify finalization. A row is exposed only once
+        its timestamp plus a whole interval is no later than ``as_of``.
+        """
+        yield from self.minute_bars_domestic(
+            symbol, exchange=exchange, interval_minutes=interval_minutes,
+            base_date=base_date, adjusted=adjusted, as_of=as_of,
+            max_pages=max_pages,
+        ).pages
+
+    def minute_bars_domestic(
+        self,
+        symbol: str,
+        *,
+        exchange: DomesticExchange | str = DomesticExchange.KRX,
+        interval_minutes: int = 1,
+        base_date: date | str | None = None,
+        adjusted: bool = True,
+        as_of: datetime | None = None,
+        max_pages: int = 20,
+    ) -> MinuteBars:
+        """Return a bounded latest chart slice; ``truncated`` flags older pages."""
+        interval = _minute_interval(interval_minutes)
+        _minute_max_pages(max_pages)
+        cutoff = _minute_cutoff(as_of)
+        selected_exchange = _domestic_exchange(exchange)
+        api_symbol = _domestic_api_symbol(symbol, selected_exchange)
+        body = {
+            "stk_cd": api_symbol,
+            "tic_scope": str(interval),
+            "upd_stkpc_tp": "1" if adjusted else "0",
+        }
+        if base_date is not None:
+            body["base_dt"] = _api_date(base_date)
+        pages, truncated = _bounded_minute_pages(
+            self._domestic_http,
+            api_id="ka10080", path="/api/dostk/chart", body=body,
+            max_pages=max_pages,
+        )
+        batches = []
+        for page in pages:
+            reported = page.body.get("stk_cd")
+            if reported and _clean_domestic_symbol(str(reported)) != _clean_domestic_symbol(api_symbol):
+                raise BrokerAPIError("분봉 응답 종목이 요청 종목과 다릅니다.")
+            batches.append(tuple(
+                bar for bar in (
+                    _minute_bar(row, Market.DOMESTIC, _clean_domestic_symbol(api_symbol),
+                                selected_exchange.value, "KRW")
+                    for row in _minute_rows(page.body, "stk_min_pole_chart_qry")
+                ) if _minute_complete(bar, interval, cutoff)
+            ))
+        return MinuteBars(batches, truncated=truncated)
+
+    def minute_bars_domestic_index(
+        self,
+        index_code: str = "201",
+        *,
+        interval_minutes: int = 1,
+        base_date: date | str | None = None,
+        as_of: datetime | None = None,
+        max_pages: int = 20,
+    ) -> MinuteBars:
+        """Read completed Korean index minute bars in index points.
+
+        Kiwoom ``ka20005`` quotes index OHLC as integer values scaled by 100.
+        DEMO also prefixes each value with a change-direction sign. Both were
+        checked against a DEMO 5-minute response on 2026-09-29. ``201`` is
+        KOSPI200; these observations are never tradable shares.
+        """
+        code = str(index_code).strip()
+        if code not in {"001", "002", "003", "004", "101", "201", "302", "701"}:
+            raise ValueError("지원하는 국내 업종지수 코드를 지정해야 합니다.")
+        interval = _minute_interval(interval_minutes)
+        _minute_max_pages(max_pages)
+        cutoff = _minute_cutoff(as_of)
+        body = {"inds_cd": code, "tic_scope": str(interval)}
+        if base_date is not None:
+            body["base_dt"] = _api_date(base_date)
+        pages, truncated = _bounded_minute_pages(
+            self._domestic_http, api_id="ka20005", path="/api/dostk/chart",
+            body=body, max_pages=max_pages,
+        )
+        batches = []
+        for page in pages:
+            reported = page.body.get("inds_cd")
+            if reported and str(reported).strip() != code:
+                raise BrokerAPIError("업종분봉 응답 지수가 요청 코드와 다릅니다.")
+            batches.append(tuple(
+                bar for bar in (
+                    _minute_bar(row, Market.DOMESTIC, code, "INDEX", "POINT",
+                                signed_prices=True, price_divisor=Decimal("100"))
+                    for row in _minute_rows(page.body, "inds_min_pole_qry")
+                ) if _minute_complete(bar, interval, cutoff)
+            ))
+        return MinuteBars(batches, truncated=truncated)
+
+    def iter_minute_bars_us(
+        self,
+        symbol: str,
+        *,
+        exchange: USExchange | str,
+        interval_minutes: int = 1,
+        start_date: date | str | None = None,
+        adjusted: bool = True,
+        apply_exchange_rate: bool = False,
+        as_of: datetime | None = None,
+        max_pages: int = 20,
+    ) -> Iterator[tuple[MinuteBar, ...]]:
+        """Read completed US minute OHLCV pages in USD by default."""
+        yield from self.minute_bars_us(
+            symbol, exchange=exchange, interval_minutes=interval_minutes,
+            start_date=start_date, adjusted=adjusted,
+            apply_exchange_rate=apply_exchange_rate, as_of=as_of,
+            max_pages=max_pages,
+        ).pages
+
+    def minute_bars_us(
+        self,
+        symbol: str,
+        *,
+        exchange: USExchange | str,
+        interval_minutes: int = 1,
+        start_date: date | str | None = None,
+        adjusted: bool = True,
+        apply_exchange_rate: bool = False,
+        as_of: datetime | None = None,
+        max_pages: int = 20,
+    ) -> MinuteBars:
+        """Fail closed until Kiwoom's US chart clock convention is verified.
+
+        DEMO ``usa06011`` has returned a business date with hours 24 and
+        later. The official example names ``cntr_tm`` and ``bus_dt`` but does
+        not define the time zone or extended-hour convention. Attaching New
+        York time to otherwise parseable rows could silently misdate them.
+        """
+        _minute_interval(interval_minutes)
+        _minute_max_pages(max_pages)
+        _minute_cutoff(as_of)
+        _us_exchange(exchange, allow_all=False)
+        _symbol(symbol)
+        if start_date is not None:
+            _api_date(start_date)
+        raise BrokerAPIError(
+            "미국 분봉 체결시간의 시간대와 24시 이상 표기 규칙이 확인되지 않아 조회를 중단했습니다."
         )
 
     def search_stocks(
@@ -1453,6 +1613,114 @@ def _us_daily_bar(
         adjustment_rate=_decimal(row.get("upd_rt")),
         raw=row,
     )
+
+
+_MINUTE_INTERVALS = frozenset((1, 3, 5, 10, 15, 30, 45, 60))
+
+
+class MinuteBars(tuple):
+    """Tuple-compatible latest minute bars with explicit pagination metadata."""
+
+    def __new__(cls, batches: Sequence[tuple[MinuteBar, ...]], *, truncated: bool):
+        value = super().__new__(cls, (bar for batch in batches for bar in batch))
+        value.pages = tuple(batches)
+        value.page_count = len(value.pages)
+        value.truncated = truncated
+        return value
+
+
+def _bounded_minute_pages(http: KiwoomHTTPClient, *, api_id: str, path: str,
+                          body: Mapping[str, Any], max_pages: int):
+    """Return an intentional latest-N chart slice; other APIs still require all pages."""
+    pages = []
+    cont_yn = None
+    next_key = None
+    for _ in range(max_pages):
+        page = http.request(api_id=api_id, path=path, body=body,
+                            cont_yn=cont_yn, next_key=next_key)
+        pages.append(page)
+        if not page.has_next:
+            return tuple(pages), False
+        if not page.next_key or page.next_key == next_key:
+            raise BrokerAPIError("분봉 연속조회 키가 없거나 반복됩니다.")
+        cont_yn = page.cont_yn or "Y"
+        next_key = page.next_key
+    return tuple(pages), True
+
+
+def _minute_interval(value: int) -> int:
+    if type(value) is not int or value not in _MINUTE_INTERVALS:
+        raise ValueError("분봉 간격은 1, 3, 5, 10, 15, 30, 45, 60분 중 하나여야 합니다.")
+    return value
+
+
+def _minute_max_pages(value: int) -> None:
+    if type(value) is not int or not 1 <= value <= 100:
+        raise ValueError("분봉 최대 조회 페이지는 1~100이어야 합니다.")
+
+
+def _minute_cutoff(value: datetime | None) -> datetime:
+    result = datetime.now(timezone.utc) if value is None else value
+    if not isinstance(result, datetime) or result.tzinfo is None or result.utcoffset() is None:
+        raise ValueError("분봉 기준 시각은 시간대 정보가 있는 datetime이어야 합니다.")
+    return result
+
+
+def _minute_rows(body: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
+    rows = body.get(key)
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        raise BrokerAPIError("분봉 응답의 데이터 목록 형식이 잘못되었습니다.")
+    return rows
+
+
+def _minute_bar(
+    row: Mapping[str, Any], market: Market, symbol: str, exchange: str, currency: str,
+    *, signed_prices: bool | None = None, price_divisor: Decimal = Decimal("1"),
+    source_timezone: ZoneInfo | None = None,
+) -> MinuteBar:
+    stamp_text = row.get("cntr_tm")
+    if (not isinstance(stamp_text, str) or len(stamp_text) != 14
+            or not stamp_text.isascii() or not stamp_text.isdigit()):
+        raise BrokerAPIError("분봉 체결시간은 YYYYMMDDHHmmss 형식이어야 합니다.")
+    try:
+        naive_stamp = datetime.strptime(stamp_text, "%Y%m%d%H%M%S")
+    except ValueError as exc:
+        raise BrokerAPIError("분봉 체결시간이 유효한 날짜·시각이 아닙니다.") from exc
+    if market is Market.US and row.get("bus_dt") not in (None, "", stamp_text[:8]):
+        raise BrokerAPIError("미국 분봉의 영업일자와 체결시간 날짜가 다릅니다.")
+    if market is Market.US and source_timezone is None:
+        raise BrokerAPIError("미국 분봉의 원본 시간대가 확인되지 않았습니다.")
+    zone = ZoneInfo("Asia/Seoul") if market is Market.DOMESTIC else source_timezone
+    if signed_prices is None:
+        signed_prices = market is Market.DOMESTIC
+    values = {}
+    for attribute, field_name in (("open", "open_pric"), ("high", "high_pric"),
+                                  ("low", "low_pric"), ("close", "cur_prc"),
+                                  ("volume", "trde_qty")):
+        value = row.get(field_name)
+        if isinstance(value, bool):
+            raise BrokerAPIError(f"분봉 {field_name} 값이 숫자가 아닙니다.")
+        number = _decimal(value, absolute=signed_prices and attribute != "volume")
+        if (number is None or not number.is_finite()
+                or (number < 0 if attribute == "volume" else number <= 0)):
+            raise BrokerAPIError(f"분봉 {field_name} 값이 유효하지 않습니다.")
+        values[attribute] = number if attribute == "volume" else number / price_divisor
+    if (values["volume"] != values["volume"].to_integral_value()
+            or values["high"] < max(values["open"], values["close"], values["low"])
+            or values["low"] > min(values["open"], values["close"])):
+        raise BrokerAPIError("분봉 OHLCV 값이 일관되지 않습니다.")
+    return MinuteBar(
+        market=market, symbol=symbol, exchange=exchange,
+        timestamp=naive_stamp.replace(tzinfo=zone), currency=currency,
+        raw=dict(row), **values,
+    )
+
+
+def _minute_complete(bar: MinuteBar, interval_minutes: int, as_of: datetime) -> bool:
+    # The API calls this an execution time without promising that it denotes
+    # the start or the end of a finalized interval. Delay conservatively.
+    return (bar.timestamp.astimezone(timezone.utc) + timedelta(minutes=interval_minutes)
+            <= as_of.astimezone(timezone.utc))
 
 
 def _domestic_order_type(value: str | None, price: Decimal | None) -> str:

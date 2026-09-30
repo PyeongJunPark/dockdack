@@ -459,6 +459,40 @@ class VirtualPrototypeLotEngineTests(unittest.TestCase):
         self.assertEqual(by_id[new_buy.id]["average_price"], Decimal("110"))
         self.assertIsNone(summary["take_profit_price"])
 
+    def test_demo_multi_share_buy_uses_labeled_order_reference_for_exit_only(self):
+        source = MARK1
+        policy = replace(self.policies[source], max_quantity=2)
+        self.policies[source] = policy
+        self.readers[source].policy = policy
+        self.engine.configure_external_sources([(self.policies[key], self.readers[key]) for key in FAMILIES])
+        payload = self.payload(source)
+        payload["signals"][0]["quantity"] = 2
+        atomic_json(self.files[source], payload)
+        self.arm_poll()
+        buy = next(rule for rule in self.rules_for(source) if rule.status == "accepted")
+        # A last-fill price is not a weighted average for a multi-share BUY.
+        self.store.record_execution(buy.id, filled_quantity=Decimal(2), remaining_quantity=Decimal(0),
+                                    fill_price=Decimal("99.5"), observed_at=self.now)
+        self.store.finish(buy.id, "filled", "fake confirmed quantity")
+        self.service.positions = (position(2, 2),)
+        summary = self.engine.holding_exit_targets(self.service.positions[0])
+        self.assertTrue(summary["reconciled"])
+        lot, = summary["lots"]
+        self.assertEqual(lot["average_price_basis"], "demo_order_reference")
+        self.assertEqual(lot["average_price"], Decimal(100))
+        self.assertEqual(lot["take_profit_price"], Decimal(101))
+        self.assertEqual(self.store.order_history()[0]["fill_price"], "99.5")
+        self.service.prices = [Decimal("101.2")]
+        self.engine.enable_holdings_exits = True
+        self.engine.poll()
+        sells = self.sells()
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]["quantity"], 2)
+        self.assertEqual(self.store.prototype_sell_allocation(sells[0]["rule_id"])["lot_id"], buy.id)
+        monitoring = self.engine._messages.get("holding-lot:" + buy.id, "")
+        self.assertIn("모의 주문 당시 참고 시세 기준 추정", monitoring)
+        self.assertNotIn("체결평균", monitoring)
+
     def test_disabling_both_feeds_keeps_independent_owned_exits(self):
         old_buy, new_buy = self.hold_both()
         self.engine.disarm()

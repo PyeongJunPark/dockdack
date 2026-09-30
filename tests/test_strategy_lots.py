@@ -155,13 +155,112 @@ class StrategyLotTests(unittest.TestCase):
             lot, = self.store.prototype_lots(self.item.id)
             self.assertEqual((lot["quantity_remaining"], lot["average_price"]), (D(3), D(110)))
 
-    def test_unverified_multishare_price_is_not_weighted_average(self):
+    def test_demo_unverified_multishare_uses_labeled_order_reference_not_fill_price(self):
         buy = self.rule(OLD, 2)
         self.accept(buy)
         self.fill(buy, average="120", verified=False)
         inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        self.assertTrue(inventory["reconciled"])
+        self.assertEqual(inventory["lots"][0]["average_price"], D(100))
+        self.assertEqual(inventory["lots"][0]["average_price_basis"], "demo_order_reference")
+        row, = self.store.order_history(limit=None, watch_id=self.item.id)
+        self.assertEqual(row["fill_price"], "120")  # Real fill snapshot is not overwritten.
+
+    def test_verified_fill_average_takes_precedence_over_demo_reference(self):
+        buy = self.buy(quantity=2, average="110")
+        inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        lot, = inventory["lots"]
+        self.assertEqual(lot["average_price"], D(110))
+        self.assertEqual(lot["average_price_basis"], "broker_fill")
+        self.assertEqual(lot["take_profit_price"], D("111.10"))
+
+    def test_demo_estimate_needs_full_terminal_fill(self):
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, 1, average="120", complete=False, verified=False)
+        inventory = self.store.prototype_inventory(self.item.id, D(1), D(1))
+        self.assertIsNone(inventory["lots"][0]["average_price"])
+        self.assertFalse(inventory["reconciled"])
+        self.store.finish(buy.id, "cancelled", "confirmed partial cancellation")
+        inventory = self.store.prototype_inventory(self.item.id, D(1), D(1))
         self.assertFalse(inventory["reconciled"])
         self.assertIsNone(inventory["lots"][0]["average_price"])
+
+    def test_demo_estimate_needs_order_number(self):
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, average="120", verified=False)
+        with self.store.connection() as db:
+            db.execute("UPDATE attempts SET order_number='' WHERE rule_id=?", (buy.id,))
+        inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        self.assertIsNone(inventory["lots"][0]["average_price"])
+        self.assertFalse(inventory["reconciled"])
+
+    def test_demo_estimate_rejects_inconsistent_remaining_quantity(self):
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, average="120", verified=False)
+        with self.store.connection() as db:
+            db.execute("UPDATE order_execution_snapshots SET remaining_quantity='1' WHERE rule_id=?", (buy.id,))
+        inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        self.assertIsNone(inventory["lots"][0]["average_price"])
+        self.assertFalse(inventory["reconciled"])
+
+    def test_demo_estimate_never_unlocks_unknown_order(self):
+        buy = self.rule(OLD, 2)
+        self.assertTrue(self.store.claim(buy, D(100), NOW, prototype_lots=True))
+        self.store.finish(buy.id, "unknown", "send outcome unknown")
+        self.store.record_execution(buy.id, filled_quantity=D(2), remaining_quantity=D(0),
+                                    fill_price=D(120), observed_at=NOW + timedelta(minutes=1))
+        inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        self.assertIsNone(inventory["lots"][0]["average_price"])
+        self.assertFalse(inventory["reconciled"])
+
+    def test_demo_estimate_excludes_reviewed_market_and_invalid_quote(self):
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, average="120", complete=False, verified=False)
+        self.store.mark_reviewed(buy.id, "CHECKED_ORDER_HISTORY")
+        self.assertIsNone(self.store.prototype_lots(self.item.id)[0]["average_price"])
+        with self.store.connection() as db:
+            db.execute("UPDATE attempts SET status='filled' WHERE rule_id=?", (buy.id,))
+            db.execute("UPDATE rules SET status='filled' WHERE id=?", (buy.id,))
+            row = db.execute("SELECT payload FROM external_signals WHERE rule_id=?", (buy.id,)).fetchone()
+            payload = json.loads(row["payload"])
+            payload["order_type"] = "market"
+            db.execute("UPDATE external_signals SET payload=? WHERE rule_id=?", (json.dumps(payload), buy.id))
+        self.assertIsNone(self.store.prototype_lots(self.item.id)[0]["average_price"])
+        with self.store.connection() as db:
+            payload["order_type"] = "limit"
+            db.execute("UPDATE external_signals SET payload=? WHERE rule_id=?", (json.dumps(payload), buy.id))
+            db.execute("UPDATE attempts SET price='NaN' WHERE rule_id=?", (buy.id,))
+        self.assertIsNone(self.store.prototype_lots(self.item.id)[0]["average_price"])
+
+    def test_real_projection_never_uses_demo_order_reference(self):
+        from dockdack.strategy_lots import project_prototype_inventory
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, average="120", verified=False)
+        rows = self.store.order_history(limit=None, watch_id=self.item.id)
+        inventory = project_prototype_inventory(rows, (), mode="real", scope="real-account")
+        self.assertIsNone(inventory["lots"][0]["average_price"])
+        self.assertIsNone(inventory["lots"][0]["average_price_basis"])
+
+    def test_demo_estimated_allocation_does_not_pin_price_after_real_fill_recovery(self):
+        buy = self.rule(OLD, 2)
+        self.accept(buy)
+        self.fill(buy, average="120", verified=False)
+        sell = self.sell(buy, 1)
+        allocation = self.store.prototype_sell_allocation(sell.id)
+        self.assertIsNone(allocation["buy_average_price"])
+        self.store.record_fill_recovery(buy.id, status="enriched", message="verified weighted average",
+            checked_at=NOW + timedelta(hours=2), price_basis="broker_average",
+            filled_quantity=D(2), remaining_quantity=D(0), fill_price=D(110),
+            price_basis_quantity=D(2), price_basis_price=D(110))
+        inventory = self.store.prototype_inventory(self.item.id, D(2), D(2))
+        self.assertTrue(inventory["reconciled"])
+        self.assertEqual(inventory["lots"][0]["average_price"], D(110))
+        self.assertEqual(inventory["lots"][0]["average_price_basis"], "broker_fill")
 
     def test_sell_one_model_does_not_consume_other_model_and_restarts_are_idempotent(self):
         old = self.buy(OLD, average="100")

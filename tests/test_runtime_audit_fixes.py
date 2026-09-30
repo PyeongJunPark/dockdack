@@ -333,13 +333,16 @@ class BulkCloseProjectionTests(unittest.TestCase):
     fill = lots.StrategyLotTests.fill
     buy = lots.StrategyLotTests.buy
 
-    def test_domestic_weighted_recovery_enables_existing_multi_share_lot_barriers(self):
+    def test_domestic_weighted_recovery_supersedes_demo_estimated_lot_barriers(self):
         rule = self.rule(lots.OLD, 3)
         self.accept(rule)
         with self.store.connection() as db:
             db.execute("UPDATE attempts SET order_number='0000001' WHERE rule_id=?", (rule.id,))
         self.fill(rule, average="103", verified=False)
-        self.assertFalse(self.store.prototype_inventory(self.item.id, D(3), D(3))["reconciled"])
+        initial = self.store.prototype_inventory(self.item.id, D(3), D(3))
+        self.assertTrue(initial["reconciled"])
+        self.assertEqual(initial["lots"][0]["average_price_basis"], "demo_order_reference")
+        self.assertEqual(initial["lots"][0]["take_profit_price"], D(101))
         row = self.store.order_history(limit=None)[0]
         record = recovery.FillRecoveryTests.record(self, row, source_api="kt00007+kt00009",
             price_basis="weighted_fills", fill_price=D(102), reported_fill_price=D(103), fill_amount=D(306))
@@ -349,6 +352,7 @@ class BulkCloseProjectionTests(unittest.TestCase):
         inventory = self.store.prototype_inventory(self.item.id, D(3), D(3))
         self.assertTrue(inventory["reconciled"], inventory["issues"])
         lot, = inventory["lots"]
+        self.assertEqual(lot["average_price_basis"], "broker_fill")
         self.assertEqual((lot["average_price"], lot["take_profit_price"], lot["stop_loss_price"]),
                          (D(102), D("103.02"), D("101.082")))
 

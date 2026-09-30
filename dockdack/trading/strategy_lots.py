@@ -3,9 +3,12 @@
 These are accounting lots, not separate broker positions. Acknowledgements never
 create shares, cumulative execution snapshots are replayed rather than appended,
 and an unallocated sell or aggregate account discrepancy requires review.
+Only fully filled DEMO model buys may use a labeled order-time quote estimate
+when the broker's weighted fill price cannot be verified.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -66,8 +69,32 @@ def verified_average(row, filled):
     return None
 
 
+def demo_order_reference(row, filled, ordered):
+    """Explicitly estimated DEMO basis, never a broker fill or a REAL basis.
+
+    ``attempts.price`` is the quote captured immediately before order intent,
+    not necessarily the submitted tick-rounded limit or execution price.
+    """
+    if (row.get("status") != "filled"
+            or row.get("filled_quantity") is None or not filled
+            or filled != filled.to_integral_value() or not ordered
+            or filled != ordered
+            or number(row.get("remaining_quantity")) not in (None, ZERO)
+            or not str(row.get("order_number") or "").strip()):
+        return None
+    try:
+        metadata = json.loads(row.get("external_payload") or "")
+        price = number(row.get("reference_price"))
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(metadata, dict) or metadata.get("order_type", "limit") != "limit"
+            or price is None or price <= 0):
+        return None
+    return price
+
+
 def project_prototype_inventory(rows, allocations, *, mode="demo", scope="demo"):
-    """Pure idempotent projection. Return lots and issues; never guess missing fills."""
+    """Pure idempotent projection; never invent filled shares or a broker fill."""
     rows = tuple(rows)
     timestamps = {row["rule_id"]: _aware_time(row.get("started_at")) for row in rows}
     rows = tuple(sorted(rows, key=lambda row: timestamps[row["rule_id"]] or datetime.max.replace(tzinfo=timezone.utc)))
@@ -98,6 +125,11 @@ def project_prototype_inventory(rows, allocations, *, mode="demo", scope="demo")
         if row["status"] == "reviewed" and row.get("filled_quantity") is None:
             problems.append("수동 확인된 주문의 체결 수량 근거 없음")
         average = verified_average(row, filled)
+        average_price_basis = "broker_fill" if average is not None else None
+        if average is None and mode == "demo":
+            average = demo_order_reference(row, filled, ordered)
+            if average is not None:
+                average_price_basis = "demo_order_reference"
         lots[row["rule_id"]] = {
             "lot_id": row["rule_id"], "buy_rule_id": row["rule_id"],
             "buy_order_number": row.get("order_number", ""),
@@ -108,6 +140,7 @@ def project_prototype_inventory(rows, allocations, *, mode="demo", scope="demo")
             "filled_quantity": filled, "quantity_sold": ZERO,
             "quantity_remaining": filled, "quantity_reserved_sell": ZERO,
             "available_quantity": filled, "average_price": average,
+            "average_price_basis": average_price_basis,
             "take_profit_price": average * (1 + family.take_profit) if average and family.take_profit is not None else None,
             "stop_loss_price": average * (1 - family.stop_loss) if average and family.stop_loss is not None else None,
             "buy_started_at": row["started_at"],

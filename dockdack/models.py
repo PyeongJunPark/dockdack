@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
@@ -81,6 +81,33 @@ class DailyBar:
     adjustment_type: str | None = None
     adjustment_rate: Decimal | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class MinuteBar:
+    """One exchange-local OHLCV bar; ``timestamp`` must be timezone-aware.
+
+    The broker's ``cntr_tm`` is a time label, not proof that a current bar has
+    finished. Minute-chart accessors omit bars until one full interval after
+    this timestamp.
+    """
+
+    market: Market
+    symbol: str
+    exchange: str
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    currency: str
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.timestamp, datetime) or self.timestamp.tzinfo is None
+                or self.timestamp.utcoffset() is None):
+            raise ValueError("MinuteBar.timestamp must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)

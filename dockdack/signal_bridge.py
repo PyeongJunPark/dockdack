@@ -63,6 +63,11 @@ _PROTOTYPE_FAMILIES = (
     PrototypeFamily("mark1-26-prototype", "mark1.26 prototype", Decimal(".02"), None),
     PrototypeFamily("mark1-27-prototype", "mark1.27 prototype", Decimal(".03"), None),
     PrototypeFamily("mark1-28-prototype", "mark1.28 prototype", Decimal(".04"), None),
+    # Daily-OHLCV-trained, five-minute-input DEMO experiments. Their own
+    # confirmed lots use the recorded model identity for exits; selection or
+    # this registry alone never authorizes an order.
+    *(PrototypeFamily(f"mark1-{number}-prototype", f"mark1.{number} prototype",
+                      Decimal(".03"), Decimal(".02")) for number in range(29, 38)),
 )
 
 

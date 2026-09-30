@@ -19,6 +19,7 @@ if HAS_QT:
     from dockdack.ui.v00_app import (MARK1_TRIGGER, MARK11_TRIGGER, MARK12_TRIGGER,
                                     MARK14_TRIGGER, ALL_MODEL_IDS, INTRADAY_MODEL_IDS,
                                     TARGET_HORIZON_MODEL_IDS, PREOPEN_MODEL_IDS,
+                                    MINUTE_TRANSFER_IDS, MINUTE_HEDGE_IDS,
                                     PROTOTYPE_SOURCES, WATCH_MODEL_IDS, V00Window)
 
 from dockdack.watchlist import WatchItem, WatchStore
@@ -142,8 +143,8 @@ class GuiPreferencesTests(unittest.TestCase):
                                         'external_models': [MARK1_TRIGGER]})
         window = self.make_window()
         self.assertEqual(window.buy_percent.value(), 7.5)
-        self.assertTrue(all(field.value() == 7.5
-                            for field in window.mark14_panel.model_buy_percents.values()))
+        self.assertTrue(all(field.value() == (1 if model in MINUTE_TRANSFER_IDS else 7.5)
+                            for model, field in window.mark14_panel.model_buy_percents.items()))
         self.assertEqual(window.engine.source_buy_percents['mark1-prototype-demo-trigger'],
                          Decimal('7.5'))
         self.assertTrue(all(not window.external_model_checks[model].isChecked()
@@ -178,8 +179,63 @@ class GuiPreferencesTests(unittest.TestCase):
         self.assertEqual(set(second.mark14_panel.model_buy_percents), set(ALL_MODEL_IDS))
         for index, model in enumerate(ALL_MODEL_IDS, 1):
             self.assertEqual(second.mark14_panel.model_buy_percents[model].value(), index)
-            self.assertEqual(second.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], Decimal(index))
+            if model in MINUTE_HEDGE_IDS:
+                self.assertNotIn(PROTOTYPE_SOURCES[model], second.engine.source_buy_percents)
+            else:
+                self.assertEqual(second.engine.source_buy_percents[PROTOTYPE_SOURCES[model]], Decimal(index))
         self.assertFalse(second.engine.orders_enabled)
+
+    def test_bulk_model_selection_is_saved_and_restored_without_arming(self):
+        first = self.make_window()
+        first.mark14_panel.select_all_button.click()
+        first.close()
+        self.assertEqual(set(self.store.load_ui_preferences()['external_models']), set(ALL_MODEL_IDS))
+        second = self.make_window()
+        self.assertEqual(set(second._chosen_external_models()), set(ALL_MODEL_IDS))
+        self.assertEqual(second.mark14_panel.selection_count.text(),
+                         f'{len(ALL_MODEL_IDS)} / {len(ALL_MODEL_IDS)}개 선택')
+        second.mark14_panel.clear_all_button.click()
+        second.close()
+        third = self.make_window()
+        self.assertEqual(third._chosen_external_models(), ())
+        self.assertFalse(third.monitoring)
+        self.assertFalse(third.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_bulk_buy_percent_survives_restart_and_preserves_model_choices(self):
+        first = self.make_window()
+        first.mark14_panel.clear_all_button.click()
+        first.external_model_checks[MARK1_TRIGGER].setChecked(True)
+        self.wait_idle(first)
+        research_percents = {
+            model: first.mark14_panel.model_buy_percents[model].value()
+            for model in MINUTE_HEDGE_IDS
+        }
+        first.mark14_panel.bulk_buy_percent.setValue(2.75)
+        first.mark14_panel.apply_bulk_buy_percent_button.click()
+        first.close()
+
+        stored = self.store.load_ui_preferences()
+        self.assertEqual(stored['external_models'], [MARK1_TRIGGER])
+        for model in ALL_MODEL_IDS:
+            expected = research_percents[model] if model in MINUTE_HEDGE_IDS else 2.75
+            self.assertEqual(stored['model_buy_percents'][model], expected)
+
+        second = self.make_window()
+        self.assertEqual(second._chosen_external_models(), (MARK1_TRIGGER,))
+        for model in ALL_MODEL_IDS:
+            expected = research_percents[model] if model in MINUTE_HEDGE_IDS else 2.75
+            self.assertEqual(second.mark14_panel.model_buy_percents[model].value(), expected)
+            if model in MINUTE_HEDGE_IDS:
+                self.assertNotIn(PROTOTYPE_SOURCES[model], second.engine.source_buy_percents)
+            else:
+                self.assertEqual(second.engine.source_buy_percents[PROTOTYPE_SOURCES[model]],
+                                 Decimal('2.75'))
+        self.assertFalse(second.monitoring)
+        self.assertFalse(second.pending_auto_arm)
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertEqual(self.service.quote_calls, 0)
+        self.assertEqual(self.service.submitted, [])
 
     def test_old_log_tab_selection_opens_logs_inside_advanced_settings(self):
         for selection in ({'workspace_tab_id': 'logs'}, {'workspace_tab': 3}):

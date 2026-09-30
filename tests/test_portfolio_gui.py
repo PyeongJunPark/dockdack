@@ -279,12 +279,13 @@ class PortfolioPanelTests(unittest.TestCase):
         unreconciled = {"lots": (lot,), "reconciled": False,
                         "issues": ("잔고 수량 불일치",)}
         self.panel.set_exit_targets({key: unreconciled})
-        self.assertEqual(self.panel.table.item(0, 12).text(), "장부 대조 필요")
+        self.assertEqual(self.panel.table.item(0, 12).text(), "—")
+        self.assertIn("자동매도 보류 1종목", self.panel.reconciliation_labels[market].text())
         self.panel.apply_holding_quote({"watch_id": key,
                                         "instrument": SimpleNamespace(market=market, currency="USD"),
                                         "quote": SimpleNamespace(price=D(200)),
                                         "targets": unreconciled})
-        self.assertEqual(self.panel.table.item(0, 12).text(), "장부 대조 필요")
+        self.assertEqual(self.panel.table.item(0, 12).text(), "—")
 
 
 if __name__ == "__main__":

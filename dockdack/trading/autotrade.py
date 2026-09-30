@@ -674,6 +674,13 @@ class AutoTrader:
         if "take_profit_price" in metadata and not Decimal(metadata["stop_loss_price"]) < fresh.quote.price < Decimal(metadata["take_profit_price"]):
             raise ValueError("매수 직전 현재가가 하방·상방 목표가격 사이에 있지 않습니다.")
         notional = fresh.quote.price * rule.quantity
+        required_limit = max(notional, (price or fresh.quote.price) * rule.quantity)
+        if (required_limit > rule.max_notional and self._mode is TradingMode.DEMO
+                and self._holding_rule(rule) and rule.quantity == 1
+                and lot_inventory is not None):
+            # Re-evaluated price may rise after the first exit snapshot. The
+            # exception is still tied to the verified one-share allocation.
+            rule = self.store.raise_confirmed_demo_sell_limit(rule, required_limit)
         if notional > rule.max_notional:
             raise ValueError("예상 주문금액이 규칙의 상한을 넘습니다.")
         if rule.side is OrderSide.BUY:
@@ -931,8 +938,11 @@ class AutoTrader:
             hit = (TriggerKind.TIME_EXIT if timed else
                    TriggerKind.PRICE_GE if upper is not None and price >= upper else
                    TriggerKind.PRICE_LE if lower is not None and price <= lower else None)
+            basis_label = ("모의 주문 당시 참고 시세 기준 추정"
+                           if lot.get("average_price_basis") == "demo_order_reference"
+                           else "확인된 체결평균")
             self._message("holding-lot:" + lot["lot_id"], item.id,
-                          f"{lot['model_title']} 분리 매도 감시 · 체결평균 {lot['average_price']} · 현재가 {price} · 상방 {upper} / 하방 {lower} · "
+                          f"{lot['model_title']} 분리 매도 감시 · {basis_label} {lot['average_price']} · 현재가 {price} · 상방 {upper} / 하방 {lower} · "
                           f"{'기간 만료 · 가격 무관 매도' if timed else '매도 조건 충족' if hit else '대기'}",
                           category="monitor")
             key = (item.id, "lot", lot["lot_id"])
@@ -942,11 +952,17 @@ class AutoTrader:
             if not isinstance(cap, Decimal) or not cap.is_finite() or cap <= 0:
                 continue
             unit = current_common_equity_limit_price(position.market, OrderSide.SELL, price)
-            quantity = min(int(lot["sellable_quantity"]), int(position.sellable_quantity), int(cap / unit))
+            # A confirmed DEMO model lot must not become impossible to close
+            # merely because one share rose above the configured order cap.
+            # Keep the cap for multi-share sizing; allow only a single-share
+            # floor, with the actual rule limit raised to that share's price.
+            cap_quantity = max(1, int(cap / unit)) if self._mode is TradingMode.DEMO else int(cap / unit)
+            quantity = min(int(lot["sellable_quantity"]), int(position.sellable_quantity), cap_quantity)
             if quantity < 1:
                 continue
+            rule_limit = max(cap, unit * quantity) if self._mode is TradingMode.DEMO else cap
             rule = TriggerRule(("holding-exit-time-" if timed else "holding-exit-") + uuid4().hex,
-                               item.id, hit, OrderSide.SELL, quantity, cap,
+                               item.id, hit, OrderSide.SELL, quantity, rule_limit,
                                None if timed else upper if hit is TriggerKind.PRICE_GE else lower)
             self.store.save_holding_rule(item, rule)
             try:
