@@ -749,7 +749,7 @@ class V00GuiTests(unittest.TestCase):
         self.assertEqual(self.window.engine.equity_buy_percent, D('17.25'))
         self.assertEqual(self.service.submitted, [])
 
-    def test_custom_buy_percent_is_accurate_in_order_confirmation(self):
+    def test_custom_buy_percent_is_preserved_with_concise_order_confirmation(self):
         self.window.buy_percent.setValue(15)
         self.window.mark14_panel.model_buy_percents[MARK14_TRIGGER].setValue(6.5)
         self.window.external_model_checks[MARK14_TRIGGER].setChecked(True)
@@ -758,14 +758,15 @@ class V00GuiTests(unittest.TestCase):
                       return_value=QMessageBox.StandardButton.No) as question:
             self.assertFalse(self.window.confirm_automation())
         message = question.call_args.args[2]
-        self.assertIn('mark1.4 prototype 6.5%', message)
-        self.assertIn('기타 신호 기본 15%', message)
-        self.assertIn('1회 매수 비중은 모델 선택 화면 설정', message)
-        self.assertNotIn('종목당 평가자산 10%', message)
+        self.assertEqual(message, '자동매매를 켜시겠습니까?')
+        self.assertEqual(question.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertEqual(question.call_args.args[-1], QMessageBox.StandardButton.No)
+        self.assertEqual(self.window.buy_percent.value(), 15)
+        self.assertEqual(self.window.mark14_panel.model_buy_percents[MARK14_TRIGGER].value(), 6.5)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 
-    def test_proxy_confirmation_is_grouped_and_never_renders_a_bound_method(self):
+    def test_proxy_confirmation_is_one_question_without_model_details(self):
         for model in INTRADAY_MODEL_IDS[:2]:
             self.window.external_model_checks[model].setChecked(True)
         with patch.object(self.window, '_prepare_builtin'), \
@@ -773,10 +774,10 @@ class V00GuiTests(unittest.TestCase):
                       return_value=QMessageBox.StandardButton.No) as question:
             self.assertFalse(self.window.confirm_automation())
         message = question.call_args.args[2]
-        self.assertIn('일봉 대리 모델 2개', message)
-        self.assertEqual(message.count('장중 진입 후 경로·수익성 미검증'), 1)
-        self.assertEqual(message.count('모의 전용'), 1)
-        self.assertNotIn('<bound method', message)
+        self.assertEqual(message, '자동매매를 켜시겠습니까?')
+        self.assertEqual(question.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertTrue(all(self.window.external_model_checks[model].isChecked()
+                            for model in INTRADAY_MODEL_IDS[:2]))
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertEqual(self.service.submitted, [])
 

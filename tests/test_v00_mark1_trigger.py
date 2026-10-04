@@ -211,16 +211,16 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
 
-    def test_normal_confirmation_exposes_mark1_method_without_enabling_orders(self):
+    def test_normal_confirmation_is_concise_without_enabling_orders(self):
         from PySide6.QtWidgets import QMessageBox
         self.select(MARK1_TRIGGER)
         self.assertIn('50% 초과', self.window.builtin_confirmation_notice)
         self.assertIn('CatBoost 3개 시드', self.window.builtin_confirmation_notice)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as confirm:
             self.assertFalse(self.window.confirm_automation())
-        self.assertIn('CatBoost 3개 시드', confirm.call_args.args[2])
-        self.assertNotIn('연구 검증 미통과', confirm.call_args.args[2])
-        self.assertIn('−0.9%', confirm.call_args.args[2])
+        self.assertEqual(confirm.call_args.args[2], '자동매매를 켜시겠습니까?')
+        self.assertEqual(confirm.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertEqual(confirm.call_args.args[-1], QMessageBox.StandardButton.No)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
         self.assertFalse(self.window.monitoring)
@@ -296,17 +296,15 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.engine.source_validators, {})
         self.assertFalse(self.service.submitted)
 
-    def test_mark11_confirmation_exposes_new_targets_and_never_arms_itself(self):
+    def test_mark11_confirmation_is_concise_and_never_arms_itself(self):
         from PySide6.QtWidgets import QMessageBox
         self.select(MARK11_TRIGGER)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as confirm:
             self.assertFalse(self.window.confirm_automation())
         notice = confirm.call_args.args[2]
-        self.assertIn('mark1.1 prototype', notice)
-        self.assertIn('+0.5%', notice)
-        self.assertIn('−0.4%', notice)
-        self.assertIn('CatBoost 3개 시드', notice)
-        self.assertNotIn('연구 검증 미통과', notice)
+        self.assertEqual(notice, '자동매매를 켜시겠습니까?')
+        self.assertEqual(confirm.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertEqual(confirm.call_args.args[-1], QMessageBox.StandardButton.No)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
         self.assertFalse(self.service.submitted)

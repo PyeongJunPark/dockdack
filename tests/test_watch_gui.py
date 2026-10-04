@@ -9,18 +9,18 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HAS_QT = importlib.util.find_spec("PySide6") is not None
 if HAS_QT:
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
     from dockdack.watch_gui import WatchlistDialog
 
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
-from dockdack.models import Market
+from dockdack.models import Market, TradingMode
 from dockdack.market_schedule import calendar_for
 from dockdack.universe import RankedStock
 from test_autotrade import FakeTradingService
@@ -149,6 +149,83 @@ class WatchGuiTests(unittest.TestCase):
         self.window.stop_button.click()
         self.assertFalse(self.window.monitoring)
         self.assertFalse(self.window.engine.orders_enabled)
+
+    def test_confirmation_is_one_question_with_yes_no_default_no_and_no_side_effects(self):
+        self.store.add_rule(TriggerRule.create(
+            self.item, kind='price_ge', side='buy', quantity=1,
+            max_notional=Decimal(1000), threshold=Decimal(95)))
+        self.window.external_source.setText('external-test')
+        self.service.ensure_order_permission = Mock()
+        for mode, name in ((TradingMode.DEMO, '모의투자'), (TradingMode.REAL, '실전투자')):
+            self.service.mode = mode
+            for external in (False, True):
+                self.window.external_mode.setChecked(external)
+                for answer in (QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes):
+                    with self.subTest(mode=mode, external=external, answer=answer):
+                        self.service.ensure_order_permission.reset_mock()
+                        with patch('dockdack.watch_gui.QMessageBox.question', return_value=answer) as confirm:
+                            self.assertEqual(self.window.confirm_automation(),
+                                             answer == QMessageBox.StandardButton.Yes)
+                        confirm.assert_called_once_with(
+                            self.window, f'{name} 자동매매 확인', '자동매매를 켜시겠습니까?',
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No)
+                        if mode is TradingMode.REAL:
+                            self.service.ensure_order_permission.assert_called_once_with(self.item.instrument)
+                        else:
+                            self.service.ensure_order_permission.assert_not_called()
+                        self.assertFalse(self.window.engine.orders_enabled)
+                        self.assertFalse(self.window.pending_auto_arm)
+                        self.assertFalse(self.window.monitoring)
+                        self.assertEqual(self.service.submitted, [])
+                        self.assertEqual((self.service.quote_calls, self.service.history_calls), (0, 0))
+        self.service.mode = TradingMode.DEMO
+
+    def test_concise_confirmation_still_rejects_invalid_external_settings(self):
+        self.window.external_mode.setChecked(True)
+        self.window.external_source.setText('')
+        with patch('dockdack.watch_gui.QMessageBox.question') as confirm:
+            with self.assertRaisesRegex(ValueError, 'source_id'):
+                self.window.confirm_automation()
+            confirm.assert_not_called()
+        self.window.external_source.setText('external-test')
+        self.window.additional_sources.add_row(source='incomplete-extra')
+        with patch('dockdack.watch_gui.QMessageBox.question') as confirm:
+            with self.assertRaisesRegex(ValueError, '파일 경로를 모두'):
+                self.window.confirm_automation()
+            confirm.assert_not_called()
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_concise_confirmation_does_not_bypass_real_permissions_or_random_signal_gate(self):
+        self.service.mode = TradingMode.REAL
+        self.service.ensure_order_permission = Mock(side_effect=ValueError('실전 주문 권한 없음'))
+        with patch('dockdack.watch_gui.QMessageBox.question') as confirm:
+            with self.assertRaisesRegex(ValueError, '실전 주문 권한 없음'):
+                self.window.confirm_automation()
+            confirm.assert_not_called()
+        self.window.external_mode.setChecked(True)
+        self.window.external_source.setText('random-demo')
+        self.service.ensure_order_permission.reset_mock()
+        with patch('dockdack.watch_gui.QMessageBox.question') as confirm:
+            with self.assertRaisesRegex(ValueError, '랜덤 모의 신호기'):
+                self.window.confirm_automation()
+            confirm.assert_not_called()
+        self.service.ensure_order_permission.assert_not_called()
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        self.assertEqual(self.service.submitted, [])
+        self.service.mode = TradingMode.DEMO
+
+    def test_concise_manual_confirmation_still_requires_a_ready_rule(self):
+        with patch('dockdack.watch_gui.QMessageBox.question') as confirm:
+            self.assertFalse(self.window.confirm_automation())
+            confirm.assert_not_called()
+        self.assertIn('규칙을 먼저 등록', self.window.message.text())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        self.assertEqual(self.service.submitted, [])
 
     def test_request_failure_marks_old_chart_as_stale_and_blocks_order(self):
         self.window.refresh_all()

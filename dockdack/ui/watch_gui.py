@@ -2014,49 +2014,19 @@ class WatchlistDialog(QDialog):
                 raise ValueError('실전에서는 내장 랜덤 모의 신호기를 사용할 수 없습니다.')
             for item in self.store.items():
                 self.service.ensure_order_permission(item.instrument)
-        # Preview the locked GUI settings without mutating a running worker's reader/policy.
+        # Validate the locked settings without mutating a running reader/policy.
         if self.external_mode.isChecked():
-            policy = ExternalPolicy(self.external_source.text().strip(), self.external_quantity.value(),
-                                    Decimal(str(self.external_krw.value())), Decimal(str(self.external_usd.value())),
-                                    allow_market=self.random_demo.isChecked())
-            model_sizing = getattr(self, '_model_buy_sizing_confirmation', None)
-            sizing_note = (model_sizing() if callable(model_sizing) else
-                           f"1회 매수: 시장별 계좌 평가금액(예수금 + 보유 평가액)의 {self.buy_percent.value():g}% · 정수 주식 수 내림\n")
-            notice_provider = getattr(self, 'builtin_confirmation_notice', '')
-            builtin_notice = (notice_provider() if callable(notice_provider)
-                              else str(notice_provider))
-            return QMessageBox.question(self, f"외부 신호 {name} 자동주문 확인",
-                "확인하면 전체 조회 완료 후 자동주문이 ON 됩니다. 다시 켜기를 누를 필요가 없습니다.\n"
-                "조회 실패 시 OFF를 유지하며, 기다리는 동안 OFF로 예약을 취소할 수 있습니다.\n\n"
-                f"{policy.source_id}의 새 buy/sell 신호를 개별 확인 없이 {name} 주문할까요?\n"
-                f"추가 연결 신호기: {len(self.additional_sources.sources())}개\n"
-                f"입력: {self.signal_path.text()}\n"
-                + (sizing_note + "국내 음수 예수금은 검증된 D+2 추정예수금을 사용하며 해당 현금·주문가능금액 이내로 제한합니다.\n" if self.percent_sizing.isChecked()
-                   else f"주문당 최대 {policy.max_quantity}주\n") +
-                f"주문당 금액 상한: {policy.max_krw:,} KRW / {policy.max_usd:,} USD\n"
-                f"국내 시장가 허용: {'예 (금액 상한은 현재가 추정치)' if policy.allow_market else '아니오'}\n"
-                f"미국: {self.random_us.currentText() if self.random_demo.isChecked() else '현재가 지정가만 허용'}\n"
-                + ("내장 모의 신호기: 매수 확률 10% · 평균 매입가 대비 +1% 익절 / -0.8% 손절\n" if self.random_demo.isChecked() else "") +
-                (builtin_notice + "\n" if builtin_notice else "") +
-                "0인 시장은 차단됩니다. 수동 트리거는 실행하지 않습니다.\n"
-                "보유분은 전략별 목표를 별도로 점검하며, 목표 없는 기존 보유분만 기본 평균매입가 +1% / −0.8%를 적용합니다.\n"
-                "미국은 증권사 거절이 확정된 경우만 조건을 재확인해 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
-                "상한은 주문당 제한이며 하루 누적 한도는 아닙니다."
-                + ("\n실제 자금으로 반복 주문되며 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
-        rules = [r for r in self.store.rules() if r.status == "ready" and r.kind is not TriggerKind.EXTERNAL]
-        if not rules:
-            self.message.setText("대기 중인 규칙을 먼저 등록하세요.")
-            return False
-        items = {item.id: item for item in self.store.items()}
-        summary = "\n".join(f"{r.watch_id.split(':')[-1]} · {r.description} · {'매수' if r.side.value == 'buy' else '매도'} {r.quantity}주 · 상한 {r.max_notional} {items[r.watch_id].instrument.currency}"
-                            for r in rules)
-        return QMessageBox.question(self, f"{name} 자동주문 활성화 확인",
-            "확인하면 전체 조회 성공 후 자동주문이 ON 됩니다. 기다리는 동안 OFF로 예약을 취소할 수 있습니다.\n"
-            f"조건이 맞으면 개별 주문 확인창 없이 {name} 지정가 주문이 전송됩니다.\n"
-            "미국 증권사 거절이 확정된 경우 조건 재확인 후 최대 총 3회 시도합니다. 접수·미체결·불명확 주문이나 로컬 차단은 재전송하지 않습니다.\n"
-            "거래일 캘린더의 정규장만 허용하며 캘린더 오류 시 차단합니다.\n\n" + summary
-            + ("\n실제 자금으로 주문되며 원금 손실이 발생할 수 있습니다." if mode is TradingMode.REAL else ""),
+            ExternalPolicy(self.external_source.text().strip(), self.external_quantity.value(),
+                           Decimal(str(self.external_krw.value())), Decimal(str(self.external_usd.value())),
+                           allow_market=self.random_demo.isChecked())
+            self.additional_sources.sources()
+        else:
+            rules = [r for r in self.store.rules() if r.status == "ready" and r.kind is not TriggerKind.EXTERNAL]
+            if not rules:
+                self.message.setText("대기 중인 규칙을 먼저 등록하세요.")
+                return False
+        return QMessageBox.question(self, f"{name} 자동매매 확인",
+            "자동매매를 켜시겠습니까?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
     def toggle_orders(self):
