@@ -22,4 +22,4 @@ If result <> 0 Then
     MsgBox "GUI dependencies are missing. Run 'uv sync --extra gui --extra prototype' in the project folder.", 48, "DockDack setup"
     WScript.Quit 1
 End If
-shell.Run Chr(34) & pythonw & Chr(34) & " -m examples.run_desktop_gui --no-model --external-model mark1-prototype --external-model mark1-1-prototype", 0, False
+shell.Run Chr(34) & pythonw & Chr(34) & " -m examples.run_desktop_gui", 0, False

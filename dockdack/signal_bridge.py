@@ -29,22 +29,61 @@ class PrototypeFamily:
 
     id: str
     title: str
-    take_profit: Decimal
-    stop_loss: Decimal
+    take_profit: Decimal | None
+    stop_loss: Decimal | None
 
 
 _PROTOTYPE_FAMILIES = (
-    PrototypeFamily("mark1-prototype", "mark1 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-prototype", "mark1.0 prototype", Decimal(".01"), Decimal(".009")),
     PrototypeFamily("mark1-1-prototype", "mark1.1 prototype", Decimal(".005"), Decimal(".004")),
+    PrototypeFamily("mark1-2-prototype", "mark1.2 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-3-prototype", "mark1.3 prototype", None, None),
+    PrototypeFamily("mark1-4-prototype", "mark1.4 prototype", None, None),
+    PrototypeFamily("mark1-5-prototype", "mark1.5 prototype", None, None),
+    PrototypeFamily("mark1-6-prototype", "mark1.6 prototype", None, None),
+    PrototypeFamily("mark1-7-prototype", "mark1.7 prototype", None, None),
+    PrototypeFamily("mark1-8-prototype", "mark1.8 prototype", None, None),
+    PrototypeFamily("mark1-9-prototype", "mark1.9 prototype", None, None),
+    PrototypeFamily("mark1-10-prototype", "mark1.10 prototype", None, None),
+    PrototypeFamily("mark1-11-prototype", "mark1.11 prototype", None, None),
+    PrototypeFamily("mark1-12-prototype", "mark1.12 prototype", None, None),
+    PrototypeFamily("mark1-13-prototype", "mark1.13 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-14-prototype", "mark1.14 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-15-prototype", "mark1.15 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-16-prototype", "mark1.16 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-17-prototype", "mark1.17 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-18-prototype", "mark1.18 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-19-prototype", "mark1.19 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-20-prototype", "mark1.20 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-21-prototype", "mark1.21 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-22-prototype", "mark1.22 prototype", Decimal(".01"), Decimal(".009")),
+    PrototypeFamily("mark1-23-prototype", "mark1.23 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-24-prototype", "mark1.24 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-25-prototype", "mark1.25 prototype", Decimal(".04"), None),
+    PrototypeFamily("mark1-26-prototype", "mark1.26 prototype", Decimal(".02"), None),
+    PrototypeFamily("mark1-27-prototype", "mark1.27 prototype", Decimal(".03"), None),
+    PrototypeFamily("mark1-28-prototype", "mark1.28 prototype", Decimal(".04"), None),
+    # Daily-OHLCV-trained, five-minute-input DEMO experiments. Their own
+    # confirmed lots use the recorded model identity for exits; selection or
+    # this registry alone never authorizes an order.
+    *(PrototypeFamily(f"mark1-{number}-prototype", f"mark1.{number} prototype",
+                      Decimal(".03"), Decimal(".02")) for number in range(29, 38)),
 )
+
+
+def prototype_families() -> tuple[PrototypeFamily, ...]:
+    """Registered model identities in their stable display order."""
+    return _PROTOTYPE_FAMILIES
 
 
 def _prototype_source(source):
     normalized = str(source or "").strip().lower().replace("_", "-")
     for family in _PROTOTYPE_FAMILIES:
         aliases = {family.id, family.id + "-demo-trigger", family.id + "-daily-barrier"}
-        if family.id == "mark1-1-prototype":
-            aliases.update(alias.replace("mark1-1", "mark1.1") for alias in tuple(aliases))
+        for numbered in ("mark1-1", "mark1-2"):
+            if family.id.startswith(numbered):
+                aliases.update(alias.replace(numbered, numbered.replace("-", "."))
+                               for alias in tuple(aliases))
         if normalized in aliases:
             return family
     return None
@@ -56,7 +95,7 @@ def _prototype_signal(signal_id):
 
 
 def mark1_prototype_origin(source, metadata=None):
-    """Broad DEMO restriction for either prototype; never an ownership proof."""
+    """Broad DEMO restriction for every prototype; never an ownership proof."""
     details = metadata if isinstance(metadata, dict) else {}
     return bool(_prototype_source(source) or _prototype_signal(details.get("signal_id"))
                 or _prototype_source(details.get("origin_strategy"))
@@ -361,7 +400,7 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
     for entry in entries:
         required = {"signal_id", "export_id", "market", "symbol", "exchange", "action", "generated_at", "expires_at"}
         model_fields = {"strategy_id", "model_title", "model_version", "model_manifest_sha256"}
-        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price"} - model_fields:
+        if not isinstance(entry, dict) or not required.issubset(entry) or set(entry) - required - {"quantity", "max_notional", "order_type", "min_sell_price", "cost_profit_pct", "cost_loss_pct", "take_profit_price", "stop_loss_price", "target_equity_fraction"} - model_fields:
             raise ValueError("외부 신호의 필수/허용 필드를 확인하세요.")
         sid, export_id = identifier(entry["signal_id"], "signal_id"), identifier(entry["export_id"], "export_id")
         inst = Instrument(Market(entry["market"]), entry["symbol"], entry["exchange"])
@@ -384,6 +423,11 @@ def ingest_signals(store: WatchStore, payload: dict, policy: ExternalPolicy, *, 
         action = entry["action"]
         if action not in {"buy", "sell", "hold"}:
             raise ValueError("action은 buy, sell, hold 중 하나여야 합니다.")
+        if "target_equity_fraction" in entry:
+            fraction = decimal_string(entry["target_equity_fraction"], "target_equity_fraction")
+            if (source != "mark1-8-prototype-demo-trigger" or action != "buy"
+                    or not 0 < fraction <= Decimal("0.1")):
+                raise ValueError("모델 투자비중은 Mark1.8 모의 매수에서만 0~10%를 허용합니다.")
         created, expiry = timestamp(entry["generated_at"], "generated_at"), timestamp(entry["expires_at"], "expires_at")
         if not created < expiry <= created + timedelta(minutes=10):
             raise ValueError("신호 유효기간은 생성 이후 최대 10분입니다.")

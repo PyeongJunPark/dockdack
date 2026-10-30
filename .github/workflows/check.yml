@@ -1,0 +1,54 @@
+name: Offline regression checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  tests:
+    name: Tests (${{ matrix.shard }}/4)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONNOUSERSITE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7.5.0
+      - run: uv sync --locked --python 3.13 --extra gui --extra prototype --extra conditions --extra research --extra dev
+      - run: uv run --no-sync python scripts/check.py --shard ${{ matrix.shard }}/4
+
+  wheel-smoke:
+    name: Wheel build and import smoke
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONNOUSERSITE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7.5.0
+      - run: uv sync --locked --python 3.13 --extra gui --extra prototype --extra conditions --extra research --extra dev
+      - run: uv build --wheel
+      - name: Smoke built wheel imports without accounts or model inference
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -LiteralPath dist -Filter 'dockdack-*.whl' | Select-Object -First 1
+          if (-not $wheel) { throw 'Built DockDack wheel not found' }
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'dockdack-wheel-smoke'
+          New-Item -ItemType Directory -Path $smokeDir -Force | Out-Null
+          $copiedWheel = Join-Path $smokeDir $wheel.Name
+          Copy-Item -LiteralPath $wheel.FullName -Destination $copiedWheel
+          Push-Location $smokeDir
+          try {
+            $python = Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts\python.exe'
+            $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\smoke_wheel_imports.py'
+            & $python $script --wheel $copiedWheel
+            if ($LASTEXITCODE -ne 0) { throw "Wheel import smoke failed: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }

@@ -14,7 +14,8 @@ HAS_QT = importlib.util.find_spec('PySide6') is not None
 if HAS_QT:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
-    from dockdack.v00_app import DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER, MARK11_TRIGGER, V00Window
+    from dockdack.v00_app import (DesktopModelBridge, ExternalFeedGroup, MARK1_TRIGGER,
+                                 MARK11_TRIGGER, MARK12_TRIGGER, V00Window)
 
 from dockdack.models import TradingMode
 from dockdack.watchlist import WatchItem, WatchStore
@@ -61,7 +62,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             self.app.processEvents()
-            if self.window._activity_worker is None and self.window._schedule_probe is None:
+            if self.window._activity_worker is None and self.window._schedule_probe is None and self.window._workspace_worker is None:
                 return
             time.sleep(.01)  # Release the GIL for numerical/worker imports.
         self.fail('Offline activity worker did not finish')
@@ -81,6 +82,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
             check.setChecked(model == name)
         builtin = name if name in ('none', 'lstm30') else 'none'
         self.window.model_trigger.setCurrentIndex(self.window.model_trigger.findData(builtin))
+        self.drain_activity()
 
     def test_selector_is_inline_in_existing_normal_window_and_starts_off(self):
         count = self.window.tabs.count()
@@ -92,16 +94,19 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.model_trigger.count(), 2)
         self.assertEqual(self.window.model_trigger.findData(MARK1_TRIGGER), -1)
         self.assertEqual(self.window.model_trigger.findData(MARK11_TRIGGER), -1)
-        selector_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_trigger))[0]
-        notice_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.model_notice))[0]
-        sources_row = self.window.external_grid.getItemPosition(self.window.external_grid.indexOf(self.window.additional_sources))[0]
-        self.assertEqual(selector_row, 5)
-        self.assertLess(notice_row, sources_row)
+        self.assertEqual(self.window.model_trigger.findData(MARK12_TRIGGER), -1)
+        self.assertEqual(self.window.external_grid.indexOf(self.window.model_trigger), -1)
+        self.assertEqual(self.window.external_grid.indexOf(self.window.additional_sources), -1)
+        self.assertTrue(self.window.advanced_mode_panel.isAncestorOf(self.window.model_trigger))
+        self.assertTrue(self.window.advanced_sources_panel.isAncestorOf(self.window.additional_sources))
+        self.assertTrue(self.window.workspace_tabs.isTabVisible(self.window.workspace_tabs.indexOf(self.window.tabs)))
+        self.assertTrue(self.window.mark14_panel.isAncestorOf(self.window.external_model_checks[MARK1_TRIGGER]))
         self.assertFalse(self.window.builtin_lstm.isVisible())
         self.assertEqual(self.window.external_source.text(), 'external-model')
         self.assertIn('−0.9%', self.window.model_notice.text())
-        self.assertIn('연구 검증 미통과', self.window.model_notice.text())
-        self.assertIn('0건', self.window.model_notice.text())
+        self.assertIn('mark1.0 prototype', self.window.model_notice.text())
+        self.assertIn('CatBoost 3개 시드', self.window.model_notice.text())
+        self.assertNotIn('연구 검증 미통과', self.window.model_notice.text())
         self.assertEqual(self.store.items()[0].days, 31)
         self.assertEqual(limits, (self.window.external_quantity.value(), self.window.external_krw.value(),
                                 self.window.external_usd.value(), self.window.buy_percent.value()))
@@ -206,15 +211,16 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.service.submitted)
 
-    def test_normal_confirmation_exposes_mark1_warning_without_enabling_orders(self):
+    def test_normal_confirmation_is_concise_without_enabling_orders(self):
         from PySide6.QtWidgets import QMessageBox
         self.select(MARK1_TRIGGER)
         self.assertIn('50% 초과', self.window.builtin_confirmation_notice)
-        self.assertIn('연구 검증 미통과', self.window.builtin_confirmation_notice)
+        self.assertIn('CatBoost 3개 시드', self.window.builtin_confirmation_notice)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as confirm:
             self.assertFalse(self.window.confirm_automation())
-        self.assertIn('연구 검증 미통과', confirm.call_args.args[2])
-        self.assertIn('−0.9%', confirm.call_args.args[2])
+        self.assertEqual(confirm.call_args.args[2], '자동매매를 켜시겠습니까?')
+        self.assertEqual(confirm.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertEqual(confirm.call_args.args[-1], QMessageBox.StandardButton.No)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
         self.assertFalse(self.window.monitoring)
@@ -241,10 +247,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertIn('+0.5%', self.window.model_notice.text())
         self.assertIn('−0.4%', self.window.model_notice.text())
         self.assertIn('50% 초과', self.window.model_notice.text())
-        self.assertIn('123건', self.window.model_notice.text())
-        self.assertIn('비용 반영 손실', self.window.model_notice.text())
-        self.assertIn('장중 진입 성과 미검증', self.window.model_notice.text())
-        self.assertNotIn('신호 0건', self.window.model_notice.text())
+        self.assertIn('CatBoost 3개 시드', self.window.model_notice.text())
+        self.assertNotIn('검증 미통과', self.window.model_notice.text())
         self.assertEqual(self.store.items()[0].days, 31)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.monitoring)
@@ -292,16 +296,15 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertEqual(self.window.engine.source_validators, {})
         self.assertFalse(self.service.submitted)
 
-    def test_mark11_confirmation_exposes_new_targets_and_never_arms_itself(self):
+    def test_mark11_confirmation_is_concise_and_never_arms_itself(self):
         from PySide6.QtWidgets import QMessageBox
         self.select(MARK11_TRIGGER)
         with patch('dockdack.watch_gui.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as confirm:
             self.assertFalse(self.window.confirm_automation())
         notice = confirm.call_args.args[2]
-        self.assertIn('mark1.1 prototype', notice)
-        self.assertIn('+0.5%', notice)
-        self.assertIn('−0.4%', notice)
-        self.assertIn('연구 검증 미통과', notice)
+        self.assertEqual(notice, '자동매매를 켜시겠습니까?')
+        self.assertEqual(confirm.call_args.args[1], '모의투자 자동매매 확인')
+        self.assertEqual(confirm.call_args.args[-1], QMessageBox.StandardButton.No)
         self.assertFalse(self.window.engine.orders_enabled)
         self.assertFalse(self.window.pending_auto_arm)
         self.assertFalse(self.service.submitted)
@@ -345,8 +348,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.service.submitted)
 
     def test_both_external_models_can_be_enabled_with_separate_files_and_validators(self):
-        for check in self.window.external_model_checks.values():
-            check.setChecked(True)
+        for model in (MARK1_TRIGGER, MARK11_TRIGGER):
+            self.window.external_model_checks[model].setChecked(True)
         self.window.configure_external()
         self.assertEqual(set(self.window._prototype_feeds), {MARK1_TRIGGER, MARK11_TRIGGER})
         feeds = list(self.window._prototype_feeds.values())
@@ -360,8 +363,8 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.assertFalse(self.service.submitted)
 
     def test_disabled_feed_closes_and_cannot_leave_active_validator(self):
-        for check in self.window.external_model_checks.values():
-            check.setChecked(True)
+        for model in (MARK1_TRIGGER, MARK11_TRIGGER):
+            self.window.external_model_checks[model].setChecked(True)
         self.window.configure_external()
         feeds = list(self.window._prototype_feeds.values())
         self.window.external_model_checks[MARK1_TRIGGER].setChecked(False)
@@ -371,6 +374,33 @@ class V00Mark1TriggerTests(unittest.TestCase):
         self.window.configure_external()
         self.assertEqual(set(self.window._prototype_feeds), {MARK11_TRIGGER})
         self.assertEqual(set(self.window.engine.source_validators), {'mark1-1-prototype-demo-trigger'})
+
+    def test_explicit_mark12_selection_and_all_models_remain_separate_and_orders_off(self):
+        # This fixture explicitly starts without external models; ordinary
+        # desktop startup defaults every model selected without arming orders.
+        self.assertFalse(self.window.external_model_checks[MARK12_TRIGGER].isChecked())
+        self.select(MARK12_TRIGGER)
+        self.assertEqual(self.window._chosen_external_models(), (MARK12_TRIGGER,))
+        self.assertIn('CNN', self.window.model_notice.text())
+        self.assertIn('LSTM', self.window.model_notice.text())
+        self.assertNotIn('연구 검증 미통과', self.window.model_notice.text())
+        self.window.configure_external()
+        feed = self.window._prototype_feeds[MARK12_TRIGGER]
+        self.assertEqual(feed.source_id, 'mark1-2-prototype-demo-trigger')
+        self.assertEqual(set(self.window.engine.source_validators), {feed.source_id})
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertFalse(self.window.monitoring)
+        for check in self.window.external_model_checks.values():
+            check.setChecked(True)
+        self.window.configure_external()
+        feeds = list(self.window._prototype_feeds.values())
+        count = len(self.window.external_model_checks)
+        self.assertEqual(len(feeds), count)
+        self.assertEqual(len({feed.source_id for feed in feeds}), count)
+        self.assertEqual(len({feed.path for feed in feeds}), count)
+        self.assertEqual(set(self.window.engine.source_validators), {feed.source_id for feed in feeds})
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
 
     def test_duplicate_managed_source_or_path_rejected_without_arming(self):
         self.select(MARK1_TRIGGER)
@@ -388,6 +418,7 @@ class V00Mark1TriggerTests(unittest.TestCase):
             self.assertEqual(migrated._chosen_external_models(), (MARK11_TRIGGER,))
             self.assertFalse(migrated.engine.orders_enabled)
         finally:
+            migrated.close()
             for name in ('pool', 'inspection_pool', 'activity_pool'):
                 getattr(migrated, name).waitForDone(10000)
             self.app.processEvents()

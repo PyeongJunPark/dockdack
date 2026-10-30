@@ -135,6 +135,52 @@ class JournalCategoryTests(unittest.TestCase):
         self.assertEqual(self.service.submitted, [])
         self.assertFalse(self.engine.orders_enabled)
 
+    def test_inactive_ranked_stock_still_reconciles_accepted_order_without_scanning_chart(self):
+        rule = self.rule()
+        self.store.claim(rule, Decimal(100), NOW)
+        self.store.finish(rule.id, "accepted", "접수", "0000201")
+        # A strict TOP100 refresh deactivates the old interest, not its order.
+        with self.store.connection() as db:
+            db.execute("UPDATE watchlist SET active=0 WHERE id=?", (self.item.id,))
+        self.service.fills = (OrderExecution("0000201", "005930", "매수", "체결", Decimal(1),
+                                            Decimal(1), Decimal(0), Decimal(100), Decimal(99), "100001"),)
+
+        self.assertEqual(self.engine.poll(), {})
+
+        self.assertEqual(self.store.items(), ())
+        self.assertEqual(self.store.order_history()[0]["status"], "filled")
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual((self.service.quote_calls, self.service.history_calls), (0, 0))
+
+    def test_inactive_unknown_order_remains_blocked_without_new_order(self):
+        rule = self.rule()
+        self.store.claim(rule, Decimal(100), NOW)
+        self.store.finish(rule.id, "unknown", "응답 불명")
+        with self.store.connection() as db:
+            db.execute("UPDATE watchlist SET active=0 WHERE id=?", (self.item.id,))
+
+        self.assertEqual(self.engine.poll(), {})
+
+        self.assertEqual(self.store.order_history()[0]["status"], "unknown")
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual((self.service.quote_calls, self.service.history_calls), (0, 0))
+
+    def test_corrupt_inactive_order_does_not_skip_active_watch_scan(self):
+        with self.store.connection() as db:
+            db.execute("INSERT INTO watchlist VALUES(?,?,?,?,?,?,0)",
+                       ("broken:KRX:999999", "broken", "999999", "KRX", "손상된 옛 종목", 30))
+            db.execute("INSERT INTO rules VALUES(?,?,?,?,?,?,?,?,?)",
+                       ("old-unknown", "broken:KRX:999999", "price_ge", "buy", 1, "10000", "100", 0, "unknown"))
+            db.execute("INSERT INTO attempts(rule_id,watch_id,status,price,started_at) VALUES(?,?,?,?,?)",
+                       ("old-unknown", "broken:KRX:999999", "unknown", "100", NOW.isoformat()))
+
+        results = self.engine.poll()
+
+        self.assertIn(self.item.id, results)
+        self.assertEqual(self.service.quote_calls, 1)
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.store.attempts("broken:KRX:999999")[0]["status"], "unknown")
+
     def test_unknown_fill_price_is_never_invented(self):
         rule = self.rule()
         self.store.claim(rule, Decimal(100), NOW)

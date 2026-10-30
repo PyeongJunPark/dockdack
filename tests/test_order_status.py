@@ -116,7 +116,7 @@ class OrderStatusTests(unittest.TestCase):
         while "자동주문 OFF" not in self.window.mode_label.text() and time.monotonic() < deadline:
             QTest.qWait(20)
         self.assertIn("자동주문 OFF", self.window.mode_label.text())
-        self.assertIn("주문 차단", self.window.mode_label.text())
+        self.assertEqual(self.window.mode_label.text(), "자동주문 OFF")
         self.assertTrue(self.window.arm_button.isEnabled())
         self.assertFalse(self.window.disarm_button.isEnabled())
         self.assertTrue(self.window.monitoring)
@@ -165,7 +165,7 @@ class OrderStatusTests(unittest.TestCase):
         self.window.update_controls()
         self.assertTrue(controller.pending_arm)
         self.assertTrue(self.window.disarm_button.isEnabled())
-        self.assertIn("자동주문 OFF", self.window.mode_label.text())
+        self.assertIn("자동주문 ON · 준비 중", self.window.mode_label.text())
         self.assertEqual(self.window.automation_status()["state"], "warmup_orders_off")
         self.window.disarm_button.click()
         self.assertFalse(controller.pending_arm)

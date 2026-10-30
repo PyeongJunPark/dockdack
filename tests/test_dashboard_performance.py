@@ -76,7 +76,8 @@ class DashboardPerformanceTests(unittest.TestCase):
             chart.assert_not_called()
         self.assertIs(self.window.watch_table.item(0, 1), untouched)
         self.assertIs(self.window.watch_table.item(1, 1), changed)
-        self.assertEqual(changed.text(), "123 KRW")
+        self.assertEqual(changed.text(), "123")
+        self.assertIn("KRW", changed.toolTip())
         self.assertIn(target.id, self.window.fresh_ids)
 
     def test_hidden_logs_do_no_periodic_database_work_and_opening_updates_them(self):
@@ -114,6 +115,28 @@ class DashboardPerformanceTests(unittest.TestCase):
         self.assertFalse(self.window._fill_refresh_requested.is_set())
         self.assertEqual(progress[-1], ("executions", {"state": "complete"}))
         self.assertFalse(self.service.submitted)
+
+    def test_reconciliation_queues_both_reads_without_starting_orders(self):
+        self.window.worker = object()
+        with patch.object(self.window, '_run') as run:
+            self.window.portfolio_panel.request_reconciliation.emit()
+            run.assert_not_called()
+        self.assertTrue(self.window._fill_refresh_requested.is_set())
+        self.assertTrue(self.window._portfolio_requested.is_set())
+        self.assertFalse(self.window.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_reconciliation_refreshes_fills_before_holdings(self):
+        self.window.worker = None
+        events = []
+        def run(operation, **kwargs):
+            operation(lambda data: None)
+        with patch.object(self.window, '_run', side_effect=run), \
+             patch.object(self.window, '_refresh_executions_worker', side_effect=lambda *a, **k: events.append('fills')), \
+             patch.object(self.window.portfolio, 'refresh_due', side_effect=lambda **kw: events.append('holdings') or {}):
+            self.window.refresh_reconciliation()
+        self.assertEqual(events, ['fills', 'holdings'])
+        self.assertFalse(self.window.engine.orders_enabled)
 
     def test_signal_inspection_can_queue_while_broker_busy_without_arming_or_ingesting(self):
         self.configure()

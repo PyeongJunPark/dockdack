@@ -1,0 +1,62 @@
+{
+  "architecture": "same-session cross-sectional attention pairwise ranker",
+  "batch_size": 512,
+  "checkpoint_file": "domestic-mark1.7-seed41-weights.npz",
+  "checkpoint_sha256": "3c54c3cfe8574aca1e1d5a8cc1b22587fd25884c3e9a445b04db0dc6b556a8f0",
+  "cost_bps": 20.0,
+  "day_batch_size": 12,
+  "deployment_allowed": false,
+  "device": "cuda",
+  "elapsed_seconds": 1.538,
+  "epochs": 5,
+  "excluded_train_outcomes": 13,
+  "feature_scaler": {
+    "fitted_on": "observed training rows only",
+    "mean": [
+      0.0010388375165068004,
+      0.02128272155130227,
+      -0.018704122864816455,
+      -3.059876446586143e-05,
+      0.061325144102558043
+    ],
+    "post_scale_clip": [
+      -6,
+      6
+    ],
+    "std": [
+      0.017150622073458834,
+      0.030229940833869744,
+      0.026175754071253294,
+      0.03387823235748698,
+      0.5495189793913918
+    ]
+  },
+  "hidden": 32,
+  "input": "30 completed OHLCV bars through t; t+1 outcome for training label only",
+  "label": "next session open-to-close net return after assumed roundtrip cost",
+  "not_paper_reproduction": true,
+  "recurrent_cell": null,
+  "research_only": true,
+  "score_file": "domestic-mark1.7-seed41-scores.npz",
+  "score_sha256": "6234f71c2047447695c8cc2460548b6720a344c8388a025c58b0f031f55a63e7",
+  "score_unit": "unscaled_same_session_pairwise_ranking_score",
+  "seed": 41,
+  "target_clip_percent_from_train_only": [
+    -9.813129081726075,
+    11.511942157745146
+  ],
+  "train_first_target": "2018-01-02",
+  "train_last_target": "2020-12-30",
+  "train_pair_instances": 348417,
+  "train_rows_labeled": 69818,
+  "train_rows_requested": 69831,
+  "training_loss_history": [
+    0.7029321452675762,
+    0.6888328764521985,
+    0.6871752224603609,
+    0.6864205359683814,
+    0.6855874791081688
+  ],
+  "training_objective": "same-session pairwise logistic ranking",
+  "variant": "mark1.7"
+}

@@ -8,7 +8,7 @@ from dockdack.exceptions import BrokerAPIError
 from dockdack.gui_service import Instrument
 from dockdack.http import APIPage
 from dockdack.models import Market
-from dockdack.universe import RankedStock, top_turnover
+from dockdack.universe import RankedStock, top_change, top_market_cap, top_turnover, top_watchlist
 from dockdack.watchlist import TriggerRule, WatchItem, WatchStore
 
 
@@ -132,6 +132,59 @@ class UniverseTests(unittest.TestCase):
         second = dict(stk_cd="MSFT", stex_tp="ND", rank="2", trde_prica="100")
         ranks = top_turnover(Pages({"result_list": [first, first]}, {"result_list": [second]}), Market.US, 2)
         self.assertEqual([r.symbol for r in ranks], ["MSFT", "AAPL"])
+
+    def test_change_and_us_market_cap_use_official_rank_contracts(self):
+        domestic = Pages({"pred_pre_flu_rt_upper": [
+            {"stk_cd": "005930", "stk_nm": "삼성전자", "flu_rt": "+7.5"}]})
+        self.assertEqual(top_change(domestic, Market.DOMESTIC, gainers=True, limit=1)[0].symbol, "005930")
+        self.assertEqual(domestic.calls[0]["api_id"], "ka10027")
+        self.assertEqual(domestic.calls[0]["body"]["sort_tp"], "1")
+        domestic_down = Pages({"pred_pre_flu_rt_upper": [
+            {"stk_cd": "000660", "flu_rt": "-4.1"}]})
+        self.assertEqual(top_change(domestic_down, Market.DOMESTIC, gainers=False, limit=1)[0].symbol, "000660")
+        self.assertEqual(domestic_down.calls[0]["body"]["sort_tp"], "3")
+        us_down = Pages({"result_list": [
+            {"stk_cd": "AAPL", "stex_tp": "ND", "rank": "1", "flu_rt": "-2.5"}]})
+        self.assertEqual(top_change(us_down, Market.US, gainers=False, limit=1)[0].symbol, "AAPL")
+        self.assertEqual(us_down.calls[0]["api_id"], "usa20910")
+        self.assertEqual(us_down.calls[0]["body"]["sort_tp"], "4")
+        us_cap = Pages({"result_list": [
+            {"stk_cd": "MSFT", "stex_tp": "ND", "rank": "1", "mac": "1000"}]})
+        self.assertEqual(top_market_cap(us_cap, Market.US, 1)[0].symbol, "MSFT")
+        self.assertEqual(us_cap.calls[0]["api_id"], "usa20550")
+        self.assertEqual(top_market_cap(Pages(), Market.DOMESTIC), ())
+
+    def test_incomplete_category_fails_closed(self):
+        with self.assertRaises(BrokerAPIError):
+            top_change(Pages({"pred_pre_flu_rt_upper": [
+                {"stk_cd": "005930", "flu_rt": "1"}]}), Market.DOMESTIC,
+                gainers=True, limit=2)
+        with self.assertRaises(BrokerAPIError):
+            top_market_cap(Pages({"result_list": [
+                {"stk_cd": "MSFT", "stex_tp": "ND", "rank": "1", "mac": "NaN"}]}), Market.US, 1)
+
+    def test_duplicate_heavy_categories_fill_to_100_from_traded_value(self):
+        def stock(symbol, basis, ordinal):
+            return RankedStock(Market.US, symbol, "ND", symbol, ordinal,
+                               Decimal(1000 - ordinal), "USD", ranking_basis=basis)
+        turnover = tuple(stock(f"S{i}", "turnover", i + 1) for i in range(100))
+        volume = tuple(stock(f"S{i}", "volume", i + 1) for i in range(20))
+        gainers = tuple(stock(f"S{i}", "gainers", i + 1) for i in range(20))
+        decliners = tuple(stock(f"D{i}", "decliners", i + 1) for i in range(20))
+        cap = tuple(stock(f"C{i}", "market_cap", i + 1) for i in range(20))
+        with (patch("dockdack.universe.top_turnover", return_value=turnover),
+              patch("dockdack.universe.top_volume", return_value=volume),
+              patch("dockdack.universe.top_change", side_effect=(gainers, decliners)),
+              patch("dockdack.universe.top_market_cap", return_value=cap)):
+            selected = top_watchlist(object(), Market.US)
+        self.assertEqual(len(selected), 100)
+        self.assertEqual(len({(row.symbol, row.exchange) for row in selected}), 100)
+        self.assertEqual([row.rank for row in selected], list(range(1, 101)))
+        self.assertEqual([row.symbol for row in selected[:20]], [f"S{i}" for i in range(20)])
+        self.assertEqual([row.symbol for row in selected[20:40]], [f"D{i}" for i in range(20)])
+        self.assertEqual([row.symbol for row in selected[40:60]], [f"C{i}" for i in range(20)])
+        self.assertEqual([row.symbol for row in selected[60:]], [f"S{i}" for i in range(20, 60)])
+        self.assertTrue(all(row.ranking_basis == "turnover" for row in selected[60:]))
 
     def test_bulk_add_preserves_manual_stocks_existing_n_and_rules(self):
         with tempfile.TemporaryDirectory() as directory:

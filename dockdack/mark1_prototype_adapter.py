@@ -31,7 +31,7 @@ class _ReadOnlyBroker:
     _READS = frozenset({
         "get_quote", "daily_history", "account_domestic", "account_us",
         "list_open_orders", "list_order_executions", "list_execution_history",
-        "resolve_us_exchange", "top_turnover", "top_volume", "common_equities",
+        "resolve_us_exchange", "top_turnover", "top_volume", "top_watchlist", "common_equities",
     })
     _WRITES = frozenset({
         "build_order", "build_order_at_current_price", "place_order", "buy", "sell",
@@ -66,7 +66,7 @@ class PrototypeReadOnlyService:
     introspection. Existing TradingService instances are not mutated.
     """
     _READS = frozenset({
-        "resolve", "quote", "history", "top_turnover", "top_volume", "common_equities", "ensure_common_equity",
+        "resolve", "quote", "history", "top_turnover", "top_volume", "top_watchlist", "common_equities", "ensure_common_equity",
         "ensure_demo", "ensure_environment", "account", "orders", "executions", "execution_history",
         "safety_orders", "safety_executions", "safety_account", "protected_symbols",
     })
@@ -125,7 +125,6 @@ class PrototypeAutoTrader(AutoTrader):
         self.safety_reason = "PROTOTYPE_OBSERVATION_ONLY"
         self.external_stop = Event()
         self.universe = None
-        self.close_liquidator = None
         self.predictors = {}
         self.enable_holdings_exits = False
         self.equity_buy_percent = None

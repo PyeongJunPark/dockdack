@@ -86,6 +86,24 @@ class V00ExecutionTests(unittest.TestCase):
             self.assertEqual(self.engine.poll(), {})
         self.assertEqual((self.service.quote_calls, self.service.history_calls, self.service.account_calls), (0, 0, []))
 
+    def test_symbol_exposure_limit_reduces_actual_submitted_buy(self):
+        self.rule()
+        self.engine.equity_buy_percent = Decimal('10')
+        self.engine.symbol_exposure_percent = Decimal('1')
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(len(self.service.submitted), 1)
+        request = self.service.submitted[0]
+        self.assertLessEqual(request.quantity * request.price * Decimal('1.01'), Decimal('1000'))
+
+    def test_exposure_below_one_share_sends_nothing(self):
+        self.rule()
+        self.engine.equity_buy_percent = Decimal('10')
+        self.engine.symbol_exposure_percent = Decimal('0.01')
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted, [])
+
     def test_only_open_market_is_polled(self):
         self.store.save_item(WatchItem(self.service.resolve("AAPL")))
         result = self.engine.poll()
@@ -134,7 +152,7 @@ class V00ExecutionTests(unittest.TestCase):
         self.assertEqual(len(self.service.submitted), 1)
         self.assertTrue(self.engine.orders_enabled)
 
-    def test_buy_pass_precedes_independent_sell_pass(self):
+    def test_independent_sell_pass_precedes_new_buy_scan(self):
         self.engine.enable_holdings_exits = True
         other = replace(position(), symbol="000660")
         self.service.positions = (other,)
@@ -142,7 +160,7 @@ class V00ExecutionTests(unittest.TestCase):
         self.rule()
         self.arm()
         self.engine.poll()
-        self.assertEqual([order.side for order in self.service.submitted], [OrderSide.BUY, OrderSide.SELL])
+        self.assertEqual([order.side for order in self.service.submitted], [OrderSide.SELL, OrderSide.BUY])
 
     def test_monitor_only_checks_holdings_without_submit(self):
         self.engine.enable_holdings_exits = True
@@ -166,6 +184,39 @@ class V00ExecutionTests(unittest.TestCase):
         self.arm()
         self.engine.poll()
         self.assertEqual(self.service.submitted[0].quantity, 100)
+
+    def test_model_source_percent_overrides_default_at_order_sizing(self):
+        self.external(source="model-a")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("3"), "model-b": Decimal("20")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 30)
+        self.assertEqual(self.store.rules()[0].quantity, 30)
+
+    def test_model_source_percent_applies_without_other_source_default(self):
+        self.external(source="model-a")
+        self.engine.source_buy_percents = {"model-a": Decimal("3")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 30)
+
+    def test_other_source_keeps_default_percent(self):
+        self.external(source="other-model")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("3")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted[0].quantity, 100)
+
+    def test_invalid_model_source_percent_blocks_buy_without_fallback(self):
+        self.external(source="model-a")
+        self.engine.equity_buy_percent = Decimal("10")
+        self.engine.source_buy_percents = {"model-a": Decimal("NaN")}
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted, [])
+        self.assertTrue(self.engine.orders_enabled)
 
     def test_missing_equity_blocks_only_buy(self):
         self.rule()
@@ -261,6 +312,53 @@ class V00ExecutionTests(unittest.TestCase):
         self.assertTrue(self.engine.orders_enabled)
         self.assertEqual(len(self.service.submitted), 1)
         self.assertEqual(self.store.attempts()[0]["status"], "unknown")
+
+    def test_unknown_order_stays_single_across_long_replay_and_restart(self):
+        self.rule()
+        self.service.submit_error = OrderOutcomeUnknown('lost response')
+        self.arm()
+        self.engine.poll()
+        self.service.submit_error = None
+        for step in range(120):
+            if step == 60:
+                self.engine = AutoTrader(self.service, WatchStore(self.store.path), clock=lambda: NOW)
+                self.engine.isolated_symbol_errors = True
+                with self.assertRaises(ValueError):
+                    self.arm()
+                self.assertFalse(self.engine.orders_enabled)
+            self.engine.poll()
+        self.assertEqual(len(self.service.submitted), 1)
+        self.assertEqual(self.store.attempts()[0]['status'], 'unknown')
+
+    def test_changed_limit_at_transport_guard_prevents_transmission(self):
+        from dockdack.http import _ORDER_SEND_GUARD
+        self.rule()
+        self.engine.equity_buy_percent = Decimal('10')
+        self.engine.symbol_exposure_percent = Decimal('1')
+        original = self.service.submit
+        def send(request):
+            self.engine.symbol_exposure_percent = Decimal('0.5')
+            _ORDER_SEND_GUARD.get()()
+            return original(request)
+        self.service.submit = send
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(self.service.submitted, [])
+        self.assertEqual(self.store.attempts()[0]['status'], 'not_sent')
+
+    def test_transport_guard_does_not_count_its_own_reservation_twice(self):
+        from dockdack.http import _ORDER_SEND_GUARD
+        self.rule()
+        self.engine.equity_buy_percent = Decimal('10')
+        self.engine.symbol_exposure_percent = Decimal('1')
+        original = self.service.submit
+        def send(request):
+            _ORDER_SEND_GUARD.get()()
+            return original(request)
+        self.service.submit = send
+        self.arm()
+        self.engine.poll()
+        self.assertEqual(len(self.service.submitted), 1)
 
     def test_us_known_rejections_stop_after_three_total_attempts(self):
         self.use_us()

@@ -1,0 +1,13 @@
+{
+  "completed": true,
+  "cases": 24,
+  "scope": "synthetic_cpu_equivalence_not_profitability",
+  "maximum_absolute_difference": {
+    "domestic": 0.0,
+    "us": 0.0
+  },
+  "cases_per_market": {
+    "domestic": 12,
+    "us": 12
+  }
+}

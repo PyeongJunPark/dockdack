@@ -1,0 +1,62 @@
+{
+  "architecture": "30x5 price-volume tile 2D CNN binary net-return classifier",
+  "batch_size": 512,
+  "checkpoint_file": "domestic-mark1.6-seed42-weights.npz",
+  "checkpoint_sha256": "74585ebc79f8964072cc383a95a3ae6b26e48efb4756277491b404a32dc76c68",
+  "cost_bps": 20.0,
+  "day_batch_size": 12,
+  "deployment_allowed": false,
+  "device": "cuda",
+  "elapsed_seconds": 1.68,
+  "epochs": 5,
+  "excluded_train_outcomes": 13,
+  "feature_scaler": {
+    "fitted_on": "observed training rows only",
+    "mean": [
+      0.0010388375165068004,
+      0.02128272155130227,
+      -0.018704122864816455,
+      -3.059876446586143e-05,
+      0.061325144102558043
+    ],
+    "post_scale_clip": [
+      -6,
+      6
+    ],
+    "std": [
+      0.017150622073458834,
+      0.030229940833869744,
+      0.026175754071253294,
+      0.03387823235748698,
+      0.5495189793913918
+    ]
+  },
+  "hidden": 32,
+  "input": "30 completed OHLCV bars through t; t+1 outcome for training label only",
+  "label": "next session open-to-close net return after assumed roundtrip cost",
+  "not_paper_reproduction": true,
+  "recurrent_cell": null,
+  "research_only": true,
+  "score_file": "domestic-mark1.6-seed42-scores.npz",
+  "score_sha256": "ab119eeefb448b5b709d5d48b113853d4eb479416653225d8b86dba85eb72e06",
+  "score_unit": "estimated_probability_positive_t_plus_1_net_open_to_close_return",
+  "seed": 42,
+  "target_clip_percent_from_train_only": [
+    -9.813129081726075,
+    11.511942157745146
+  ],
+  "train_first_target": "2018-01-02",
+  "train_last_target": "2020-12-30",
+  "train_pair_instances": null,
+  "train_rows_labeled": 69818,
+  "train_rows_requested": 69831,
+  "training_loss_history": [
+    0.6818738093764497,
+    0.6812264344338382,
+    0.6810959337495884,
+    0.6808699494243614,
+    0.681082225683551
+  ],
+  "training_objective": "binary cross entropy: net return > 0",
+  "variant": "mark1.6"
+}

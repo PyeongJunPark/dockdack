@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dockdack.trade_journal import daily_trade_journal
+from dockdack.model_performance import model_realized_performance
 
 
 MAX_VISIBLE_ROWS = 500
@@ -20,6 +21,7 @@ class LedgerSnapshot:
     revision: Any
     ledger: tuple[dict, ...]
     journal: dict
+    model_performance: dict | None = None
 
     @property
     def performance(self):
@@ -49,7 +51,10 @@ class LedgerCollector:
             self._revision = revision
             return self._snapshot if force else None
         ledger = tuple(dict(row) for row in ledger)
-        snapshot = LedgerSnapshot(revision, ledger, daily_trade_journal(ledger))
+        journal = daily_trade_journal(ledger)
+        models = model_realized_performance(ledger, mode=getattr(self.store, 'mode', 'demo'),
+                                           performance=journal['performance'])
+        snapshot = LedgerSnapshot(revision, ledger, journal, models)
         self._snapshot, self._revision = snapshot, revision
         return snapshot
 

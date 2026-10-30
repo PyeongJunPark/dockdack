@@ -1,0 +1,389 @@
+{
+  "calibration_cap_per_market": 10000,
+  "deployment_allowed": false,
+  "entry_proxy": "observed_next_session_open_not_executable_at_same_open",
+  "epochs": 5,
+  "exit_proxy": "first_daily_high_target_touch_else_Hth_close_no_stop",
+  "feature_contract": "completed_ohlcv_plus_query_log_gap_v2_6_channels",
+  "feature_module_sha256": "392521075dbe4da7490863a5650f765c6d2733f08468d7cbfed5b57466bfb18b",
+  "intraday_path_verified": false,
+  "markets": {
+    "domestic": {
+      "calibration_count": 10000,
+      "sample_indices_sha256": "8320f1ce9f146bd07fcba1ab3099015b09d55dbd43718f81e1867c3ba90848e1",
+      "source_sha256": "9cc6e97466fe77237b53d188a82ce657d74586c1f4f2be25be7f8381ff6f73b8",
+      "train_count": 20000
+    },
+    "us": {
+      "calibration_count": 10000,
+      "sample_indices_sha256": "8c1a980129b5f71075d3b57ee0ef4e3b979b0876e7f891d9187226b8549f7015",
+      "source_sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+      "train_count": 20000
+    }
+  },
+  "owner": "mark1_target_horizon_v1",
+  "proposed_runtime_query": "current_intraday_price",
+  "research_only": true,
+  "schema_version": 1,
+  "seed": 53,
+  "specs": {
+    "mark1-23-prototype": {
+      "family": "gru",
+      "horizon": 10,
+      "lookback": 20,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.2059773087819381,
+          "eligible_calibration": 9093,
+          "eligible_train": 18891,
+          "normalization_center": [
+            0.0018101828172802925,
+            0.024854635819792747,
+            -0.023838970810174942,
+            -0.0009087655344046652,
+            0.010764434933662415,
+            7.80311384005472e-05
+          ],
+          "normalization_scale": [
+            0.01720188744366169,
+            0.030425217002630234,
+            0.024716341868042946,
+            0.035250432789325714,
+            0.6992287039756775,
+            0.0037062850315123796
+          ],
+          "temperature": 1.0,
+          "train_target_hits": 13286,
+          "weights": "domestic-mark1-23-prototype.pt",
+          "weights_sha256": "8978bc26b0b7877949fda3f06b1d6af71c8ed2a99ce36e2b8ace9ef263509e65"
+        },
+        "us": {
+          "calibration_brier": 0.22194382952102396,
+          "eligible_calibration": 9448,
+          "eligible_train": 19700,
+          "normalization_center": [
+            0.0004627492162398994,
+            0.014918825589120388,
+            -0.015746790915727615,
+            -0.00019625030108727515,
+            0.003286711871623993,
+            2.222348120994866e-05
+          ],
+          "normalization_scale": [
+            0.01791263371706009,
+            0.019646696746349335,
+            0.019788023084402084,
+            0.02374163456261158,
+            0.46616244316101074,
+            0.003920702263712883
+          ],
+          "temperature": 0.6484197773255048,
+          "train_target_hits": 11180,
+          "weights": "us-mark1-23-prototype.pt",
+          "weights_sha256": "ba62eb4dbe4bcd81e4a2712f6aa81f25378e11a7f1cb6d974e82f4097e6c40d8"
+        }
+      },
+      "target_pct": 3.0
+    },
+    "mark1-24-prototype": {
+      "family": "mlp",
+      "horizon": 20,
+      "lookback": 30,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.16415743283828527,
+          "eligible_calibration": 8181,
+          "eligible_train": 17946,
+          "normalization_center": [
+            0.0018650009296834469,
+            0.024639932438731194,
+            -0.023506443947553635,
+            -0.000717789342161268,
+            0.031484343111515045,
+            5.5492346291430295e-05
+          ],
+          "normalization_scale": [
+            0.01723765954375267,
+            0.03027827851474285,
+            0.02449612505733967,
+            0.03501185029745102,
+            0.7297466397285461,
+            0.003023675410076976
+          ],
+          "temperature": 1.0,
+          "train_target_hits": 14247,
+          "weights": "domestic-mark1-24-prototype.pt",
+          "weights_sha256": "697b7ed5c430dd20362b7432036992eab616386d9ab9bf7e620b58727aa4d0f5"
+        },
+        "us": {
+          "calibration_brier": 0.19696860773451594,
+          "eligible_calibration": 8810,
+          "eligible_train": 19448,
+          "normalization_center": [
+            0.0005028371815569699,
+            0.014878190122544765,
+            -0.015620047226548195,
+            -0.00011924005229957402,
+            0.007453604135662317,
+            1.365278603771003e-05
+          ],
+          "normalization_scale": [
+            0.017612572759389877,
+            0.019553083926439285,
+            0.019548527896404266,
+            0.023599661886692047,
+            0.47466376423835754,
+            0.0031995822209864855
+          ],
+          "temperature": 0.9170040432046712,
+          "train_target_hits": 13631,
+          "weights": "us-mark1-24-prototype.pt",
+          "weights_sha256": "4b5f9894b9705c58ac4a437ad774aa4c40b2478e495eded2aff9c1fe24661d31"
+        }
+      },
+      "target_pct": 3.0
+    },
+    "mark1-25-prototype": {
+      "family": "gru",
+      "horizon": 20,
+      "lookback": 20,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.19023308448467086,
+          "eligible_calibration": 8181,
+          "eligible_train": 17946,
+          "normalization_center": [
+            0.0018008637707680464,
+            0.024670705199241638,
+            -0.02364208549261093,
+            -0.0008605890907347202,
+            0.008832735940814018,
+            8.323851943714544e-05
+          ],
+          "normalization_scale": [
+            0.017089933156967163,
+            0.03019161894917488,
+            0.024550074711441994,
+            0.03502260148525238,
+            0.6913569569587708,
+            0.0037029189988970757
+          ],
+          "temperature": 0.9170040432046712,
+          "train_target_hits": 13226,
+          "weights": "domestic-mark1-25-prototype.pt",
+          "weights_sha256": "aaf8d829bff39a8f889c0a58023df5ea5055d1049245d63f7b17e9ecd586fc80"
+        },
+        "us": {
+          "calibration_brier": 0.21945665475999543,
+          "eligible_calibration": 8810,
+          "eligible_train": 19448,
+          "normalization_center": [
+            0.00045749638229608536,
+            0.014864224940538406,
+            -0.015642590820789337,
+            -0.0001499095233157277,
+            0.003097917651757598,
+            2.0479179511312395e-05
+          ],
+          "normalization_scale": [
+            0.017755450680851936,
+            0.01951575092971325,
+            0.01960383728146553,
+            0.023592032492160797,
+            0.4649653434753418,
+            0.003918653819710016
+          ],
+          "temperature": 0.9170040432046712,
+          "train_target_hits": 12005,
+          "weights": "us-mark1-25-prototype.pt",
+          "weights_sha256": "ef9e6ef77f8f639e77c9b5f04acbded2f8141948c689eadd36dee7ba7ba380fc"
+        }
+      },
+      "target_pct": 4.0
+    },
+    "mark1-26-prototype": {
+      "family": "linear",
+      "horizon": 20,
+      "lookback": 20,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.13769760988078752,
+          "eligible_calibration": 8181,
+          "eligible_train": 17946,
+          "normalization_center": [
+            0.0018008637707680464,
+            0.024670705199241638,
+            -0.02364208549261093,
+            -0.0008605890907347202,
+            0.008832735940814018,
+            8.323851943714544e-05
+          ],
+          "normalization_scale": [
+            0.017089933156967163,
+            0.03019161894917488,
+            0.024550074711441994,
+            0.03502260148525238,
+            0.6913569569587708,
+            0.0037029189988970757
+          ],
+          "temperature": 0.25,
+          "train_target_hits": 15365,
+          "weights": "domestic-mark1-26-prototype.pt",
+          "weights_sha256": "413828b7d5d13bd7b1346740428827b96278e9572f214d5169aeecccb06fe526"
+        },
+        "us": {
+          "calibration_brier": 0.16984453920910716,
+          "eligible_calibration": 8810,
+          "eligible_train": 19448,
+          "normalization_center": [
+            0.00045749638229608536,
+            0.014864224940538406,
+            -0.015642590820789337,
+            -0.0001499095233157277,
+            0.003097917651757598,
+            2.0479179511312395e-05
+          ],
+          "normalization_scale": [
+            0.017755450680851936,
+            0.01951575092971325,
+            0.01960383728146553,
+            0.023592032492160797,
+            0.4649653434753418,
+            0.003918653819710016
+          ],
+          "temperature": 0.25,
+          "train_target_hits": 15470,
+          "weights": "us-mark1-26-prototype.pt",
+          "weights_sha256": "6232638ee6f30a01728ec79da98748ea8e63b03477b37a3f5269f58a8c570e9f"
+        }
+      },
+      "target_pct": 2.0
+    },
+    "mark1-27-prototype": {
+      "family": "cnn",
+      "horizon": 10,
+      "lookback": 20,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.20622207384504637,
+          "eligible_calibration": 9093,
+          "eligible_train": 18891,
+          "normalization_center": [
+            0.0018101828172802925,
+            0.024854635819792747,
+            -0.023838970810174942,
+            -0.0009087655344046652,
+            0.010764434933662415,
+            7.80311384005472e-05
+          ],
+          "normalization_scale": [
+            0.01720188744366169,
+            0.030425217002630234,
+            0.024716341868042946,
+            0.035250432789325714,
+            0.6992287039756775,
+            0.0037062850315123796
+          ],
+          "temperature": 1.0,
+          "train_target_hits": 13286,
+          "weights": "domestic-mark1-27-prototype.pt",
+          "weights_sha256": "746568ebacae011335be81be81f6fcc06dec86c17b683ead02c1ad52c5236dac"
+        },
+        "us": {
+          "calibration_brier": 0.22044761285814038,
+          "eligible_calibration": 9448,
+          "eligible_train": 19700,
+          "normalization_center": [
+            0.0004627492162398994,
+            0.014918825589120388,
+            -0.015746790915727615,
+            -0.00019625030108727515,
+            0.003286711871623993,
+            2.222348120994866e-05
+          ],
+          "normalization_scale": [
+            0.01791263371706009,
+            0.019646696746349335,
+            0.019788023084402084,
+            0.02374163456261158,
+            0.46616244316101074,
+            0.003920702263712883
+          ],
+          "temperature": 0.7711054127039704,
+          "train_target_hits": 11180,
+          "weights": "us-mark1-27-prototype.pt",
+          "weights_sha256": "95222c74c05218f60d90d8824ffd35956b3961a57bcc02bbed9da4b81fae6ce2"
+        }
+      },
+      "target_pct": 3.0
+    },
+    "mark1-28-prototype": {
+      "family": "mlp",
+      "horizon": 10,
+      "lookback": 10,
+      "markets": {
+        "domestic": {
+          "calibration_brier": 0.22754295566760352,
+          "eligible_calibration": 9093,
+          "eligible_train": 18891,
+          "normalization_center": [
+            0.001574065419845283,
+            0.024532722309231758,
+            -0.02391967736184597,
+            -0.0012623228831216693,
+            -0.017125824466347694,
+            0.0001560622768010944
+          ],
+          "normalization_scale": [
+            0.016429100185632706,
+            0.02965458855032921,
+            0.024735601618885994,
+            0.03481089696288109,
+            0.624142587184906,
+            0.00524031650274992
+          ],
+          "temperature": 0.9170040432046712,
+          "train_target_hits": 11789,
+          "weights": "domestic-mark1-28-prototype.pt",
+          "weights_sha256": "708315f29430abdd369804751da82822008fa58662ad9f20f71f813b5cd7c507"
+        },
+        "us": {
+          "calibration_brier": 0.23231331324184973,
+          "eligible_calibration": 9448,
+          "eligible_train": 19700,
+          "normalization_center": [
+            0.00042985266190953553,
+            0.014881332404911518,
+            -0.015764132142066956,
+            -0.00020089589816052467,
+            -0.002135626971721649,
+            4.444696241989732e-05
+          ],
+          "normalization_scale": [
+            0.01739790476858616,
+            0.01902099698781967,
+            0.019884847104549408,
+            0.023624470457434654,
+            0.445112943649292,
+            0.005544621031731367
+          ],
+          "temperature": 1.0905077326652577,
+          "train_target_hits": 9178,
+          "weights": "us-mark1-28-prototype.pt",
+          "weights_sha256": "7ce02da9ded28cd5016b710cd535a1db1a8e79b78cdaed008c3e537a0f096646"
+        }
+      },
+      "target_pct": 4.0
+    }
+  },
+  "trading_mode": "demo",
+  "train_cap_per_market": 20000,
+  "training_query": "observed_next_session_open",
+  "training_script_sha256": "ea7845fbfa42b8e4708093327ba44ed75f8c4246436c85339daca454f99d7121",
+  "warnings": [
+    "The observed next OPEN cannot both inform the decision and guarantee that same OPEN fill.",
+    "The runtime intraday quote differs from the training query; target-day HIGH may predate query.",
+    "Daily HIGH touch does not guarantee limit execution; H-day CLOSE is not a live fill.",
+    "No profit, intraday path, brokerage execution, or live deployment is validated."
+  ]
+}

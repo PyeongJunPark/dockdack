@@ -161,7 +161,7 @@ class EnvironmentGuiTests(unittest.TestCase):
                            mode=TradingMode.REAL, storage_scope='b' * 64)
         for constructor in (lambda: WatchlistDialog(candidate, other),
                             lambda: TradingWindow(candidate, store=other)):
-            with self.assertRaisesRegex(ValueError, '인증 범위'):
+            with self.assertRaisesRegex(ValueError, '저장소가 다릅니다'):
                 constructor()
         self.assertEqual(other.order_history(), ())
         self.network.assert_not_called()
@@ -185,7 +185,8 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertIsNot(self.window.engine, old_engine)
         self.assertTrue(old_engine._stop.is_set())
         self.assertIs(self.window.store.mode, TradingMode.REAL)
-        self.assertEqual(self.window.store.path, Path(self.temp.name) / "real" / "unconfigured" / "watchlist.sqlite3")
+        self.assertEqual(self.window.store.path.resolve(strict=False),
+                         (Path(self.temp.name) / "real" / "unconfigured" / "watchlist.sqlite3").resolve(strict=False))
         self.assertNotEqual(self.window.store.path, self.store.path)
         self.assertFalse(self.window.store.rules())
         self.assertEqual(len(self.store.rules()), 1)
@@ -282,7 +283,7 @@ class EnvironmentGuiTests(unittest.TestCase):
             texts = [label.text() for label in view.findChildren(QLabel)]
             self.assertFalse(any("모의계좌" in text for text in texts), texts)
             self.assertTrue(any("실전" in text or "실제투자" in text for text in texts), texts)
-        self.assertIn("REAL", self.window.trade_journal_panel.mode_badge.text())
+        self.assertEqual(self.window.trade_journal_panel.mode_badge.text(), "실전")
 
     def seed_displayed_demo_logs(self):
         views = {**self.window.operations_panel.logs, "order": self.window.order_history_panel.audit}
@@ -344,8 +345,8 @@ class EnvironmentGuiTests(unittest.TestCase):
         self.assertIn("3/10종목", progress.text())
         self.assertIn("30%", progress.text())
         self.assertIn("체결", progress.toolTip())
-        self.assertIs(self.window.workspace_tabs.widget(2), self.window.trade_journal_panel)
-        self.assertEqual(self.window.workspace_tabs.tabText(2), "매매일지")
+        self.assertIs(self.window.workspace_tabs.widget(1), self.window.trade_journal_panel)
+        self.assertEqual(self.window.workspace_tabs.tabText(1), "매매일지")
         self.assertEqual(self.window.trade_journal_panel.market_tabs.count(), 2)
 
     def test_real_warning_defaults_no_and_warns_about_money_and_existing_orders(self):

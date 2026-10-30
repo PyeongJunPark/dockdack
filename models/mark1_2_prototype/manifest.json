@@ -1,0 +1,233 @@
+{
+  "owner": "dockdack.mark1_2_prototype",
+  "title": "mark1.2 prototype",
+  "schema_version": 1,
+  "completed": true,
+  "created_at_utc": "2026-09-24T16:03:07.791589+00:00",
+  "semantics": {
+    "lookback": 30,
+    "feature_count": 18,
+    "bar_columns": [
+      "open",
+      "high",
+      "low",
+      "close",
+      "volume"
+    ],
+    "target": "daily_high_ge_entry_1pct_and_low_gt_entry_minus_0_9pct_conservative",
+    "class_names": [
+      "take_only",
+      "stop_only",
+      "both_touch",
+      "neither"
+    ],
+    "take_profit_pct": 1.0,
+    "stop_loss_pct": 0.9,
+    "both_touch": "stop_first_failure",
+    "threshold": 0.5,
+    "comparison": "strict_greater_than",
+    "ensemble": "mean_raw_success_logits_then_monotone_platt",
+    "history_dtype": "float32",
+    "query_dtype": "float32",
+    "feature_dtype": "float32",
+    "inference_dtype": "float32",
+    "ensemble_accumulation_dtype": "float32",
+    "platt_dtype": "float64",
+    "output_dtype": "float64",
+    "precision": "history and candidate prices quantized to float32; features, inference and mean logits CPU FP32; calibration/output float64"
+  },
+  "risk_flags": {
+    "research_only": true,
+    "deployment_allowed": false,
+    "intraday_path_verified": false
+  },
+  "warnings": [
+    "Research probabilities only; no order permission or profitability guarantee.",
+    "Whole-session daily OHLC labels do not verify the remaining path after an arbitrary intraday entry.",
+    "Candidate-price augmentation is counterfactual data, not independently observed trades.",
+    "Calibration uses observed session opens; calibration over arbitrary intraday prices is unverified.",
+    "Known US symbols were quarantined; other corporate actions and survivorship issues may remain.",
+    "Historical 2025+ results have already been reused in research, not a pristine independent test."
+  ],
+  "feature_names": [
+    "vol_scaled_log_open_or_entry_over_last_close",
+    "vol_scaled_log_high_over_last_close",
+    "vol_scaled_log_low_over_last_close",
+    "vol_scaled_log_close_over_last_close",
+    "standardized_log1p_volume",
+    "vol_scaled_close_log_return",
+    "vol_scaled_log_high_low_range",
+    "candle_body_fraction",
+    "close_range_position",
+    "upper_wick_fraction",
+    "lower_wick_fraction",
+    "log_close_or_entry_level_div10",
+    "log1p_volume_level_div20",
+    "log_historical_return_scale_div5",
+    "historical_mean_return_over_scale",
+    "vol_scaled_open_gap",
+    "historical_bar_mask",
+    "entry_query_mask"
+  ],
+  "runtime_code_sha256": {
+    "inference": "8ec86c1840c37215cefd054e2a9a52a1929e858fee3bf112f82163a0b96d7ab2",
+    "models": "1b7aa0f5c0aa78a55469e57c1309c411c2f5b15ffd2327de33df92c736b2f770",
+    "features": "50ae22f70278a9cd4ca0fb276d20260a2421c9874ac8f35846a10529d15d16d7",
+    "calibration": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513"
+  },
+  "markets": {
+    "domestic": {
+      "market": "domestic",
+      "architecture": "cnn",
+      "model_config": {
+        "input_size": 18,
+        "sequence_length": 31,
+        "width": 48,
+        "dropout": 0.2
+      },
+      "calibration": {
+        "method": "platt_monotone",
+        "slope": 0.6904613382395467,
+        "bias": -0.34374304415822654,
+        "fit_samples": 171804,
+        "iterations": 4,
+        "regularization": 1e-06,
+        "weighted": false,
+        "fit_log_loss": 0.5392373848229792
+      },
+      "fold": "walk_2024",
+      "members": [
+        {
+          "seed": 42,
+          "path": "domestic/seed42.pt",
+          "sha256": "e9d1ddc281c1164ffbba133762ab51c7d095ff2fa9f6c0eb236442e50d6230da",
+          "source_checkpoint_sha256": "60956293782f294cdc3800cca22ea13e5ea95c1b9dc17ca9e34163da6bb9f00b"
+        },
+        {
+          "seed": 43,
+          "path": "domestic/seed43.pt",
+          "sha256": "eedaeafbe78486e31e113839a2258c34c1229bead1a9c4fc711b7011c70111e4",
+          "source_checkpoint_sha256": "c1cdf86171142bf6fe86926f71bf03bca4d9ebcc8d30acb5a21dedb5eb4e3b76"
+        },
+        {
+          "seed": 44,
+          "path": "domestic/seed44.pt",
+          "sha256": "ffee7c32d2c0b60758e265557264054dc36e40d9646f84878d07e32aa1d41d5d",
+          "source_checkpoint_sha256": "83afcde74b8928b67fe1ff7a79ffedc42b98fc93d23e28eca73a025f7edca555"
+        }
+      ],
+      "research_qualified": false,
+      "risk_flags": {
+        "research_only": true,
+        "deployment_allowed": false,
+        "intraday_path_verified": false
+      }
+    },
+    "us": {
+      "market": "us",
+      "architecture": "lstm",
+      "model_config": {
+        "input_size": 18,
+        "sequence_length": 31,
+        "width": 48,
+        "dropout": 0.2
+      },
+      "calibration": {
+        "method": "platt_monotone",
+        "slope": 0.5305851314130398,
+        "bias": -0.401916420907098,
+        "fit_samples": 535672,
+        "iterations": 4,
+        "regularization": 1e-06,
+        "weighted": false,
+        "fit_log_loss": 0.5992912607059752
+      },
+      "fold": "walk_2024",
+      "members": [
+        {
+          "seed": 42,
+          "path": "us/seed42.pt",
+          "sha256": "b9bbef244e30296f1c69b08c320b93ec7354d6be8985ff67c5693a22d0cadac1",
+          "source_checkpoint_sha256": "8d2a18bea7a4e4062f446f73dc5138d5e586fd3e616210906087860aac81ae66"
+        },
+        {
+          "seed": 43,
+          "path": "us/seed43.pt",
+          "sha256": "d383b9600f1309c4ba5b39ec6570b74d1f0e0971923354f1bbe7c5350f050271",
+          "source_checkpoint_sha256": "54ba614207cc2548d1f44e12c1d4c7e0ed28deb8387adfb606a43f9fb41f54b1"
+        },
+        {
+          "seed": 44,
+          "path": "us/seed44.pt",
+          "sha256": "e6598bf1adf819282fab90bcdd4b9708ce2973f168c8a24eb6b03c9f63fb4308",
+          "source_checkpoint_sha256": "d4a30d15117920af7982d144cb4c4fc5c30417a7772fe18c777f98a2c1b71e7f"
+        }
+      ],
+      "research_qualified": false,
+      "risk_flags": {
+        "research_only": true,
+        "deployment_allowed": false,
+        "intraday_path_verified": false
+      }
+    }
+  },
+  "source_run": {
+    "source_files_sha256": {
+      "protocol.json": "916688f6993b3f1920d66e5ff9f635784c86b63be409291e9220bc41b9b79666",
+      "summary.json": "19b77b1b515e0147a98bbbf1488a5020da7a90a32cc9d3fa9c910d1e02729c52",
+      "status.json": "0bd5086b31cb57a51e6606fcbe5121367b3a6b0139e14526f7f5b528c1367c65",
+      "domestic/summary.json": "31d61933386cb279d34b2fcecdd0442d15dbcc2e9bf1d7ed0e57b8b6cb0fc7c8",
+      "domestic/selection_locked.json": "9a7ecb45246809d3ff9b806856eaba52657d0ef6616332cd8333e67be911c83b",
+      "domestic/walk_2022/ensemble.json": "3128d7bba80ab5776d5083b2d08a912d3796fb8e7a2144293a27d46905019195",
+      "domestic/walk_2024/ensemble.json": "989c809856cc5b509f89119560ea5f535a9454c1c880c85ec470519f13315bae",
+      "domestic/walk_2024/cnn-42/result.json": "6295d849344bf238aa8f66b0f00cd605e2884d72a4bbb52028bd2534092f00a9",
+      "domestic/walk_2024/cnn-42/contract.json": "9c0eb716b4e3f7e5bec65742703bf164b5b195968904302186560c672eb95ce0",
+      "domestic/walk_2024/cnn-42/model.sha256.json": "e1e378e77a9ac2357da2b55c3a2ca992cff77755ae2aa351562dccf22f5038d6",
+      "domestic/walk_2024/cnn-42/model.pt": "60956293782f294cdc3800cca22ea13e5ea95c1b9dc17ca9e34163da6bb9f00b",
+      "domestic/walk_2024/cnn-42/predictions.npz": "c5e6c75683c1ed3bf8b2ad939afe049de0f317ac34789d98b0c07cacaa17379a",
+      "domestic/walk_2024/cnn-42/history.json": "a4003e959ed49c736cc243731f010b4ba2f18f455946e22a1228b2b74bb82591",
+      "domestic/walk_2024/cnn-43/result.json": "0f704ae093fcc79c6bd63598aa7e00adb90ce369443a264f1411d417bd23e812",
+      "domestic/walk_2024/cnn-43/contract.json": "51c368b21526748a24b5a53dd7a6bddba5dffde85e0c9bcdfbffad57e32bbf2c",
+      "domestic/walk_2024/cnn-43/model.sha256.json": "aba166663312cf031e58e287a26de8b0526bdae96aa16d1f3e2e32fedb7b053c",
+      "domestic/walk_2024/cnn-43/model.pt": "c1cdf86171142bf6fe86926f71bf03bca4d9ebcc8d30acb5a21dedb5eb4e3b76",
+      "domestic/walk_2024/cnn-43/predictions.npz": "f307924c81dbd1908246920b04751fd2efe469053ed1a7ab86d1f6a063321b3f",
+      "domestic/walk_2024/cnn-43/history.json": "0021b7882c1a904867a42b66494682fb2d48d7b45f3e9b08859073d9d2a83a42",
+      "domestic/walk_2024/cnn-44/result.json": "d47b970a800033cf96327281027bbf198df616c01016ba91db001a676deb9944",
+      "domestic/walk_2024/cnn-44/contract.json": "c7e50893f84c0bf12150d26f20168d01e353717a86cea6ddadaec175a3594614",
+      "domestic/walk_2024/cnn-44/model.sha256.json": "f504a6cf8b952fc77a000c8d0f1e7044e1e607aee03221ac26ef6e1e1c53e372",
+      "domestic/walk_2024/cnn-44/model.pt": "83afcde74b8928b67fe1ff7a79ffedc42b98fc93d23e28eca73a025f7edca555",
+      "domestic/walk_2024/cnn-44/predictions.npz": "629643813921ea4b96dd9b07ce985a40bce801487aac0d94e7022ce7c3337c43",
+      "domestic/walk_2024/cnn-44/history.json": "dd99a2219df2301e20cf04452308bb26c838252d94ffd7452540fa4042038613",
+      "us/summary.json": "87fc88ded38470ef44a03c1b07d3b64e737738df3649a1daf440d0656d346db1",
+      "us/selection_locked.json": "f3e37c52d722c8832692e575780874aff1f58f914109d922051ec238e6485181",
+      "us/walk_2022/ensemble.json": "bf1dfe963378b5b1fa30cc29370d3d4d47a9896d28517e1a2c012ac9fd9d8d0b",
+      "us/walk_2024/ensemble.json": "5cd3a5e02d3698ffc6a3060d3ef245247ddbd0894d846d721b71876b9d0fed4e",
+      "us/walk_2024/lstm-42/result.json": "d3ea48ddacfd66336d36eb7de3e41c74ad0febf3d6b3d2858b9fcdd8ac599d13",
+      "us/walk_2024/lstm-42/contract.json": "26f0dbd28982d21996176a9cc37dd2b183552ce0d8730715563e6d9ef4816ea1",
+      "us/walk_2024/lstm-42/model.sha256.json": "ed1eb8301e57ab6ab00be332858f647a8f5ae89040d49f006ec5ac2a673a16da",
+      "us/walk_2024/lstm-42/model.pt": "8d2a18bea7a4e4062f446f73dc5138d5e586fd3e616210906087860aac81ae66",
+      "us/walk_2024/lstm-42/predictions.npz": "62f3cffe46461c12c54dc07a9d7950f867398741215a6c37a5b8fd60aac4f032",
+      "us/walk_2024/lstm-42/history.json": "5f30f6426435936d260d5d005320c8b00e883faa8d956f15a4683e1d0537822b",
+      "us/walk_2024/lstm-43/result.json": "8903a653dedfe95f517d665760b18115b80a1d8e4ac8fac5f10ccc20ae94fb35",
+      "us/walk_2024/lstm-43/contract.json": "7ddc79704df95d6ad9a1a2b584aa1419c1143c5a59f25edb360d2d2ea9f106a0",
+      "us/walk_2024/lstm-43/model.sha256.json": "1c2a174d1ee45748f8120060e7f0a1d70a90f10618e7d9a017a9fd8242c18a7b",
+      "us/walk_2024/lstm-43/model.pt": "54ba614207cc2548d1f44e12c1d4c7e0ed28deb8387adfb606a43f9fb41f54b1",
+      "us/walk_2024/lstm-43/predictions.npz": "f0be4ab8e2cf9158d66f27e06c0adb02a01912ac2fe0c072bb713587646dbd3a",
+      "us/walk_2024/lstm-43/history.json": "a6467e96986f9a376d0840692ce814e1fed8a33d4e4d5af3fcf8d1dfe3f45474",
+      "us/walk_2024/lstm-44/result.json": "2f5d7745634719856e0811aeab584e5e1ec40d42db92a05fb489def2408ed0ad",
+      "us/walk_2024/lstm-44/contract.json": "b31cf0994467e1292db75b880fa57d645111a1c27121f5464b760e2ff3d278e4",
+      "us/walk_2024/lstm-44/model.sha256.json": "9121ee66fb922177db077d1c683d6f98410e5fc2af41a9c1524a848f31e2e684",
+      "us/walk_2024/lstm-44/model.pt": "d4a30d15117920af7982d144cb4c4fc5c30417a7772fe18c777f98a2c1b71e7f",
+      "us/walk_2024/lstm-44/predictions.npz": "58d2b28331787385866a06bcab101e1eab64abe4328858f3f84f5f93b81b5e08",
+      "us/walk_2024/lstm-44/history.json": "3c818c64b78c601fdcf8265bbb87cfec8f22167aa640fe86a1eae4c4a7531fef"
+    },
+    "protocol_sha256": "916688f6993b3f1920d66e5ff9f635784c86b63be409291e9220bc41b9b79666",
+    "summary_sha256": "19b77b1b515e0147a98bbbf1488a5020da7a90a32cc9d3fa9c910d1e02729c52"
+  },
+  "exporter_sha256": "f9e347818abb7ce057594f36db2e53ca4944661a276047e1fb7eb38723d984e9",
+  "versions": {
+    "torch": "2.11.0+cu128",
+    "numpy": "2.5.3"
+  },
+  "validation_sha256": "b308f1b7278b8f1058cd289f8a43fbb933d7d8ba015568880ef44875a0247026"
+}

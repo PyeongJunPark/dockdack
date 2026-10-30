@@ -1,0 +1,318 @@
+{
+  "date": "2026-09-24",
+  "source_code_checksums": {
+    "deep": {
+      "examples/train_mark1_deep.py": "f75d53e55a5a12104961fe54cdc4315fbf3a289795f3c41135f282b699b9c26a",
+      "dockdack/mark1_deep_data.py": "5e2caf2f11ebd7b179c7e619e05e4275afbe267b1b463a3bafac3daa28f253de",
+      "dockdack/mark1_deep_models.py": "50ae22f70278a9cd4ca0fb276d20260a2421c9874ac8f35846a10529d15d16d7",
+      "dockdack/mark1_deep_validation.py": "818a72a06025a2539507a7c3a337fd76dcc2721c01e4626931d16ee150b7b5f1",
+      "dockdack/mark1_data.py": "b0f8c3d302b22b74347a8b6bb73b6a56285ac4239661fe8af7963faff92fdee3",
+      "dockdack/mark1_metrics.py": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+      "examples/train_mark1.py": "e8c710b80f58b4dd58c48c4849cd0dd9ace1077eaf81e13d7243348312b4a7e7"
+    },
+    "selective": {
+      "examples/train_mark1_selective.py": "86a37f6bd39c105bde580316e0a5d707b259f2ecc1848cd3192d0bc0f214e536",
+      "dockdack/mark1_selective_features.py": "f46e8b0b21c6df6c85aeafed7673faa453980bcca0caddc4ace5705c421aa493",
+      "dockdack/mark1_selective_models.py": "84639eaf62774043a3267fafdd7f7c4e2f90263af772fffc15f332dd84d94542",
+      "dockdack/mark1_selective_policy.py": "ca2c3f1ece65d5adbf8874865d03db1bfc8ef584205e06577fbfed68681e4fb2",
+      "dockdack/mark1_data.py": "b0f8c3d302b22b74347a8b6bb73b6a56285ac4239661fe8af7963faff92fdee3",
+      "dockdack/mark1_metrics.py": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+      "dockdack/mark1_deep_data.py": "5e2caf2f11ebd7b179c7e619e05e4275afbe267b1b463a3bafac3daa28f253de",
+      "dockdack/mark1_deep_validation.py": "818a72a06025a2539507a7c3a337fd76dcc2721c01e4626931d16ee150b7b5f1",
+      "examples/train_mark1.py": "e8c710b80f58b4dd58c48c4849cd0dd9ace1077eaf81e13d7243348312b4a7e7",
+      "examples/train_mark1_deep.py": "f75d53e55a5a12104961fe54cdc4315fbf3a289795f3c41135f282b699b9c26a"
+    },
+    "half": {
+      "examples/train_mark1_0504.py": "e360c3e9d46fb01e5f1cc9fd616afa0b26a1c1054c79fa831e0925988c40da5a",
+      "dockdack/mark1_0504_data.py": "224582d75c9f17f9c0e60732edaf92c610b824f4d24336fa95e68e953c514757",
+      "dockdack/mark1_selective_features.py": "f46e8b0b21c6df6c85aeafed7673faa453980bcca0caddc4ace5705c421aa493",
+      "dockdack/mark1_selective_models.py": "84639eaf62774043a3267fafdd7f7c4e2f90263af772fffc15f332dd84d94542",
+      "dockdack/mark1_selective_policy.py": "ca2c3f1ece65d5adbf8874865d03db1bfc8ef584205e06577fbfed68681e4fb2",
+      "dockdack/mark1_metrics.py": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+      "dockdack/mark1_data.py": "b0f8c3d302b22b74347a8b6bb73b6a56285ac4239661fe8af7963faff92fdee3",
+      "dockdack/mark1_deep_data.py": "5e2caf2f11ebd7b179c7e619e05e4275afbe267b1b463a3bafac3daa28f253de",
+      "dockdack/mark1_deep_validation.py": "818a72a06025a2539507a7c3a337fd76dcc2721c01e4626931d16ee150b7b5f1",
+      "examples/train_mark1.py": "e8c710b80f58b4dd58c48c4849cd0dd9ace1077eaf81e13d7243348312b4a7e7",
+      "examples/train_mark1_deep.py": "f75d53e55a5a12104961fe54cdc4315fbf3a289795f3c41135f282b699b9c26a",
+      "examples/train_mark1_selective.py": "86a37f6bd39c105bde580316e0a5d707b259f2ecc1848cd3192d0bc0f214e536",
+      "examples/backtest_mark1_deep.py": "2c716b74407ce3964a8dd6ba46a07839986b66bb82d80ec0119c2a535e899f3f"
+    }
+  },
+  "portable_bundles": {
+    "mark1_prototype": {
+      "bundle": "C:\\Users\\user\\Desktop\\dockdack\\models\\mark1_prototype",
+      "verified": true,
+      "files": {
+        "manifest.json": "da956d0803ce0c7bbbf57f922c663f1de2984ce99533a52f062c0de861da0dfd",
+        "domestic/manifest.json": "efb967350502b95c21f474c641c1d6efd7801cf4273672d8df5f732e30c1528c",
+        "domestic/seed42.cbm": "431c7481f6b7f10e11b57f34298baf38668e6a99a9f38833ca1fe069865d3ddc",
+        "domestic/seed42.cbm.json": "9724649ce353fb507117357b079bf39a503a185481bb4368f21e4bcf225193e1",
+        "domestic/seed43.cbm": "e373fec6d02f9ee5f5e9694df0230d5402af4d1552b1cac325100c4007aad485",
+        "domestic/seed43.cbm.json": "eb58ae553c906e005e5fa83575b49ba3de6162933fa0ddda9c35c32e05b79f2d",
+        "domestic/seed44.cbm": "081d4431ebadcfb5795ef2d1b3c1f1902f0640601dec17426174459db29e72d2",
+        "domestic/seed44.cbm.json": "f0322157849f95eccc7a7268d0f6407f6baa671489142f7de87fe36047f7f5cf",
+        "us/manifest.json": "594fff1160f2deda36cdaa3180bb6bd3a7c5f12938475c9235127e042322777c",
+        "us/seed42.cbm": "35ee2202f41eb8b03d5a37496450858d6747fd2c325011bb1d1b9519670c1832",
+        "us/seed42.cbm.json": "7eb936242e15528f3490a2c7904d2744473aa316344c691af1d11aa857380e44",
+        "us/seed43.cbm": "335c6a4f98059619a3d73c77140f80214d5b4e12a541f0fb4d423905c710e966",
+        "us/seed43.cbm.json": "41844dca3a2f6e8f338c4528602eb90d5c797030bad410f347bcae2f8b64bf2f",
+        "us/seed44.cbm": "59c7d6d7dfacb279416b093b08e92794eb3ae09b3ad045da55739ab3816af824",
+        "us/seed44.cbm.json": "bf9a281f15dbddde6a51af474dde10a5199b65bc81615660dddbe8361bee87f8"
+      },
+      "runtime_code_sha256": {
+        "calibration": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+        "features": "f46e8b0b21c6df6c85aeafed7673faa453980bcca0caddc4ace5705c421aa493",
+        "native_backend": "84639eaf62774043a3267fafdd7f7c4e2f90263af772fffc15f332dd84d94542"
+      },
+      "risk_flags": {
+        "deployment_allowed": false,
+        "intraday_path_verified": false,
+        "known_data_quality_issues": true,
+        "research_only": true,
+        "research_qualified": false
+      },
+      "identity_alias": null,
+      "no_model_inference": true,
+      "no_orders": true
+    },
+    "mark1_0504": {
+      "bundle": "C:\\Users\\user\\Desktop\\dockdack\\models\\mark1_0504",
+      "verified": true,
+      "files": {
+        "manifest.json": "570ce10050b912dfd9f790ef4f5e393cfcb9ea5f73e49c3819b3396fff12a5fb",
+        "domestic/manifest.json": "1275ea82dd8d8820ba82a03af6a1dafeb43722ba9ca4cc95d59a992eb6869064",
+        "domestic/seed42.cbm": "0b053c26ab9b2b99b7d0b44a9df90c1ef95ed2638cfc884176a6b4acc2d125f8",
+        "domestic/seed42.cbm.json": "a934ad6ec69fd5d20634dd6be9ce61cf803895e8a8841b5dc2943f3753cc14cb",
+        "domestic/seed43.cbm": "ab4612b1fbb2a719abe74bf688fd30575d1937912e1abf3f51088c42bcaf88c1",
+        "domestic/seed43.cbm.json": "18d4fa8563a6bad0624cf9375300739593e09cf8f0c668cf0e500917fffd833b",
+        "domestic/seed44.cbm": "612fd7997fead13304ff6b01b35221fabc3373d057c9a3f8e0e068eb549057bf",
+        "domestic/seed44.cbm.json": "4f85e946c64384bfa1a946d8922042e2a3a898698b22800355ae011e07c5369f",
+        "us/manifest.json": "87e0ba70cf8ff054372af507d1c5e56131f4fdcd6dc968bd97099fca31214d6f",
+        "us/seed42.cbm": "a1053af7b8023e0873373480a011be732fc5ce45e996607787328d628d4cb582",
+        "us/seed42.cbm.json": "a2c812331a3ad2604140c5d0f310306cf1a939b13a610508e015fa27dde0a183",
+        "us/seed43.cbm": "5e08338c8d2d227a8f04968d8073c8009ff6246b48abed95c2f421c01d03daa4",
+        "us/seed43.cbm.json": "367850c6262fe379fbb3d0c84fabaa0bb61b79cffb725552c44a1c7de013f6dc",
+        "us/seed44.cbm": "a95ec40f24847e6b60c60822aa0d003ec0a9f28941f49fb312bf89ebbc7a4e66",
+        "us/seed44.cbm.json": "26b116124f47e8b02884b7c3231c49b114d7be00d6274d34d62dfad3435b0e12"
+      },
+      "runtime_code_sha256": {
+        "barrier_features": "224582d75c9f17f9c0e60732edaf92c610b824f4d24336fa95e68e953c514757",
+        "base_features": "f46e8b0b21c6df6c85aeafed7673faa453980bcca0caddc4ace5705c421aa493",
+        "calibration": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+        "inference": "b63fb99c41238f5e98d2b79c77e9f807f5848077a31faa806ca377c87b94bdb7",
+        "native_backend": "84639eaf62774043a3267fafdd7f7c4e2f90263af772fffc15f332dd84d94542"
+      },
+      "risk_flags": {
+        "deployment_allowed": false,
+        "intraday_path_verified": false,
+        "known_data_quality_issues": true,
+        "research_only": true,
+        "research_qualified": false
+      },
+      "identity_alias": null,
+      "no_model_inference": true,
+      "no_orders": true
+    },
+    "mark1_1_prototype": {
+      "bundle": "C:\\Users\\user\\Desktop\\dockdack\\models\\mark1_1_prototype",
+      "verified": true,
+      "files": {
+        "manifest.json": "570ce10050b912dfd9f790ef4f5e393cfcb9ea5f73e49c3819b3396fff12a5fb",
+        "domestic/manifest.json": "1275ea82dd8d8820ba82a03af6a1dafeb43722ba9ca4cc95d59a992eb6869064",
+        "domestic/seed42.cbm": "0b053c26ab9b2b99b7d0b44a9df90c1ef95ed2638cfc884176a6b4acc2d125f8",
+        "domestic/seed42.cbm.json": "a934ad6ec69fd5d20634dd6be9ce61cf803895e8a8841b5dc2943f3753cc14cb",
+        "domestic/seed43.cbm": "ab4612b1fbb2a719abe74bf688fd30575d1937912e1abf3f51088c42bcaf88c1",
+        "domestic/seed43.cbm.json": "18d4fa8563a6bad0624cf9375300739593e09cf8f0c668cf0e500917fffd833b",
+        "domestic/seed44.cbm": "612fd7997fead13304ff6b01b35221fabc3373d057c9a3f8e0e068eb549057bf",
+        "domestic/seed44.cbm.json": "4f85e946c64384bfa1a946d8922042e2a3a898698b22800355ae011e07c5369f",
+        "us/manifest.json": "87e0ba70cf8ff054372af507d1c5e56131f4fdcd6dc968bd97099fca31214d6f",
+        "us/seed42.cbm": "a1053af7b8023e0873373480a011be732fc5ce45e996607787328d628d4cb582",
+        "us/seed42.cbm.json": "a2c812331a3ad2604140c5d0f310306cf1a939b13a610508e015fa27dde0a183",
+        "us/seed43.cbm": "5e08338c8d2d227a8f04968d8073c8009ff6246b48abed95c2f421c01d03daa4",
+        "us/seed43.cbm.json": "367850c6262fe379fbb3d0c84fabaa0bb61b79cffb725552c44a1c7de013f6dc",
+        "us/seed44.cbm": "a95ec40f24847e6b60c60822aa0d003ec0a9f28941f49fb312bf89ebbc7a4e66",
+        "us/seed44.cbm.json": "26b116124f47e8b02884b7c3231c49b114d7be00d6274d34d62dfad3435b0e12"
+      },
+      "runtime_code_sha256": {
+        "barrier_features": "224582d75c9f17f9c0e60732edaf92c610b824f4d24336fa95e68e953c514757",
+        "base_features": "f46e8b0b21c6df6c85aeafed7673faa453980bcca0caddc4ace5705c421aa493",
+        "calibration": "4451fac9f46c94bba6337c3106aeac9a32ef809e0a07b3c2d94ecf08d7717513",
+        "inference": "b63fb99c41238f5e98d2b79c77e9f807f5848077a31faa806ca377c87b94bdb7",
+        "native_backend": "84639eaf62774043a3267fafdd7f7c4e2f90263af772fffc15f332dd84d94542"
+      },
+      "risk_flags": {
+        "deployment_allowed": false,
+        "intraday_path_verified": false,
+        "known_data_quality_issues": true,
+        "research_only": true,
+        "research_qualified": false
+      },
+      "identity_alias": {
+        "verified": true,
+        "sha256": "ccee99e7e85e7ca7cafdb663d0dcd8c2c62265a803453e44d8782044803fccba",
+        "contract": {
+          "identity_only_alias": true,
+          "owner": "dockdack.mark1_1_prototype",
+          "risk_flags": {
+            "deployment_allowed": false,
+            "intraday_path_verified": false,
+            "known_data_quality_issues": true,
+            "research_only": true,
+            "research_qualified": false
+          },
+          "schema_version": 1,
+          "semantics": {
+            "bar_columns": [
+              "open",
+              "high",
+              "low",
+              "close",
+              "volume"
+            ],
+            "both_touch": "stop_first_failure",
+            "buy_comparison": "strict_greater_than",
+            "buy_threshold": 0.5,
+            "candidate_entry_representation": "float64",
+            "class_names": [
+              "take_only",
+              "stop_only",
+              "both_touch",
+              "neither"
+            ],
+            "ensemble": "mean_raw_logits_then_platt",
+            "historical_representation": "validate_original_then_float32_raw_cache_parity",
+            "lookback": 30,
+            "path_limitation": "Whole-session conservative daily-bar event: high >= entry*1.005 and low > entry*0.996. Both-touch is failure. This is not a verified first-touch probability after an arbitrary intraday entry.",
+            "stop_loss_pct": 0.4,
+            "take_profit_pct": 0.5,
+            "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative"
+          },
+          "source_model_version": "20260920-v1",
+          "source_title": "mark1 0.5/0.4 research",
+          "strategy_id": "mark1-1-prototype",
+          "target": "daily_high_ge_entry_0_5pct_and_low_gt_entry_minus_0_4pct_conservative",
+          "title": "mark1.1 prototype",
+          "version": "20260924-v1",
+          "wrapper_sha256": "b96d93900d881686f6c46d05658292a5664f425372994b910fa91c1a0a840045"
+        }
+      },
+      "no_model_inference": true,
+      "no_orders": true
+    }
+  },
+  "half_report_inputs_verified": true,
+  "half_report_compatibility": {
+    "format": "dockdack-relocation-v1",
+    "historical_inputs_unchanged": true,
+    "physical_aliases": [
+      {
+        "physical_alias": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+        "verified_original_entries": [
+          {
+            "logical_path": "C:\\Users\\user\\Desktop\\dockdack-mark_1\\outputs\\mark1\\half-20260920\\summary.json",
+            "physical_path": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+            "sha256": "4773091daa86d163fbff850fa55f9a8849eb098845cca7c9284db46b19a49a0c",
+            "logical_identity_unchanged": true
+          }
+        ]
+      },
+      {
+        "physical_alias": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+        "verified_original_entries": [
+          {
+            "logical_path": "C:\\Users\\user\\Desktop\\dockdack-mark_1\\outputs\\mark1\\half-20260920\\summary.json",
+            "physical_path": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+            "sha256": "4773091daa86d163fbff850fa55f9a8849eb098845cca7c9284db46b19a49a0c",
+            "logical_identity_unchanged": true
+          }
+        ]
+      },
+      {
+        "physical_alias": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+        "verified_original_entries": [
+          {
+            "logical_path": "C:\\Users\\user\\Desktop\\dockdack-mark_1\\outputs\\mark1\\half-20260920\\summary.json",
+            "physical_path": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+            "sha256": "4773091daa86d163fbff850fa55f9a8849eb098845cca7c9284db46b19a49a0c",
+            "logical_identity_unchanged": true
+          }
+        ]
+      },
+      {
+        "physical_alias": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+        "verified_original_entries": [
+          {
+            "logical_path": "C:\\Users\\user\\Desktop\\dockdack-mark_1\\outputs\\mark1\\half-20260920\\summary.json",
+            "physical_path": "C:\\Users\\user\\Desktop\\dockdack\\outputs\\mark1\\half-20260920\\summary.json",
+            "sha256": "4773091daa86d163fbff850fa55f9a8849eb098845cca7c9284db46b19a49a0c",
+            "logical_identity_unchanged": true
+          }
+        ]
+      }
+    ],
+    "original_reader_sha256": "15d8eaf478d042f37c94d2ae2d9c44d58ced7263ef33d40db27ff3a512924817",
+    "compatibility_reader_sha256": "ce73b81a49f00fc8f44505aa2024d1c94fa8b021e760869969ef571148c9ab67",
+    "no_model_inference": true
+  },
+  "inference_or_training_executed": false,
+  "orders_started": false,
+  "full_backtest_or_export_rerun": false,
+  "fixture_regression": {
+    "command": "python -m unittest test_daily_dataset test_daily_generations test_research_tools -q",
+    "tests": 42,
+    "passed": true
+  },
+  "read_only_database_and_cache_checks": {
+    "domestic": {
+      "database_sha256": "9cc6e97466fe77237b53d188a82ce657d74586c1f4f2be25be7f8381ff6f73b8",
+      "cache_sha256": "5c6df7b0d79785f2c8b48ebbc53cb647fd5529322c093f810ac70923842f7af0",
+      "cache_key": "fb9a4f1e01e682f0",
+      "source_contract_unchanged": true,
+      "read_before_after_verified": true
+    },
+    "us": {
+      "database_sha256": "83ea8c43ce7a7a3a03d4f8009f0694401394cc64d1cd8da55d82955eeabb1aab",
+      "cache_sha256": "b4e1bb9f3e4fa6ebf326f0848b9109bac09fd4743e01d9e6a5d90894771902c5",
+      "cache_key": "7bc645867ce3c050",
+      "source_contract_unchanged": true,
+      "read_before_after_verified": true
+    }
+  },
+  "actual_training_artifact_read_only_checks": {
+    "deep": [
+      "domestic",
+      "us"
+    ],
+    "selective": [
+      "domestic",
+      "us"
+    ],
+    "half": [
+      "domestic",
+      "us"
+    ],
+    "selective_comparators": [
+      "domestic",
+      "us"
+    ]
+  },
+  "installed_environment_smoke": {
+    "fresh_environment_outside_checkout": true,
+    "wheel_installed_not_editable": true,
+    "numpy": "2.5.3",
+    "catboost": "1.2.10",
+    "lightgbm": "4.6.0",
+    "torch": "2.14.0+cpu",
+    "prototype_model_market_combinations": 4,
+    "frozen_gateway_help_commands": 5,
+    "accounts_or_orders_called": false,
+    "original_gpu_training_reproduced": false
+  },
+  "limitations": [
+    "No actual broker response or operating raw-database update was performed.",
+    "Original frozen math was not modified; direct historical CLI defaults remain archived and require the new gateway for relocation.",
+    "Full numerical backtest/export equivalence after gateway dispatch has not been rerun.",
+    "Mmap/chunk tools are opt-in; existing sealed trainers retain their original memory characteristics.",
+    "The fresh installed CPU environment was checked for imports/parser and portable inference only, not original CUDA training reproduction or whole-market research peak-RSS speedup."
+  ]
+}

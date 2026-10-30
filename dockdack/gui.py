@@ -161,8 +161,8 @@ class TradingWindow(QMainWindow):
         self.store = store if store is not None else store_for_service(self.service)
         if self.store.mode is not selected_mode(self.service):
             raise ValueError('거래 환경과 저장소가 다릅니다.')
-        if self.store.mode is TradingMode.REAL and self.store.storage_scope != getattr(self.service, 'storage_scope', None):
-            raise ValueError('실전 API 인증 범위와 저장소가 다릅니다.')
+        if (self.store.mode is TradingMode.REAL or getattr(self.service, 'storage_scope', 'demo') != 'demo') and self.store.storage_scope != getattr(self.service, 'storage_scope', None):
+            raise ValueError('계정 키/리셋 세대와 저장소가 다릅니다.')
         self._environment_base = environment_base(self.store)
         self._environment_stores = {(self.store.mode, self.store.storage_scope): self.store}
         self.instrument: Instrument | None = None

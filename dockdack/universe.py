@@ -1,4 +1,4 @@
-"""Kiwoom market rankings: share volume and legacy monetary turnover."""
+"""Kiwoom market rankings for the visible watchlist and model volume input."""
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -21,6 +21,118 @@ class RankedStock:
     currency: str
     volume: int | None = None
     ranking_basis: str = "turnover"
+
+
+def _category_rows(http: KiwoomHTTPClient, market: Market, *, api_id: str,
+                   key: str, body: dict[str, str], metric: str, basis: str,
+                   limit: int, descending: bool = True) -> tuple[RankedStock, ...]:
+    """Read a complete broker top-N and retain only classified common shares."""
+    domestic = market is Market.DOMESTIC
+    path = "/api/dostk/rkinfo" if domestic else "/api/us/rkinfo"
+    candidates: dict[tuple[str, str], tuple[Decimal, RankedStock]] = {}
+    ordinal = 0
+    for page in http.iter_pages(api_id=api_id, path=path, body=body, max_pages=20):
+        rows = page.body.get(key)
+        if not isinstance(rows, list):
+            raise BrokerAPIError(f"{basis} 순위 응답 목록을 확인할 수 없습니다.")
+        parsed = []
+        for row in rows:
+            ordinal += 1
+            if not isinstance(row, dict):
+                raise BrokerAPIError(f"{basis} 순위 행이 잘못되었습니다.")
+            symbol = normalize_symbol(str(row.get("stk_cd", "")))
+            exchange = "KRX" if domestic else str(row.get("stex_tp", "")).strip().upper()
+            if symbol and not domestic and exchange == "NP":
+                continue
+            if not symbol or exchange not in ({"KRX"} if domestic else {"ND", "NY", "NA"}):
+                raise BrokerAPIError(f"{basis} 순위 종목 또는 거래소를 확인할 수 없습니다.")
+            try:
+                value = Decimal(str(row.get(metric)).replace(",", ""))
+                rank = ordinal if domestic else int(str(row.get("rank")))
+            except (ValueError, InvalidOperation, TypeError) as exc:
+                raise BrokerAPIError(f"{basis} 순위 값을 해석할 수 없습니다.") from exc
+            if not value.is_finite() or rank <= 0 or (basis == "market_cap" and value < 0):
+                raise BrokerAPIError(f"{basis} 순위 값이 올바르지 않습니다.")
+            if basis == "gainers" and value <= 0 or basis == "decliners" and value >= 0:
+                continue
+            stock = RankedStock(market, symbol, exchange,
+                                str(row.get("stk_nm") or row.get("stk_enm") or symbol),
+                                rank, Decimal(0), "KRW" if domestic else "USD",
+                                ranking_basis=basis)
+            parsed.append((value, stock))
+        eligible = common_equities(http, market, ((stock.symbol, stock.exchange) for _, stock in parsed))
+        for value, stock in parsed:
+            if (stock.symbol, stock.exchange) in eligible:
+                candidates.setdefault((stock.symbol, stock.exchange), (value, stock))
+        if len(candidates) >= limit:
+            break
+    ordered = sorted(candidates.values(), key=lambda pair: (
+        -pair[0] if descending else pair[0], pair[1].rank, pair[1].symbol))[:limit]
+    if len(ordered) != limit:
+        raise BrokerAPIError(f"분류가 확인된 {basis} 순위가 {len(ordered)}개뿐이어서 상위 {limit}개를 확정하지 않았습니다.")
+    return tuple(RankedStock(stock.market, stock.symbol, stock.exchange, stock.name, index,
+                             stock.turnover, stock.currency, stock.volume, basis)
+                 for index, (_, stock) in enumerate(ordered, 1))
+
+
+def top_change(http: KiwoomHTTPClient, market: Market, *, gainers: bool,
+               limit: int = 20) -> tuple[RankedStock, ...]:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("등락률 순위는 1~100개를 요청할 수 있습니다.")
+    domestic = market is Market.DOMESTIC
+    body = ({"mrkt_tp": "000", "sort_tp": "1" if gainers else "3",
+             "trde_qty_cnd": "0000", "stk_cnd": "3", "crd_cnd": "0",
+             "updown_incls": "1", "pric_cnd": "0", "trde_prica_cnd": "0", "stex_tp": "1"}
+            if domestic else
+            {"stex_tp": "0", "inds_cd": "000", "inds_cls_tp": "0",
+             "sort_tp": "1" if gainers else "4", "stk_tp": "1", "stk_cnd": "0",
+             "pric_cnd": "0", "trde_prica_cnd": "0", "trde_qty_tp": "0"})
+    return _category_rows(http, market, api_id="ka10027" if domestic else "usa20910",
+                          key="pred_pre_flu_rt_upper" if domestic else "result_list",
+                          body=body, metric="flu_rt", basis="gainers" if gainers else "decliners",
+                          limit=limit, descending=gainers)
+
+
+def top_market_cap(http: KiwoomHTTPClient, market: Market,
+                   limit: int = 20) -> tuple[RankedStock, ...]:
+    """Use verified US usa20550; domestic has no verified rank here."""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("시가총액 순위는 1~100개를 요청할 수 있습니다.")
+    if market is Market.DOMESTIC:
+        return ()
+    return _category_rows(http, market, api_id="usa20550", key="result_list",
+                          body={"stex_tp": "0", "inds_cd": "000", "stk_tp": "1",
+                                "trde_qty_tp": "0", "stk_cnd": "0", "pric_cnd": "0",
+                                "trde_prica_cnd": "0"}, metric="mac", basis="market_cap",
+                          limit=limit)
+
+
+def top_watchlist(http: KiwoomHTTPClient, market: Market,
+                  limit: int = 100) -> tuple[RankedStock, ...]:
+    """Combine 20 per supported category, then fill duplicates by turnover."""
+    if type(limit) is not int or limit != 100:
+        raise ValueError("복합 관심종목은 시장별 정확히 100개만 확정합니다.")
+    turnover = top_turnover(http, market, 100)
+    sources = (("turnover", turnover[:20]),
+               ("volume", top_volume(http, market, 20)),
+               ("gainers", top_change(http, market, gainers=True)),
+               ("decliners", top_change(http, market, gainers=False)),
+               ("market_cap", top_market_cap(http, market)))
+    selected: dict[tuple[str, str], RankedStock] = {}
+    for basis, rows in sources:
+        for row in rows:
+            selected.setdefault((row.symbol, row.exchange),
+                                RankedStock(row.market, row.symbol, row.exchange, row.name,
+                                            0, row.turnover, row.currency, row.volume, basis))
+    for row in turnover:
+        if len(selected) >= 100:
+            break
+        selected.setdefault((row.symbol, row.exchange), row)
+    if len(selected) != 100:
+        raise BrokerAPIError(f"복합 관심종목이 {len(selected)}개뿐이어서 100개를 확정하지 않았습니다.")
+    return tuple(RankedStock(row.market, row.symbol, row.exchange, row.name, index,
+                             row.turnover, row.currency, row.volume, row.ranking_basis)
+                 for index, row in enumerate(selected.values(), 1))
 
 
 def top_volume(http: KiwoomHTTPClient, market: Market, limit: int = 100) -> tuple[RankedStock, ...]:

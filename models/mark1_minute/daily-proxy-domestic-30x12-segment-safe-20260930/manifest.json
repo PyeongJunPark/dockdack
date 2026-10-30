@@ -1,0 +1,218 @@
+{
+  "as_of": "2026-09-30T11:19:13.758066+00:00",
+  "created_at_utc": "2026-09-30T11:19:37.180941+00:00",
+  "format": "dockdack-daily-proxy-minute-v1",
+  "market": "domestic",
+  "models": {
+    "conv": {
+      "daily_test": {
+        "base_positive_fraction": 0.535090077977951,
+        "samples": 7438,
+        "selected": 2034,
+        "selected_mean_net_proxy": 0.028658914269811955,
+        "selected_positive_fraction": 0.5063913470993117,
+        "selected_sessions": 188,
+        "selected_total_net_proxy": 58.292231624797516,
+        "sessions": 188,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "demo_experimental_eligible": true,
+      "minute_backtest_completed": false,
+      "model_id": "mark1-36-prototype",
+      "state_file": "conv.pt",
+      "state_sha256": "2474795ce37d4fc3db92a7f94e7d30156d72da947d3e54944a55c3c75d768675",
+      "validation": {
+        "base_positive_fraction": 0.5760165403170228,
+        "samples": 7255,
+        "selected": 1451,
+        "selected_mean_net_proxy": 0.045879818102446526,
+        "selected_positive_fraction": 0.6457615437629222,
+        "selected_sessions": 182,
+        "selected_total_net_proxy": 66.57161606664991,
+        "sessions": 184,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "validation_threshold": 0.5236817240715027
+    },
+    "gru": {
+      "daily_test": {
+        "base_positive_fraction": 0.535090077977951,
+        "samples": 7438,
+        "selected": 1775,
+        "selected_mean_net_proxy": 0.02202732643741156,
+        "selected_positive_fraction": 0.5363380281690141,
+        "selected_sessions": 172,
+        "selected_total_net_proxy": 39.09850442640552,
+        "sessions": 188,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "demo_experimental_eligible": true,
+      "minute_backtest_completed": false,
+      "model_id": "mark1-37-prototype",
+      "state_file": "gru.pt",
+      "state_sha256": "f495937c65993739fd86d9694e415ec7489c32e5c86b764658a15ac7e74f09c3",
+      "validation": {
+        "base_positive_fraction": 0.5760165403170228,
+        "samples": 7255,
+        "selected": 1451,
+        "selected_mean_net_proxy": 0.0369576702390571,
+        "selected_positive_fraction": 0.6243969676085458,
+        "selected_sessions": 175,
+        "selected_total_net_proxy": 53.62557951687185,
+        "sessions": 184,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "validation_threshold": 0.5243984580039979
+    },
+    "linear": {
+      "daily_test": {
+        "base_positive_fraction": 0.535090077977951,
+        "samples": 7438,
+        "selected": 2212,
+        "selected_mean_net_proxy": 0.01949771613945775,
+        "selected_positive_fraction": 0.5203435804701627,
+        "selected_sessions": 176,
+        "selected_total_net_proxy": 43.12894810048054,
+        "sessions": 188,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "demo_experimental_eligible": true,
+      "minute_backtest_completed": false,
+      "model_id": "mark1-35-prototype",
+      "state_file": "linear.pt",
+      "state_sha256": "a1e1ad019099dbde25eaf3a31d036b9dc7a4ffc07d353dedc3f061c527da369d",
+      "validation": {
+        "base_positive_fraction": 0.5760165403170228,
+        "samples": 7255,
+        "selected": 1451,
+        "selected_mean_net_proxy": 0.03185957776803363,
+        "selected_positive_fraction": 0.6092350103376981,
+        "selected_sessions": 179,
+        "selected_total_net_proxy": 46.2282473414168,
+        "sessions": 184,
+        "symbols": 40,
+        "unit": "fraction of cost-adjusted historical daily next-open proxy; not intraday fills"
+      },
+      "validation_threshold": 0.5148435354232788
+    }
+  },
+  "safety": {
+    "demo_experimental_only": true,
+    "minute_profitability_claim": false,
+    "model_does_not_place_orders": true,
+    "real_money_allowed": false
+  },
+  "source": {
+    "daily": {
+      "accepted_bars": 53807,
+      "jsonl_rows": 53807,
+      "regular_session_excluded": 0
+    },
+    "daily_export_receipt_verified": true,
+    "daily_sha256": "48a9a6f5c3a7ba1f0e524302258aadb1dbc13933de6c3c93a43a2710b95cfab5",
+    "latest_completed_daily_label": "2026-08-21T15:30:00+09:00"
+  },
+  "study": {
+    "costs": {
+      "fee_bps_per_side": 2.0,
+      "slippage_bps_per_side": 8.0
+    },
+    "daily_input_bars": 53807,
+    "domain_mismatch": true,
+    "exchanges": [
+      "KRX"
+    ],
+    "exit_policy": {
+      "emergency_stop_fraction": -0.02,
+      "entry_delay_completed_5m_bars": 3,
+      "force_flat_before_session_close": true,
+      "max_hold_completed_5m_bars_after_fill": 12,
+      "stop_take_note": "risk override independent of the proxy training label",
+      "take_profit_fraction": 0.03
+    },
+    "feature_schema": "range-normalized-relative-ohlcv5-v2",
+    "horizon_bars": 12,
+    "inference_domain": "actual_completed_five_minute_bars_without_retraining",
+    "lookback": 30,
+    "market": "domestic",
+    "minute_performance_tested": false,
+    "proxy_label": "completed bar t; entry t+3 open; exit entry+horizon open; both-side costs",
+    "purge_sessions": 3,
+    "risk": "daily-to-minute frequency transfer is unverified; daily holdout is not a minute backtest",
+    "split_counts": {
+      "test": 7438,
+      "train": 35534,
+      "val": 7255
+    },
+    "split_session_bounds": {
+      "test": {
+        "entry_first": "2025-10-29",
+        "label_exit_last": "2026-08-21"
+      },
+      "train": {
+        "entry_first": "2021-02-19",
+        "label_exit_last": "2024-12-13"
+      },
+      "val": {
+        "entry_first": "2024-12-24",
+        "label_exit_last": "2025-10-20"
+      }
+    },
+    "threshold_policy": "validation top quintile; minimum candidate/sample/day counts; no test PnL selection",
+    "train_domain": "completed_daily_bars_as_generic_ordered_OHLCV_tokens_only",
+    "training_symbols": [
+      "000150",
+      "000270",
+      "000660",
+      "001740",
+      "005380",
+      "005490",
+      "005930",
+      "006400",
+      "006800",
+      "009150",
+      "011070",
+      "012330",
+      "018260",
+      "028050",
+      "028260",
+      "032830",
+      "034020",
+      "034220",
+      "034730",
+      "035420",
+      "036930",
+      "042660",
+      "047040",
+      "055550",
+      "066570",
+      "068270",
+      "079550",
+      "080220",
+      "086790",
+      "105560",
+      "196170",
+      "240810",
+      "267260",
+      "298040",
+      "307950",
+      "329180",
+      "353200",
+      "373220",
+      "402340",
+      "403870"
+    ]
+  },
+  "training": {
+    "epochs": 4,
+    "max_train_samples": 50000,
+    "min_candidate_days": 10,
+    "min_validation_candidates": 20,
+    "seed": 20260930
+  }
+}

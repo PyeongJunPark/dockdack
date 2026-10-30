@@ -83,10 +83,11 @@ class BackgroundUiTests(unittest.TestCase):
         self.window.engine.clock = lambda: NOW
         for timer in self.window.findChildren(QTimer):
             timer.stop()
+        self.drain()
 
     def drain(self):
         end = time.monotonic() + 10
-        while self.window._activity_worker or self.window._schedule_probe:
+        while self.window._activity_worker or self.window._schedule_probe or self.window._workspace_worker:
             self.window.activity_pool.waitForDone(100)
             self.app.processEvents()
             self.assertLess(time.monotonic(), end, 'background worker did not finish')
@@ -143,6 +144,22 @@ class BackgroundUiTests(unittest.TestCase):
         self.assertIn('120', panel.table.item(0, 9).text())
         self.assertIn('95', panel.table.item(0, 10).text())
         self.assertIn('독립 매도 감시', panel.table.item(0, 5).toolTip())
+        self.assertFalse(self.service.submitted)
+
+    def test_health_tick_never_repaints_every_model_row_and_hidden_pages_skip_it(self):
+        window = self.window
+        self.assertEqual(window.model_display_timer.interval(), 30_000)
+        with patch.object(window, '_update_model_score_row') as row_update:
+            window.health_timer.timeout.emit()
+            row_update.assert_not_called()
+            window.workspace_tabs.setCurrentWidget(window.trade_journal_panel)
+            window._refresh_visible_model_display()
+            row_update.assert_not_called()
+            window.workspace_tabs.setCurrentWidget(window.watch_page)
+            self.assertGreater(row_update.call_count, 0)
+            row_update.reset_mock()
+            window._refresh_visible_model_display()
+            self.assertGreater(row_update.call_count, 0)
         self.assertFalse(self.service.submitted)
 
 
