@@ -14,6 +14,8 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from threading import Lock
+from time import perf_counter
+from dockdack.trading.pipeline_metrics import PipelineMetrics
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
@@ -84,6 +86,7 @@ class DailyProxyMinuteFeed:
         self.manifest = None
         self.manifest_sha256 = None
         self.diagnostics = {}
+        self.metrics = PipelineMetrics()
         self.status = f"{self.title} · 완료 일봉 학습 / 실제 5분봉 추론 대기 · 모의 전용"
         self._decisions = {}
         self._ready = False
@@ -205,6 +208,7 @@ class DailyProxyMinuteFeed:
                 action = "hold"
                 diagnostic = {"watch_id": watch_id, "reason": "MINUTE_HOLD",
                               "score_unit": "일봉 학습 점수 · 분봉 성능 미검증"}
+                started = perf_counter()
                 try:
                     quote = self._stock_quote(stock, now)
                     if stock["symbol"] not in artifact["training_symbols"]:
@@ -225,6 +229,8 @@ class DailyProxyMinuteFeed:
                                       signal_bar_label=result["signal_bar_label"],
                                       minute_bar_label=snapshot.last_bar_label.isoformat(),
                                       minute_receipt_sha256=snapshot.sha256)
+                    diagnostic['signal_age_seconds'] = (now - datetime.fromisoformat(result['signal_bar_label'])).total_seconds()
+                    diagnostic['snapshot_age_seconds'] = (now - snapshot.fetched_at_utc).total_seconds()
                     if result["candidate"]:
                         # The model uses no current quote, but a grossly
                         # divergent price signals stale data/market disruption.
@@ -246,6 +252,9 @@ class DailyProxyMinuteFeed:
                 except Exception as exc:
                     diagnostic["reason"] = "MINUTE_INPUT_UNAVAILABLE"
                     diagnostic["error"] = str(exc)[:300]
+                finally:
+                    diagnostic['processing_seconds'] = perf_counter() - started
+                    self.metrics.record(diagnostic['reason'], diagnostic['processing_seconds'])
                 self.diagnostics[watch_id] = diagnostic
                 row = self._signal(stock, chart["export_id"], now, action)
                 if action == "buy":
@@ -275,6 +284,16 @@ class DailyProxyMinuteFeed:
             self.status = f"{self.title} · 분봉 연결 불가, 주문 보류: {str(exc)[:200]}"
 
     def validate_execution(self, item, rule, fresh_snapshot, actual_limit_price, *, stage="preflight"):
+        started = perf_counter()
+        try:
+            result = self._validate_execution(item, rule, fresh_snapshot, actual_limit_price, stage=stage)
+        except Exception:
+            self.metrics.record(stage + '_blocked', perf_counter() - started)
+            raise
+        self.metrics.record(stage + '_passed', perf_counter() - started)
+        return result
+
+    def _validate_execution(self, item, rule, fresh_snapshot, actual_limit_price, *, stage="preflight"):
         """Local-only repeat inference; broker quote and lot checks belong to engine."""
         self._ensure_demo()
         if not self._ready or stage not in {"preflight", "final_send"}:

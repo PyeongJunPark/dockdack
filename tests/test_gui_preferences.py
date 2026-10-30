@@ -222,6 +222,7 @@ class GuiPreferencesTests(unittest.TestCase):
             self.assertEqual(stored['model_buy_percents'][model], expected)
 
         second = self.make_window()
+        self.assertEqual(second.mark14_panel.bulk_buy_percent.value(), 2.75)
         self.assertEqual(second._chosen_external_models(), (MARK1_TRIGGER,))
         for model in ALL_MODEL_IDS:
             expected = research_percents[model] if model in MINUTE_HEDGE_IDS else 2.75
@@ -235,6 +236,176 @@ class GuiPreferencesTests(unittest.TestCase):
         self.assertFalse(second.pending_auto_arm)
         self.assertFalse(second.engine.orders_enabled)
         self.assertEqual(self.service.quote_calls, 0)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_bulk_target_without_applying_survives_restart_without_changing_model_sizes(self):
+        first = self.make_window()
+        original = {model: field.value()
+                    for model, field in first.mark14_panel.model_buy_percents.items()}
+        first.mark14_panel.bulk_buy_percent.setValue(4.25)
+        first.close()
+        second = self.make_window()
+        self.assertEqual(second.mark14_panel.bulk_buy_percent.value(), 4.25)
+        self.assertEqual({model: field.value()
+                          for model, field in second.mark14_panel.model_buy_percents.items()}, original)
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertFalse(second.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_unfinished_buy_percent_text_is_committed_before_window_close(self):
+        from PySide6.QtTest import QTest
+        first = self.make_window()
+        field = first.mark14_panel.model_buy_percents[MARK1_TRIGGER]
+        field.lineEdit().selectAll()
+        QTest.keyClicks(field.lineEdit(), '7.25')
+        self.assertEqual(field.value(), 10)
+        self.assertTrue(field.lineEdit().text().startswith('7.25'))
+        first.close()
+        second = self.make_window()
+        self.assertEqual(second.mark14_panel.model_buy_percents[MARK1_TRIGGER].value(), 7.25)
+        self.assertEqual(second.engine.source_buy_percents[PROTOTYPE_SOURCES[MARK1_TRIGGER]],
+                         Decimal('7.25'))
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertFalse(second.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_unfinished_bulk_target_is_saved_on_close_without_applying(self):
+        from PySide6.QtTest import QTest
+        first = self.make_window()
+        original = dict(first.engine.source_buy_percents)
+        field = first.mark14_panel.bulk_buy_percent
+        field.lineEdit().selectAll()
+        QTest.keyClicks(field.lineEdit(), '6.25')
+        self.assertEqual(field.value(), 1)
+        first.close()
+        second = self.make_window()
+        self.assertEqual(second.mark14_panel.bulk_buy_percent.value(), 6.25)
+        self.assertEqual(second.engine.source_buy_percents, original)
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertFalse(second.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_typed_common_percent_survives_close_without_changing_models(self):
+        from PySide6.QtTest import QTest
+        first = self.make_window()
+        original = dict(first.engine.source_buy_percents)
+        first.buy_percent.lineEdit().selectAll()
+        QTest.keyClicks(first.buy_percent.lineEdit(), '8.25')
+        self.assertEqual(first.buy_percent.value(), 8.25)
+        first.close()
+        second = self.make_window()
+        self.assertEqual(second.buy_percent.value(), 8.25)
+        self.assertEqual(second.engine.equity_buy_percent, Decimal('8.25'))
+        self.assertEqual(second.engine.source_buy_percents, original)
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_environment_request_commits_percent_edits_before_saving(self):
+        from PySide6.QtTest import QTest
+        from dockdack.models import TradingMode
+        window = self.make_window()
+        fields = ((window.buy_percent, '8.25'),
+                  (window.mark14_panel.bulk_buy_percent, '3.25'),
+                  (window.mark14_panel.model_buy_percents[MARK1_TRIGGER], '6.25'))
+        for field, text in fields:
+            field.lineEdit().selectAll()
+            QTest.keyClicks(field.lineEdit(), text)
+        with patch('dockdack.watch_gui.WatchlistDialog.request_environment') as switch:
+            window.request_environment(TradingMode.DEMO)
+        switch.assert_called_once_with(TradingMode.DEMO)
+        saved = self.store.load_ui_preferences()
+        self.assertEqual(saved['buy_percent'], 8.25)
+        self.assertEqual(saved['bulk_buy_percent'], 3.25)
+        self.assertEqual(saved['model_buy_percents'][MARK1_TRIGGER], 6.25)
+        self.assertFalse(window.engine.orders_enabled)
+        self.assertFalse(window.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_bulk_apply_commits_typed_target_without_enter(self):
+        from PySide6.QtTest import QTest
+        window = self.make_window()
+        field = window.mark14_panel.bulk_buy_percent
+        field.lineEdit().selectAll()
+        QTest.keyClicks(field.lineEdit(), '3.75')
+        self.assertEqual(field.value(), 1)
+        with patch.object(window, '_queue_save_preferences',
+                          wraps=window._queue_save_preferences) as save:
+            window.mark14_panel.apply_bulk_buy_percent_button.click()
+            save.assert_called_once_with()
+        self.assertEqual(field.value(), 3.75)
+        self.assertTrue(all(value == Decimal('3.75')
+                            for value in window.engine.source_buy_percents.values()))
+        self.assertFalse(window.engine.orders_enabled)
+        self.assertFalse(window.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_typed_bulk_noop_saves_target_once_without_reapplying_model_sizes(self):
+        from PySide6.QtTest import QTest
+        window = self.make_window()
+        panel = window.mark14_panel
+        panel.bulk_buy_percent.setValue(3.75)
+        panel.apply_bulk_buy_percent_button.click()
+        panel.bulk_buy_percent.setValue(1)
+        panel.bulk_buy_percent.lineEdit().selectAll()
+        QTest.keyClicks(panel.bulk_buy_percent.lineEdit(), '3.75')
+        with patch.object(window, '_queue_save_preferences',
+                          wraps=window._queue_save_preferences) as save, \
+                patch.object(window, '_apply_execution_preferences') as sizing:
+            panel.apply_bulk_buy_percent_button.click()
+            save.assert_called_once_with()
+            sizing.assert_not_called()
+        self.assertEqual(panel.bulk_buy_percent.value(), 3.75)
+        window.close()
+        second = self.make_window()
+        self.assertEqual(second.mark14_panel.bulk_buy_percent.value(), 3.75)
+        self.assertTrue(all(value == Decimal('3.75')
+                            for value in second.engine.source_buy_percents.values()))
+        self.assertFalse(second.engine.orders_enabled)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_legacy_uniform_model_percents_restore_bulk_input_without_reapplying(self):
+        model_sizing = {model: (9 if model in MINUTE_HEDGE_IDS else 2.75)
+                        for model in ALL_MODEL_IDS}
+        self.store.save_ui_preferences({'version': 4, 'model_buy_percents': model_sizing})
+        window = self.make_window()
+        self.assertEqual(window.mark14_panel.bulk_buy_percent.value(), 2.75)
+        self.assertEqual({model: field.value()
+                          for model, field in window.mark14_panel.model_buy_percents.items()}, model_sizing)
+        self.assertFalse(window.engine.orders_enabled)
+        self.assertFalse(window.monitoring)
+        self.assertEqual(self.service.submitted, [])
+
+    def test_invalid_bulk_percent_uses_safe_uniform_fallback(self):
+        model_sizing = {model: 2.75 for model in ALL_MODEL_IDS}
+        for invalid in ('99', False, -1, 101, None):
+            with self.subTest(invalid=invalid):
+                self.store.save_ui_preferences({'version': 4, 'bulk_buy_percent': invalid,
+                                                'model_buy_percents': model_sizing})
+                window = self.make_window()
+                self.assertEqual(window.mark14_panel.bulk_buy_percent.value(), 2.75)
+                self.assertTrue(all(field.value() == 2.75
+                                    for field in window.mark14_panel.model_buy_percents.values()))
+                self.assertFalse(window.engine.orders_enabled)
+                window.close()
+
+    def test_bulk_input_is_store_scoped_when_switching_preferences(self):
+        first = self.make_window()
+        first.mark14_panel.bulk_buy_percent.setValue(4.25)
+        first.mark14_panel.model_buy_percents[MARK1_TRIGGER].setValue(6.5)
+        first._save_preferences()
+        other = WatchStore(self.folder / 'other' / 'watchlist.sqlite3')
+        first.store = other
+        first._restore_preferences(after_switch=True)
+        self.wait_idle(first)
+        self.assertEqual(first.mark14_panel.bulk_buy_percent.value(), 1)
+        self.assertEqual(first.mark14_panel.model_buy_percents[MARK1_TRIGGER].value(), 10)
+        first.store = self.store
+        first._restore_preferences(after_switch=True)
+        self.wait_idle(first)
+        self.assertEqual(first.mark14_panel.bulk_buy_percent.value(), 4.25)
+        self.assertEqual(first.mark14_panel.model_buy_percents[MARK1_TRIGGER].value(), 6.5)
+        self.assertFalse(first.engine.orders_enabled)
+        self.assertFalse(first.monitoring)
         self.assertEqual(self.service.submitted, [])
 
     def test_old_log_tab_selection_opens_logs_inside_advanced_settings(self):
@@ -339,6 +510,30 @@ class GuiPreferencesTests(unittest.TestCase):
         self.assertEqual(window.interval.value(), 30)
         self.assertFalse(window.monitoring)
         self.assertFalse(window.engine.orders_enabled)
+
+
+    def test_exposure_limits_survive_restart_and_stay_locked_while_monitoring(self):
+        first = self.make_window()
+        first.symbol_exposure_percent.setValue(15)
+        first.model_exposure_percent.setValue(25)
+        first.close()
+        self.wait_idle(first)
+        second = self.make_window()
+        self.assertEqual(second.symbol_exposure_percent.value(), 15)
+        self.assertEqual(second.engine.model_exposure_percent, Decimal(25))
+        second.monitoring = True
+        second.update_controls()
+        self.assertFalse(second.symbol_exposure_percent.isEnabled())
+        self.assertFalse(second.model_exposure_percent.isEnabled())
+        second.monitoring = False
+
+    def test_exposure_limit_defaults_do_not_carry_to_another_account(self):
+        first = self.make_window()
+        first.symbol_exposure_percent.setValue(15)
+        first._save_preferences()
+        second = self.make_window(WatchStore(self.folder / 'second' / 'watchlist.sqlite3'))
+        self.assertEqual(second.symbol_exposure_percent.value(), 0)
+        self.assertEqual(second.model_exposure_percent.value(), 0)
 
 
 if __name__ == '__main__':

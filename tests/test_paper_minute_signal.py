@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from dockdack.market_schedule import session_on
 from dockdack.models import Market
@@ -35,12 +36,16 @@ class PaperMinuteSignalTest(unittest.TestCase):
             "regular_session_filter": True,
             "accepted_bars": len(minute_bars())}), encoding="utf-8")
         cls.bundle = cls.root / "bundle"
-        trained = train_run(SimpleNamespace(
-            market="domestic", daily=daily, minute=minute, output=cls.bundle,
-            as_of="2026-01-01T00:00:00+00:00", lookback=5, horizon=1,
-            fee_bps=2., slippage_bps=8., purge_sessions=1,
-            pretrain_epochs=1, adapt_epochs=1, min_samples_per_split=1,
-            min_validation_trades=1, max_train_samples=100, seed=17))
+        # Keep the synthetic bundle's creation before the synthetic October 1
+        # receipt, independently of the wall clock on the test runner.
+        with patch('examples.train_daily_to_minute.datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 9, 30, tzinfo=timezone.utc)
+            trained = train_run(SimpleNamespace(
+                market="domestic", daily=daily, minute=minute, output=cls.bundle,
+                as_of="2026-01-01T00:00:00+00:00", lookback=5, horizon=1,
+                fee_bps=2., slippage_bps=8., purge_sessions=1,
+                pretrain_epochs=1, adapt_epochs=1, min_samples_per_split=1,
+                min_validation_trades=1, max_train_samples=100, seed=17))
         assert trained["sources"]["minute_collector_receipt_verified"] is True
         cls.session_day = date(2026, 10, 1)
         session = session_on(Market.DOMESTIC, cls.session_day)

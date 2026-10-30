@@ -40,6 +40,7 @@ from dockdack.signals.mark1_target_horizon_trigger import (
 from dockdack.signals.preopen_series import PREOPEN_MODELS
 from dockdack.trading.model_exit_schedule import timed_exit_due
 from dockdack.watch_gui import WatchlistDialog
+from dockdack.ui.desktop_preferences import DesktopPreferencesMixin
 from dockdack.watchlist import WatchStore
 
 
@@ -345,6 +346,7 @@ class Mark14Panel(QWidget):
         self.model_checks = {}
         self.model_buy_percents = {}
         self.model_descriptions = {}
+        self.runtime_labels = {}
         self.model_detail_fields = {}
         self.model_sections = {}
         self._model_detail_rows = []
@@ -391,6 +393,10 @@ class Mark14Panel(QWidget):
             phase_label.setStyleSheet('font-size: 12px; font-weight: 600; color: #aee4d4; '
                                       'background: #254653; border-radius: 4px; padding: 2px;')
             card_header.addWidget(phase_label)
+            runtime_label = QLabel('선택 · 데이터·모델 준비 대기' if check.isChecked() else '미선택')
+            runtime_label.setStyleSheet('font-size: 12px; color: #a9c9d8; background: transparent; padding: 2px 0;')
+            runtime_label.setWordWrap(True)
+            self.runtime_labels[model] = runtime_label
             size_label = QLabel('1회 매수')
             size_label.setStyleSheet('font-size: 12px; color: #a9c9d8;')
             card_header.addWidget(size_label)
@@ -452,6 +458,7 @@ class Mark14Panel(QWidget):
                 field_layout.addWidget(value_label)
                 fields.append(field)
             card_layout.addLayout(detail_grid)
+            card_layout.addWidget(runtime_label)
             self._model_detail_rows.append((detail_grid, fields))
             choice_stack.addWidget(card)
             self.model_checks[model] = check
@@ -695,7 +702,7 @@ class ExternalFeedGroup:
             feed.close()
 
 
-class V00Window(WatchlistDialog):
+class V00Window(DesktopPreferencesMixin, WatchlistDialog):
     def __init__(self, service=None, store=None, *, builtin=True, predictors=None,
                  trigger=None, mark1_predictors=None, mark1_bundle=None,
                  mark11_predictors=None, mark11_bundle=None,
@@ -927,6 +934,25 @@ class V00Window(WatchlistDialog):
         self._preferences_timer = QTimer(self)
         self._preferences_timer.setSingleShot(True)
         self._preferences_timer.timeout.connect(self._save_preferences)
+        limits_row = QHBoxLayout()
+        self.symbol_exposure_percent = QDoubleSpinBox()
+        self.model_exposure_percent = QDoubleSpinBox()
+        for caption, field in (('종목별 총비중 한도', self.symbol_exposure_percent),
+                               ('모델별 총비중 한도', self.model_exposure_percent)):
+            field.setRange(0, 100)
+            field.setDecimals(2)
+            field.setSuffix(' %')
+            field.setSpecialValueText('제한 없음')
+            field.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            field.setMinimumHeight(32)
+            field.setAlignment(Qt.AlignmentFlag.AlignRight)
+            field.setAccessibleName(caption)
+            field.setToolTip('시장별 평가자산 기준. 보유 평가액과 미체결 매수 예약액을 합산합니다. 0은 제한 없음입니다.')
+            limits_row.addWidget(QLabel(caption))
+            limits_row.addWidget(field)
+            field.valueChanged.connect(self._model_buy_percent_changed)
+        limits_row.addStretch()
+        self.mark14_panel.layout().insertLayout(1, limits_row)
         self._restore_preferences()
         self._connect_preference_changes()
 
@@ -942,280 +968,10 @@ class V00Window(WatchlistDialog):
                 for model, field in self.mark14_panel.model_buy_percents.items()
                 if model not in MINUTE_HEDGE_IDS
             }
+        if hasattr(self, 'symbol_exposure_percent'):
+            self.engine.symbol_exposure_percent = Decimal(str(self.symbol_exposure_percent.value()))
+            self.engine.model_exposure_percent = Decimal(str(self.model_exposure_percent.value()))
 
-    def _capture_preferences(self):
-        # The random test producer temporarily rewrites these three controls.
-        # Keep the user's underlying connection choices, not that runtime mode.
-        connection = (self.external_mode.isChecked(), self.external_source.text(), self.signal_path.text())
-        if self.random_demo.isChecked() and hasattr(self, '_saved_external_config'):
-            connection = self._saved_external_config
-        geometry = self.normalGeometry() if self.isMaximized() else self.geometry()
-        return {
-            'version': 4,
-            'interval': self.interval.value(),
-            'hourly_ranking': self.hourly_ranking.isChecked(),
-            'exchange': self.exchange_input.currentData(),
-            'external_models': list(self._chosen_external_models()) if selected_mode(self.service) is TradingMode.DEMO else [],
-            'model_trigger': self._chosen_trigger(),
-            'external_mode': bool(connection[0]),
-            'external_source': connection[1],
-            'signal_path': connection[2],
-            'chart_path': self.chart_path.text(),
-            'external_quantity': self.external_quantity.value(),
-            'external_krw': self.external_krw.value(),
-            'external_usd': self.external_usd.value(),
-            'percent_sizing': True,
-            'buy_percent': self.buy_percent.value(),
-            'model_buy_percents': {model: field.value()
-                                   for model, field in self.mark14_panel.model_buy_percents.items()},
-            'order_popups': self.order_popups.isChecked(),
-            'additional_sources': [list(pair) for pair in self.additional_sources.raw_sources()],
-            'random_us': self.random_us.currentData(),
-            'watch_market_tab': self.watch_market_tabs.currentIndex(),
-            'workspace_tab': self.workspace_tabs.currentIndex(),
-            'workspace_tab_id': self._workspace_tab_id(),
-            'ai_subtab': ('performance' if self.signal_connection_page.currentWidget() is self.model_performance_panel
-                          else 'models'),
-            'advanced_tab': self.tabs.currentIndex(),
-            'advanced_visible': True,
-            'window_width': geometry.width(),
-            'window_height': geometry.height(),
-        }
-
-    def _save_preferences(self):
-        if getattr(self, '_loading_preferences', False):
-            return
-        try:
-            self.store.save_ui_preferences(self._capture_preferences())
-        except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
-            self.message.setText(f'화면 설정 저장 실패: {exc}')
-
-    def _workspace_tab_id(self):
-        pages = ((self.portfolio_panel, 'portfolio'), (self.order_history_panel, 'orders'),
-                 (self.trade_journal_panel, 'journal'), (self.watch_page, 'watch'),
-                 (self.signal_connection_page, 'ai'), (self.operations_panel, 'logs'),
-                 (self.tabs, 'advanced'))
-        return next((name for widget, name in pages
-                     if self.workspace_tabs.currentWidget() is widget), 'portfolio')
-
-    def _queue_save_preferences(self, *_):
-        if not getattr(self, '_loading_preferences', False):
-            self._preferences_timer.start(350)
-
-    def _model_buy_percent_changed(self, *_):
-        # Editing a model's order size changes its execution policy. Never
-        # mutate a live worker's sizing while a send may already be pending.
-        if self.monitoring or self.worker is not None or self.pending_auto_arm:
-            self.stop_monitoring()
-        self.engine.disarm()
-        self._apply_execution_preferences()
-        self._queue_save_preferences()
-
-    def _apply_bulk_model_buy_percent(self):
-        # A batch changes sizing once, including models currently unselected.
-        # Check live state as well as widget locks for programmatic invocation.
-        if (selected_mode(self.service) is not TradingMode.DEMO
-                or not self.external_panel.isEnabled()
-                or self.monitoring or self.worker is not None
-                or self._workspace_worker is not None or self.pending_auto_arm
-                or self._confirming_orders or self._pending_environment
-                or self._confirming_environment):
-            return
-        panel = self.mark14_panel
-        value = panel.bulk_buy_percent.value()
-        fields = [field for model, field in panel.model_buy_percents.items()
-                  if model not in MINUTE_HEDGE_IDS]
-        if all(field.value() == value for field in fields):
-            return
-        offset = panel.choices_scroll.verticalScrollBar().value()
-        for field in fields:
-            blocked = field.blockSignals(True)
-            try:
-                field.setValue(value)
-            finally:
-                field.blockSignals(blocked)
-        self.engine.disarm()
-        self._apply_execution_preferences()
-        self._queue_save_preferences()
-        QTimer.singleShot(0, lambda area=panel.choices_scroll, saved=offset:
-                          area.verticalScrollBar().setValue(saved))
-
-    def _connect_preference_changes(self):
-        for widget in (self.interval, self.external_quantity, self.external_krw,
-                       self.external_usd, self.buy_percent):
-            widget.valueChanged.connect(self._queue_save_preferences)
-        for field in self.mark14_panel.model_buy_percents.values():
-            field.valueChanged.connect(self._model_buy_percent_changed)
-        for widget in (self.hourly_ranking, self.external_mode, self.percent_sizing,
-                       self.order_popups, self.advanced_settings_button,
-                       *self.external_model_checks.values()):
-            widget.toggled.connect(self._queue_save_preferences)
-        for widget in (self.external_source, self.signal_path, self.chart_path):
-            widget.textChanged.connect(self._queue_save_preferences)
-        for widget in (self.exchange_input, self.model_trigger, self.random_us):
-            widget.currentIndexChanged.connect(self._queue_save_preferences)
-        for tabs in (self.watch_market_tabs, self.workspace_tabs, self.signal_connection_page, self.tabs):
-            tabs.currentChanged.connect(self._queue_save_preferences)
-        table = self.additional_sources.table
-        table.itemChanged.connect(self._queue_save_preferences)
-        table.model().rowsInserted.connect(self._queue_save_preferences)
-        table.model().rowsRemoved.connect(self._queue_save_preferences)
-
-    def _restore_preferences(self, *, after_switch=False):
-        try:
-            saved = self.store.load_ui_preferences()
-        except (OSError, sqlite3.Error) as exc:
-            self.message.setText(f'화면 설정 불러오기 실패 · 기본값 사용: {exc}')
-            saved = {}
-        defaults = {}
-        if after_switch:
-            folder = self.store.path.parent / 'exchange'
-            defaults = {
-                'interval': 30, 'hourly_ranking': True, 'exchange': '',
-                'external_models': (list(PROTOTYPE_NOTICES) if selected_mode(self.service) is TradingMode.DEMO
-                                    else []), 'model_trigger': 'none',
-                'external_mode': False, 'external_source': 'external-model',
-                'signal_path': str(folder / 'signals.json'), 'chart_path': str(folder / 'charts.json'),
-                'external_quantity': 999999999, 'external_krw': 0, 'external_usd': 0,
-                'percent_sizing': True, 'buy_percent': 10, 'order_popups': True,
-                'model_buy_percents': {},
-                'additional_sources': [], 'random_us': 'blocked',
-            }
-        choices = {**defaults, **saved}
-        self._loading_preferences = True
-        controls = (self.interval, self.hourly_ranking, self.exchange_input,
-                    self.model_trigger, self.external_mode, self.external_source, self.signal_path,
-                    self.chart_path, self.external_quantity, self.external_krw, self.external_usd,
-                    self.percent_sizing, self.buy_percent, self.order_popups, self.random_us,
-                    *self.external_model_checks.values(),
-                    *self.mark14_panel.model_buy_percents.values())
-        previous = [(widget, widget.blockSignals(True)) for widget in controls]
-        try:
-            def restore_int(key, widget):
-                value = choices.get(key)
-                if type(value) is int and widget.minimum() <= value <= widget.maximum():
-                    widget.setValue(value)
-
-            def restore_number(key, widget):
-                value = choices.get(key)
-                if (type(value) in (int, float) and widget.minimum() <= value <= widget.maximum()
-                        and isfinite(value)):
-                    widget.setValue(value)
-
-            def restore_bool(key, widget):
-                value = choices.get(key)
-                if type(value) is bool:
-                    widget.setChecked(value)
-
-            def restore_text(key, widget, limit):
-                value = choices.get(key)
-                if isinstance(value, str) and len(value) <= limit and not any(c in value for c in '\0\r\n'):
-                    widget.setText(value)
-
-            def restore_combo(key, widget):
-                value = choices.get(key)
-                if isinstance(value, str):
-                    index = widget.findData(value)
-                    if index >= 0:
-                        widget.setCurrentIndex(index)
-
-            for key, widget in (('interval', self.interval), ('external_quantity', self.external_quantity)):
-                restore_int(key, widget)
-            for key, widget in (('external_krw', self.external_krw), ('external_usd', self.external_usd),
-                                ('buy_percent', self.buy_percent)):
-                restore_number(key, widget)
-            model_sizing = choices.get('model_buy_percents')
-            if not isinstance(model_sizing, dict):
-                model_sizing = {}
-            for model, field in self.mark14_panel.model_buy_percents.items():
-                default_percent = 1 if model in MINUTE_TRANSFER_IDS else self.buy_percent.value()
-                value = model_sizing.get(model, default_percent)
-                if (type(value) in (int, float) and field.minimum() <= value <= field.maximum()
-                        and isfinite(value)):
-                    field.setValue(value)
-                else:
-                    field.setValue(default_percent)
-            for key, widget in (('hourly_ranking', self.hourly_ranking), ('external_mode', self.external_mode),
-                                ('order_popups', self.order_popups)):
-                restore_bool(key, widget)
-            self.percent_sizing.setChecked(True)
-            for key, widget, limit in (('external_source', self.external_source, 128),
-                                       ('signal_path', self.signal_path, 4096),
-                                       ('chart_path', self.chart_path, 4096)):
-                restore_text(key, widget, limit)
-            for key, widget in (('exchange', self.exchange_input), ('random_us', self.random_us)):
-                restore_combo(key, widget)
-            if self._restore_model_choices:
-                restore_combo('model_trigger', self.model_trigger)
-                enabled = choices.get('external_models')
-                if isinstance(enabled, list):
-                    allowed = set(enabled) & set(PROTOTYPE_NOTICES) if all(isinstance(v, str) for v in enabled) else set()
-                    # These models did not exist when a v2 selection held
-                    # older prototypes. Add them once without changing those
-                    # older choices. Explicitly empty or corrupt selections
-                    # remain OFF; v3 user choices are authoritative.
-                    if saved.get('version') == 2 and enabled and all(
-                            isinstance(value, str) and value in PROTOTYPE_NOTICES for value in enabled):
-                        allowed.update(PREOPEN_MODELS)
-                    for model, checkbox in self.external_model_checks.items():
-                        checkbox.setChecked(selected_mode(self.service) is TradingMode.DEMO and model in allowed)
-            if selected_mode(self.service) is TradingMode.REAL:
-                for checkbox in self.external_model_checks.values():
-                    checkbox.setChecked(False)
-            sources = choices.get('additional_sources')
-            if (isinstance(sources, list) and len(sources) <= 16
-                    and all(isinstance(row, list) and len(row) == 2
-                            and all(isinstance(value, str) and len(value) <= limit
-                                    and not any(c in value for c in '\0\r\n')
-                                    for value, limit in zip(row, (128, 4096))) for row in sources)):
-                self.additional_sources.table.setRowCount(0)
-                for source, path in sources:
-                    self.additional_sources.add_row(source=source, path=path)
-            for key, tabs in (('watch_market_tab', self.watch_market_tabs),
-                              ('advanced_tab', self.tabs)):
-                index = choices.get(key)
-                if type(index) is int and 0 <= index < tabs.count():
-                    tabs.setCurrentIndex(index)
-            ai_subtab = choices.get('ai_subtab')
-            if ai_subtab in ('models', 'performance'):
-                self.signal_connection_page.setCurrentWidget(
-                    self.model_performance_panel if ai_subtab == 'performance' else self.mark14_panel)
-            pages = {'portfolio': self.portfolio_panel, 'orders': self.order_history_panel,
-                     'journal': self.trade_journal_panel, 'watch': self.watch_page,
-                     'performance': self.signal_connection_page,
-                     'ai': self.signal_connection_page, 'logs': self.tabs,
-                     'advanced': self.tabs}
-            selected_page_id = choices.get('workspace_tab_id')
-            page = pages.get(selected_page_id)
-            if page is None and type(saved.get('workspace_tab')) is int:
-                legacy = ('portfolio', 'orders', 'journal', 'logs', 'watch',
-                          'performance', 'ai', 'advanced')
-                old_index = saved['workspace_tab']
-                selected_page_id = legacy[old_index] if 0 <= old_index < len(legacy) else None
-                page = pages.get(selected_page_id)
-            if selected_page_id == 'performance' and ai_subtab not in ('models', 'performance'):
-                self.signal_connection_page.setCurrentWidget(self.model_performance_panel)
-            if selected_page_id == 'logs':
-                self.tabs.setCurrentWidget(self.operations_panel)
-            if page is not None:
-                index = self.workspace_tabs.indexOf(page)
-                if index >= 0 and self.workspace_tabs.isTabVisible(index):
-                    self.workspace_tabs.setCurrentWidget(page)
-            width, height = choices.get('window_width'), choices.get('window_height')
-            if type(width) is int and type(height) is int and width >= 800 and height >= 520:
-                available = self.screen().availableGeometry() if self.screen() is not None else None
-                if available is not None:
-                    self.resize(min(width, max(self.minimumWidth(), available.width() - 24)),
-                                min(height, max(self.minimumHeight(), available.height() - 48)))
-        finally:
-            for widget, blocked in previous:
-                widget.blockSignals(blocked)
-            self._loading_preferences = False
-        self.mark14_panel._update_selection_count()
-        self._model_trigger_changed()
-        self._apply_execution_preferences()
-        self._update_connection()
-        self.update_controls()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1490,6 +1246,7 @@ class V00Window(WatchlistDialog):
                 cell.setToolTip(tip)
 
     def _refresh_model_scores(self):
+        self._update_model_runtime_states()
         if not hasattr(self, 'model_score_summary'):
             return
         for key in tuple(getattr(self, '_watch_rows', ())):
@@ -1507,6 +1264,7 @@ class V00Window(WatchlistDialog):
             self._refresh_model_scores()
         elif (current is self.signal_connection_page
               and self.signal_connection_page.currentWidget() is self.mark14_panel):
+            self._update_model_runtime_states()
             self._update_model_detail()
             self._update_latest_model_summary()
 
@@ -1531,6 +1289,7 @@ class V00Window(WatchlistDialog):
             panel.selected_result.setToolTip(
                 '완료 일봉만 학습·실제 완료 5분봉 추론. 점수는 분봉 적중확률이나 수익률이 아닙니다.\n'
                 + (f"최근 5분봉 {row.get('minute_bar_label', '—')} · 신호봉 {row.get('signal_bar_label', '—')}"
+                   + f"\n신호봉 경과 {row.get('signal_age_seconds', 0):.0f}초 · 조회·판단 처리 {row.get('processing_seconds', 0):.2f}초"
                    + (f"\n보류 이유: {row['error']}" if row.get('error') else '')
                    if row is not None else '해당 종목의 현재 분봉 판단은 아직 없습니다.'))
         elif model in MINUTE_HEDGE_IDS:
@@ -2102,6 +1861,7 @@ class V00Window(WatchlistDialog):
             self.engine.disarm()
             self.message.setText('prototype 외부 신호기는 모의투자 전용입니다. 실전 전환 전에 모든 모델 연결을 끄세요.')
             return
+        self._commit_buy_percent_edits()
         self._preferences_timer.stop()
         self._save_preferences()
         return super().request_environment(mode)
@@ -2162,12 +1922,37 @@ class V00Window(WatchlistDialog):
                 self.mark14_panel.clear_all_button.setEnabled(can_select)
                 self.mark14_panel.bulk_buy_percent.setEnabled(can_select)
                 self.mark14_panel.apply_bulk_buy_percent_button.setEnabled(can_select)
+                if hasattr(self, 'symbol_exposure_percent'):
+                    self.symbol_exposure_percent.setEnabled(can_select)
+                    self.model_exposure_percent.setEnabled(can_select)
                 for field in self.mark14_panel.model_buy_percents.values():
                     field.setEnabled(editing and selected_mode(self.service) is TradingMode.DEMO)
         self._sync_model_mode_controls()
 
+    def _update_model_runtime_states(self):
+        if not hasattr(self, 'mark14_panel') or not hasattr(self, 'external_model_checks'):
+            return
+        from dockdack.ui.model_runtime import model_runtime_state
+        for model, label in self.mark14_panel.runtime_labels.items():
+            feed = self._prototype_feeds.get(model)
+            label.setText(model_runtime_state(
+                selected=self.external_model_checks[model].isChecked(),
+                research=model in MINUTE_HEDGE_IDS,
+                ready=bool(getattr(feed, '_ready', False)),
+                orders_enabled=self.engine.orders_enabled))
+            metrics = getattr(feed, 'metrics', None)
+            tooltip = str(getattr(feed, 'status', '첫 조회 후 데이터와 모델을 확인합니다.'))
+            if metrics is not None:
+                tooltip += '\n' + metrics.summary()
+                counts = metrics.snapshot()['counts']
+                holds = sum(value for key, value in counts.items() if key.startswith('MINUTE_') and key != 'MINUTE_BUY_CANDIDATE')
+                blocked = counts.get('preflight_blocked', 0) + counts.get('final_send_blocked', 0)
+                tooltip += f'\n판단 보류 {holds}회 · 주문 전 재검증 보류 {blocked}회'
+            label.setToolTip(tooltip)
+
     def _update_connection(self):
         super()._update_connection()
+        self._update_model_runtime_states()
         if hasattr(self, 'model_status'):
             if hasattr(self, 'ai_model_count'):
                 count = len(self._chosen_external_models())
@@ -2294,6 +2079,7 @@ class V00Window(WatchlistDialog):
         return result
 
     def closeEvent(self, event):
+        self._commit_buy_percent_edits()
         self._preferences_timer.stop()
         self._save_preferences()
         super().closeEvent(event)
@@ -2378,7 +2164,6 @@ def main(argv=None):
     parser.add_argument('--env-file', type=Path, help='기존 키 설정 파일 경로 (복사하지 않음)')
     args = parser.parse_args(argv)
     from dotenv import load_dotenv
-    from dockdack.lstm30_runtime import SessionLock
     from dockdack.runtime_paths import app_home
     root = app_home()
     load_dotenv(args.env_file.expanduser() if args.env_file else root / '.env', override=False)
@@ -2394,7 +2179,8 @@ def main(argv=None):
         return 1
     base_folder = legacy.parent
     path = args.store.expanduser().resolve() if args.store else scoped_store_path(service, base_folder=base_folder)
-    lock = SessionLock(path.parent / 'session.lock')
+    from dockdack.session_guard import AccountSessionLock
+    lock = AccountSessionLock(path.parent / 'session.lock', service)
     try:
         lock.acquire()
     except RuntimeError as exc:

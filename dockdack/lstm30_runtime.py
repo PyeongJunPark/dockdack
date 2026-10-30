@@ -119,7 +119,8 @@ class DemoLSTMRuntime:
         self.checkpoint_paths = {key: str(Path(value).resolve()) for key, value in (checkpoint_paths or {}).items()}
         self.position_provider = position_provider or self._demo_position
         self.session_id, self.started_at = uuid4().hex, self.clock()
-        self.lock = SessionLock(self.root / "session.lock")
+        from dockdack.session_guard import AccountSessionLock
+        self.lock = AccountSessionLock(self.root / "session.lock", self.service)
         self._stop_event = Event()
         self._stop_watcher = None
         self._started = False

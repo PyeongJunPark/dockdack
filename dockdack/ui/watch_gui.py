@@ -306,7 +306,7 @@ class WatchlistDialog(QDialog):
             candidate_store = self._environment_stores.get(key)
             target = candidate_store.path if candidate_store is not None else scoped_store_path(
                 candidate, base_folder=self._environment_base)
-            candidate_lock = self._acquire_environment_lock(target)
+            candidate_lock = self._acquire_environment_lock(target, service=candidate)
             if candidate_store is None:
                 candidate_store = store_for_service(candidate, base_folder=self._environment_base)
                 self._environment_stores[key] = candidate_store
@@ -330,11 +330,12 @@ class WatchlistDialog(QDialog):
             self.update_controls()
         self._finish_environment_switch()
 
-    def _acquire_environment_lock(self, store_path):
+    def _acquire_environment_lock(self, store_path, service=None):
         path = (Path(store_path).parent / 'session.lock').resolve()
         if self._session_lock is not None and self._session_lock.path.resolve() == path:
             return self._session_lock
-        lock = SessionLock(path)
+        from dockdack.session_guard import AccountSessionLock
+        lock = AccountSessionLock(path, service or self.service, previous=self._session_lock)
         lock.acquire()  # Must succeed before opening or migrating the target DB.
         return lock
 
@@ -356,7 +357,7 @@ class WatchlistDialog(QDialog):
         service, store = self._pending_environment
         try:
             if self._pending_session_lock is None:
-                self._pending_session_lock = self._acquire_environment_lock(store.path)
+                self._pending_session_lock = self._acquire_environment_lock(store.path, service=service)
             for market in Market:
                 store.prune_ranked_extras(market)
             engine = AutoTrader(service, store)
@@ -602,6 +603,7 @@ class WatchlistDialog(QDialog):
         self.workspace_tabs.tabBar().setUsesScrollButtons(True)
         self.portfolio_panel = PortfolioPanel()
         self.portfolio_panel.request_refresh.connect(self.refresh_portfolio)
+        self.portfolio_panel.request_reconciliation.connect(self.refresh_reconciliation)
         self.order_history_panel = OrderHistoryPanel()
         self.order_history_panel.request_refresh.connect(self.refresh_executions)
         self.trade_journal_panel = DailyTradeJournalPanel(self.store)
@@ -1601,6 +1603,10 @@ class WatchlistDialog(QDialog):
         return targets
 
     @Slot()
+    def refresh_reconciliation(self):
+        self._fill_refresh_requested.set()
+        self.refresh_portfolio()
+
     def refresh_portfolio(self):
         self._portfolio_requested.set()
         if self.worker:
@@ -1610,6 +1616,8 @@ class WatchlistDialog(QDialog):
         def refresh(progress):
             previous = self.portfolio.snapshot()
             self._portfolio_requested.clear()
+            if self._fill_refresh_requested.is_set():
+                self._refresh_executions_worker(progress, force=True)
             payload = self.portfolio.refresh_due(force=True, stopped=self._account_stop.is_set)
             progress(('exit_targets', self._portfolio_exit_targets_worker(payload)))
             for market, state in payload.items():

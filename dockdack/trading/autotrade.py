@@ -120,6 +120,9 @@ class AutoTrader:
         # Trusted local GUI policy, keyed by validated external source ID.
         # Signal JSON cannot set or override these percentages.
         self.source_buy_percents = {}
+        self.symbol_exposure_percent = Decimal(0)
+        self.model_exposure_percent = Decimal(0)
+        self._exposure_checks = {}
         self.isolated_symbol_errors = False
         self.us_retry_attempts = 3
         self.us_failure_cooldown_seconds = 300
@@ -567,6 +570,7 @@ class AutoTrader:
                               f"순위 밖 종목 주문 확인 보류: {exc}", category="order")
 
     def _preflight(self, item: WatchItem, rule: TriggerRule, snapshot: MarketSnapshot):
+        self._exposure_checks.clear()
         self._lot_sellable_checks.pop(rule.id, None)
         self._historical_sell_checks.pop(rule.id, None)
         inst = item.instrument
@@ -606,6 +610,7 @@ class AutoTrader:
                         or not order.filled_quantity.is_finite() or order.filled_quantity < 0
                         or order.filled_quantity + order.remaining_quantity > order.order_quantity):
                     raise ValueError("다른 모델 미체결 주문의 종목·방향·수량 기록이 일치하지 않습니다.")
+        exposure_checked_at = self.clock()
         account = self.service.safety_account(inst)
         if self._stop.is_set():
             raise InterruptedError("사용자 중지 요청")
@@ -659,6 +664,18 @@ class AutoTrader:
         if rule.side is OrderSide.BUY and buy_percent is not None:
             policy = self._policy_for(rule) if rule.kind is TriggerKind.EXTERNAL else None
             cap = min(rule.max_notional, policy.cap(inst.market)) if policy else rule.max_notional
+            from dockdack.trading.exposure_limits import remaining_buy_budget
+            if self.model_exposure_percent and record and self._prototype_source_for(rule) is None:
+                raise ValueError('모델별 총비중 한도는 출처가 확인된 Mark1 모델에만 적용할 수 있습니다.')
+            exposure_budget = remaining_buy_budget(
+                self.store, account, item.id, record['source_id'] if record else None,
+                self.symbol_exposure_percent, self.model_exposure_percent)
+            if exposure_budget is not None:
+                cap = min(cap, exposure_budget / Decimal('1.01'))
+            if self.symbol_exposure_percent or self.model_exposure_percent:
+                self._exposure_checks[rule.id] = (
+                    exposure_checked_at, account, record['source_id'] if record else None,
+                    self.symbol_exposure_percent, self.model_exposure_percent, price or fresh.quote.price)
             if rule.kind is TriggerKind.EXTERNAL:
                 if record is not None and record["source_id"] == "mark1-8-prototype-demo-trigger":
                     if metadata.get("strategy_id") != "mark1-8-prototype" or "target_equity_fraction" not in metadata:
@@ -825,6 +842,18 @@ class AutoTrader:
     def _before_order_send(self, item, rule, fresh):
         """Final paced-send guard: local file/DB checks only, never broker I/O."""
         try:
+            if rule.side is OrderSide.BUY and (self.symbol_exposure_percent or self.model_exposure_percent):
+                from dockdack.trading.exposure_limits import remaining_buy_budget
+                checked = self._exposure_checks.pop(rule.id, None)
+                if checked is None or not 0 <= (self.clock() - checked[0]).total_seconds() <= 15:
+                    raise ValueError('합산 비중 확인이 없거나 잔고 확인 후 15초가 지나 주문을 보류합니다.')
+                stamp, account, source, symbol_limit, model_limit, unit_price = checked
+                if (symbol_limit, model_limit) != (self.symbol_exposure_percent, self.model_exposure_percent):
+                    raise ValueError('주문 준비 후 합산 비중 한도가 변경되었습니다.')
+                budget = remaining_buy_budget(self.store, account, item.id, source, symbol_limit, model_limit,
+                                              exclude_rule_id=rule.id)
+                if budget is not None and unit_price * rule.quantity * Decimal('1.01') > budget:
+                    raise ValueError('주문 직전 보유·예약 합산 비중 한도를 초과했습니다.')
             if self._stop.is_set() or not self.orders_enabled:
                 raise ValueError("사용자 중지/OFF 요청으로 전송하지 않음")
             self._ensure_environment(item.instrument, orders=True)

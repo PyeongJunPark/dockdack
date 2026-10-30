@@ -10,7 +10,7 @@ from typing import Mapping
 from PySide6.QtCore import QEvent, QItemSelectionModel, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton,
+    QCheckBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton, QPlainTextEdit,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -165,6 +165,7 @@ class PortfolioPanel(QWidget):
     """
 
     request_refresh = Signal()
+    request_reconciliation = Signal()
 
     def __init__(self, parent: QWidget | None = None, *, fx_fetcher=None):
         super().__init__(parent)
@@ -200,6 +201,7 @@ class PortfolioPanel(QWidget):
         self.detail_buttons: dict[Market, QPushButton] = {}
         self.summaries: dict[Market, QLabel] = {}
         self.reconciliation_labels: dict[Market, QLabel] = {}
+        self.reconciliation_buttons = {}
         self.market_labels: dict[Market, dict[str, QLabel]] = {}
         self._compact = False
         for market, title in ((Market.DOMESTIC, "한국 · KRW"), (Market.US, "미국 · USD")):
@@ -281,6 +283,12 @@ class PortfolioPanel(QWidget):
             reconciliation.hide()
             self.reconciliation_labels[market] = reconciliation
             page_layout.addWidget(reconciliation)
+            diagnose = QPushButton('장부 확인·복구 안내')
+            diagnose.setToolTip('불일치 원인과 매수 기록을 확인하고 체결 내역을 다시 조회합니다.')
+            diagnose.clicked.connect(lambda _checked=False, selected=market: self._show_reconciliation(selected))
+            diagnose.hide()
+            self.reconciliation_buttons[market] = diagnose
+            page_layout.addWidget(diagnose)
             self.tables[market] = self._make_table()
             page_layout.addWidget(self.tables[market], 1)
             self.market_tabs.addTab(page, title)
@@ -290,6 +298,27 @@ class PortfolioPanel(QWidget):
         self.market_tabs.currentChanged.connect(
             lambda _index: self._schedule_table_fit(self.current_market))
         self.apply({})
+
+    def _show_reconciliation(self, market):
+        from dockdack.trading.ledger_diagnostics import reconciliation_report
+        dialog = QDialog(self)
+        dialog.setWindowTitle('장부 확인·복구 안내')
+        dialog.resize(760, 480)
+        layout = QVBoxLayout(dialog)
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        details.setStyleSheet('QPlainTextEdit { background: #121f31; color: #e9f5ff; '
+                             'border: 1px solid #31536d; border-radius: 6px; padding: 12px; font-size: 14px; }')
+        details.setPlainText('\n\n'.join(
+            key + '\n' + reconciliation_report(target)
+            for key, target in getattr(self, '_exit_targets', {}).items()
+            if key.startswith(market.value + ':') and 'lots' in target and not target.get('reconciled')))
+        layout.addWidget(details)
+        refresh = QPushButton('체결·잔고 다시 조회')
+        refresh.setMinimumHeight(36)
+        refresh.clicked.connect(lambda: (dialog.accept(), self.request_reconciliation.emit()))
+        layout.addWidget(refresh)
+        dialog.exec()
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Resize:
@@ -633,6 +662,7 @@ class PortfolioPanel(QWidget):
                 rows.append((values, position, status, state.fetched_at))
             reconciliation = self.reconciliation_labels[market]
             reconciliation.setVisible(bool(unreconciled_positions))
+            self.reconciliation_buttons[market].setVisible(bool(unreconciled_positions))
             if unreconciled_positions:
                 reconciliation.setText(f'자동매도 보류 {len(unreconciled_positions)}종목 · 모델별 체결 근거 확인 필요')
                 reconciliation.setToolTip('\n'.join(

@@ -88,6 +88,8 @@ def holding_exit_targets(store, position, *, prototype_lots=False):
                              "take_profit_price": lot["take_profit_price"] if inventory["reconciled"] else None,
                              "stop_loss_price": lot["stop_loss_price"] if inventory["reconciled"] else None})
             return {"watch_id": key, "lots": tuple(lots), "reconciled": inventory["reconciled"],
+                    "expected_quantity": inventory.get('expected_quantity', sum((lot['quantity_remaining'] for lot in inventory['lots']), Decimal(0))),
+                    "broker_quantity": position.quantity,
                     "issues": inventory["issues"], "take_profit_price": None, "stop_loss_price": None,
                     "source": "모델별 분리 보유" if inventory["reconciled"] else "모델별 체결 대조 확인 필요"}
     from dockdack.signal_bridge import mark1_prototype_origin, prototype_family, prototype_record_family
